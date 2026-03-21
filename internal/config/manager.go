@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
@@ -15,11 +17,11 @@ import (
 type WorkerFactory func(ctx context.Context, pipelineID string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error)
 
 type ConfigManager struct {
-	kv            nats.KeyValue
-	factory       WorkerFactory
-	workers       map[string]engine.PipelineWorker
-	workersMu     sync.RWMutex
-	globalConfig  map[string]any
+	kv             nats.KeyValue
+	factory        WorkerFactory
+	workers        map[string]engine.PipelineWorker
+	workersMu      sync.RWMutex
+	globalConfig   map[string]any
 	globalConfigMu sync.RWMutex
 }
 
@@ -32,13 +34,11 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 }
 
 func (m *ConfigManager) Watch(ctx context.Context) error {
-	// 1. Watch global config
 	globalWatcher, err := m.kv.Watch("global.config")
 	if err != nil {
 		return fmt.Errorf("failed to watch global config: %w", err)
 	}
 
-	// 2. Watch pipeline configs
 	pipelineWatcher, err := m.kv.Watch("pipelines.*.config")
 	if err != nil {
 		return fmt.Errorf("failed to watch pipeline configs: %w", err)
@@ -69,7 +69,6 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
-			// Potentially trigger reload for all workers if global changes affect them
 		}
 	}
 }
@@ -84,12 +83,15 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			if entry == nil {
 				continue
 			}
+			log.Printf("Pipeline update received: %s (Op: %v)", entry.Key(), entry.Operation())
 			pipelineID := extractPipelineID(entry.Key())
 			if pipelineID == "" {
+				log.Printf("Failed to extract pipeline ID from key: %s", entry.Key())
 				continue
 			}
 
 			if entry.Operation() == nats.KeyValuePurge || entry.Operation() == nats.KeyValueDelete {
+				log.Printf("Pipeline %s deleted", pipelineID)
 				m.stopWorker(ctx, pipelineID)
 				continue
 			}
@@ -107,27 +109,30 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 
 func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg protocol.PipelineConfig) {
 	m.workersMu.Lock()
-	defer m.workersMu.Unlock()
-
 	oldWorker, exists := m.workers[id]
+	// Unlock immediately if we are going to start a worker or spawn a goroutine
+	m.workersMu.Unlock()
+
 	if exists {
 		log.Printf("Initiating two-phase transition for pipeline %s", id)
 		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig) {
-			// Phase 1: Drain
+			log.Printf("Transition Phase 1: Draining worker %s", id)
 			if err := w.Drain(); err != nil {
 				log.Printf("Error draining worker %s: %v", id, err)
 			}
-			// Wait for finished signal
 			<-w.Finished()
-			// Phase 2: Shutdown
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30) // Use a reasonable timeout
+			log.Printf("Transition Phase 1 Complete: Worker %s drained", id)
+
+			log.Printf("Transition Phase 2: Shutting down worker %s", id)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			w.Shutdown(shutdownCtx)
+			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
 
-			// Start new worker
 			m.startNewWorker(ctx, id, newCfg)
 		}(oldWorker, cfg)
 	} else {
+		log.Printf("Starting initial worker for pipeline %s", id)
 		m.startNewWorker(ctx, id, cfg)
 	}
 }
@@ -141,26 +146,32 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	m.workersMu.Lock()
 	m.workers[id] = newWorker
 	m.workersMu.Unlock()
-	log.Printf("Started new worker for pipeline %s", id)
+	log.Printf("Successfully started new worker for pipeline %s", id)
 }
 
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	m.workersMu.Lock()
-	defer m.workersMu.Unlock()
-	if w, ok := m.workers[id]; ok {
+	w, ok := m.workers[id]
+	if ok {
+		delete(m.workers, id)
+	}
+	m.workersMu.Unlock()
+
+	if ok {
 		log.Printf("Stopping pipeline %s", id)
 		w.Drain()
 		go func(worker engine.PipelineWorker) {
 			<-worker.Finished()
 			worker.Shutdown(context.Background())
 		}(w)
-		delete(m.workers, id)
 	}
 }
 
 func extractPipelineID(key string) string {
-	// key is pipelines.{id}.config
-	var id string
-	fmt.Sscanf(key, "pipelines.%s.config", &id)
+	if !strings.HasPrefix(key, "pipelines.") || !strings.HasSuffix(key, ".config") {
+		return ""
+	}
+	id := strings.TrimPrefix(key, "pipelines.")
+	id = strings.TrimSuffix(id, ".config")
 	return id
 }
