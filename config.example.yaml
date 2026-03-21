@@ -1,0 +1,31 @@
+# Daya Data Pipeline - Configuration Template
+# This file serves as a reference for the settings stored in NATS KV.
+
+# Global Defaults (Stored in NATS KV as 'global.config')
+global:
+  batch_size: 1000
+  batch_wait: 5s
+
+# Source Configurations (Stored in NATS KV as 'sources.{id}.config')
+sources:
+  - id: "postgres-primary"
+    type: "postgres"
+    host: "localhost"
+    port: 5432
+    user: "cdc_user"
+    pass: "your-encrypted-password" # The engine assumes this is handled/decrypted
+
+# Pipeline Configurations (Stored in NATS KV as 'pipelines.{id}.config')
+pipelines:
+  - id: "pipe-01"
+    name: "Main Data Sync"
+    sources: ["postgres-primary"]
+    sinks: ["databend-analytics"] # Sinks are pluggable (e.g., Databend)
+    tables:
+      - "users"
+      - "orders"
+      - "products"
+    
+    # Optional Overrides (If not set, global defaults are used)
+    batch_size: 2000
+    batch_wait: 10s
