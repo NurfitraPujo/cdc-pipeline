@@ -3,3 +3,5 @@ out/
 
 plans/
 .superpowers/
+
+web/node_modules/
