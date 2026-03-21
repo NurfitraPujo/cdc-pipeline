@@ -2,18 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/config"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
 )
 
@@ -50,30 +51,47 @@ func main() {
 
 	// Define Worker Factory
 	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		log.Printf("Factory creating worker for pipeline %s", id)
+		log.Printf("Factory creating worker for pipeline %s with config: %+v", id, cfg)
+		
+		// 1. Resolve Sources (For now, we assume the first source in the list)
+		if len(cfg.Sources) == 0 {
+			return nil, fmt.Errorf("no sources defined for pipeline %s", id)
+		}
+		
+		sourceID := cfg.Sources[0]
+		sourceKey := fmt.Sprintf("sources.%s.config", sourceID)
+		sourceEntry, err := kv.Get(sourceKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get source config for %s: %w", sourceID, err)
+		}
+		
+		var srcCfg protocol.SourceConfig
+		if err := json.Unmarshal(sourceEntry.Value(), &srcCfg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal source config %s: %w", sourceID, err)
+		}
 		
 		// 1. Initialize Source
-		src := postgres.NewPostgresSource("postgres-source")
+		src := postgres.NewPostgresSource(sourceID)
 		
 		// 2. Initialize Publisher/Subscriber
 		pub, err := nats.NewNatsPublisher(natsURL)
 		if err != nil {
 			return nil, err
 		}
-		sub, err := nats.NewNatsSubscriber(natsURL, "daya-worker-group")
+		sub, err := nats.NewNatsSubscriber(natsURL, fmt.Sprintf("daya-worker-%s", id))
 		if err != nil {
 			return nil, err
 		}
 		
-		// 3. Initialize Sink (Placeholder DSN)
+		// 3. Initialize Sink (Using default Databend for now, but should also be resolved from KV)
 		snk, err := databend.NewDatabendSink("databend-sink", "http://root:@localhost:8000")
 		if err != nil {
 			return nil, err
 		}
 		
-		// 4. Create Engine components
+		// 4. Create Engine components using overrides from merged cfg
 		prod := engine.NewProducer(id, src, pub, kv)
-		cons := engine.NewConsumer(id, sub, snk, kv, 1000, 5*time.Second)
+		cons := engine.NewConsumer(id, sub, snk, kv, cfg.BatchSize, cfg.BatchWait)
 		
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
 		
