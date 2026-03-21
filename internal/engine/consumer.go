@@ -3,12 +3,14 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
-	"github.com/ThreeDotsLabs/watermill/message"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 )
 
@@ -19,6 +21,9 @@ type Consumer struct {
 	pipelineID string
 	batchSize  int
 	batchWait  time.Duration
+	targetLSN  uint64
+	mu         sync.RWMutex
+	isDraining bool
 }
 
 func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration) *Consumer {
@@ -47,22 +52,17 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			return nil
 		}
 
-		// 1. Sink-side Deduplication & Batch Upload
-		// Sink implementation is responsible for idempotency
 		if err := c.sink.BatchUpload(ctx, batch); err != nil {
-			// NACK all messages in the batch for redelivery
 			for _, m := range wmMsgs {
 				m.Nack()
 			}
 			return fmt.Errorf("failed to upload batch to sink: %w", err)
 		}
 
-		// 2. ACK all messages on success
 		for _, m := range wmMsgs {
 			m.Ack()
 		}
 
-		// 3. Update Egress Checkpoint in NATS KV (for the last message in batch)
 		last := batch[len(batch)-1]
 		checkpoint := protocol.Checkpoint{
 			EgressLSN: last.LSN,
@@ -73,12 +73,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 		cpData, _ := checkpoint.MarshalMsg(nil)
 		key := fmt.Sprintf("pipelines.%s.sources.%s.tables.%s.egress_checkpoint", c.pipelineID, last.SourceID, last.Table)
 		if _, err := c.kv.Put(key, cpData); err != nil {
-			// Checkpoint update failure shouldn't trigger NACK if upload was successful, 
-			// but we should log it.
-			fmt.Printf("Warning: Failed to update egress checkpoint: %v\n", err)
+			log.Printf("Warning: Failed to update egress checkpoint: %v", err)
 		}
 
-		// Reset batch
 		batch = nil
 		wmMsgs = nil
 		if !timer.Stop() {
@@ -99,16 +96,18 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			if err := flush(); err != nil {
 				return err
 			}
+			if c.checkDrained(0) {
+				return nil
+			}
 		case wmMsg, ok := <-msgChan:
 			if !ok {
 				return nil
 			}
 
-			// 1. Deserialize from MessagePack
 			var m protocol.Message
 			if _, err := m.UnmarshalMsg(wmMsg.Payload); err != nil {
-				fmt.Printf("Error: Failed to unmarshal MessagePack payload: %v\n", err)
-				wmMsg.Nack() // Or Ack and DLQ?
+				log.Printf("Error: Failed to unmarshal MessagePack payload: %v", err)
+				wmMsg.Nack()
 				continue
 			}
 
@@ -119,7 +118,29 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				if err := flush(); err != nil {
 					return err
 				}
+				if c.checkDrained(m.LSN) {
+					return nil
+				}
 			}
 		}
 	}
+}
+
+func (c *Consumer) Drain(targetLSN uint64) {
+	c.mu.Lock()
+	c.targetLSN = targetLSN
+	c.isDraining = true
+	c.mu.Unlock()
+}
+
+func (c *Consumer) checkDrained(currentLSN uint64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.isDraining {
+		return false
+	}
+	if currentLSN >= c.targetLSN {
+		return true
+	}
+	return false
 }
