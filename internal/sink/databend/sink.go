@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
+
 	_ "github.com/datafuselabs/databend-go"
 	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
 )
@@ -31,29 +33,73 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 		return nil
 	}
 
-	// Assuming all messages in a batch belong to the same table for now
-	// If not, we should group them.
-	table := messages[0].Table
-
-	// 1. Prepare SQL Insert
-	// Databend supports INSERT INTO table (cols) VALUES (...), (...);
-	// We need to parse the payload to extract column values.
-	// This is highly dependent on how we want to handle schema evolution.
-	
-	// Example simplified logic:
+	// Group messages by table (spec says they should be same but let's be safe)
+	byTable := make(map[string][]protocol.Message)
 	for _, m := range messages {
+		byTable[m.Table] = append(byTable[m.Table], m)
+	}
+
+	for table, msgs := range byTable {
+		if err := s.uploadTableBatch(ctx, table, msgs); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// 1. Extract columns from the first message
+	var firstData map[string]any
+	if err := json.Unmarshal(messages[0].Payload, &firstData); err != nil {
+		return fmt.Errorf("failed to unmarshal first message: %w", err)
+	}
+
+	columns := make([]string, 0, len(firstData))
+	for k := range firstData {
+		columns = append(columns, k)
+	}
+
+	// 2. Build REPLACE INTO query
+	// REPLACE INTO table (col1, col2) ON (pk1) VALUES (...), (...)
+	// NOTE: We assume 'pk' is part of the columns and we'll use it in ON clause.
+	// For now, let's use the PK field from our protocol.Message if available.
+	
+	colList := strings.Join(columns, ", ")
+	
+	// We'll use "REPLACE INTO" which handles deduplication on unique keys/PKs
+	// Databend REPLACE INTO syntax: REPLACE INTO [db.]table [(c1, c2, ...)] ON (c1, [c2, ...]) VALUES (v1, v2, ...), ...
+	// For simplicity, let's assume the table has a unique key that matches the source PK.
+	
+	query := fmt.Sprintf("REPLACE INTO %s (%s) VALUES ", table, colList)
+	
+	valueStrings := make([]string, 0, len(messages))
+	valueArgs := make([]any, 0, len(messages)*len(columns))
+
+	for i, m := range messages {
 		var data map[string]any
 		if err := json.Unmarshal(m.Payload, &data); err != nil {
-			return fmt.Errorf("failed to unmarshal payload: %w", err)
+			return fmt.Errorf("failed to unmarshal message %d: %w", i, err)
 		}
-		
-		// 2. Perform Idempotent Insert
-		// Databend supports REPLACE INTO or unique constraints
-		// For now, let's assume simple INSERT and handle dedup elsewhere
-		
-		// TODO: Implement actual batched SQL execution
-		_ = table
-		_ = data
+
+		placeholders := make([]string, len(columns))
+		for j, col := range columns {
+			placeholders[j] = "?"
+			valueArgs = append(valueArgs, data[col])
+		}
+		valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
+	}
+
+	query += strings.Join(valueStrings, ", ")
+
+	// 3. Execute
+	_, err := s.db.ExecContext(ctx, query, valueArgs...)
+	if err != nil {
+		return fmt.Errorf("databend replace into failed: %w", err)
 	}
 
 	return nil
