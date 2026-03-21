@@ -11,7 +11,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
 
 type PostgresSource struct {

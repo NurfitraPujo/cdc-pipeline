@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill/message"
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
-	"github.com/fitrapujo/daya-data-pipeline/internal/sink"
-	"github.com/fitrapujo/daya-data-pipeline/internal/stream"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
 	"github.com/nats-io/nats.go"
 )
 

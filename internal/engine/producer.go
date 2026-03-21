@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
-	"github.com/fitrapujo/daya-data-pipeline/internal/source"
-	"github.com/fitrapujo/daya-data-pipeline/internal/stream"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
 	"github.com/nats-io/nats.go"
 )
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	_ "github.com/datafuselabs/databend-go"
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
 
 type DatabendSink struct {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 )
 

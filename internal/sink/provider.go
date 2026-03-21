@@ -2,7 +2,7 @@ package sink
 
 import (
 	"context"
-	"github.com/fitrapujo/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
 
 type Sink interface {
