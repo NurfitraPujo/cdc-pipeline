@@ -7,6 +7,134 @@ import (
 )
 
 // DecodeMsg implements msgp.Decodable
+func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "batch_size":
+			z.BatchSize, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
+		case "batch_wait":
+			z.BatchWait, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 2
+	// write "batch_size"
+	err = en.Append(0x82, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.BatchSize)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchSize")
+		return
+	}
+	// write "batch_wait"
+	err = en.Append(0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.BatchWait)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchWait")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z GlobalConfig) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 2
+	// string "batch_size"
+	o = append(o, 0x82, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = msgp.AppendInt(o, z.BatchSize)
+	// string "batch_wait"
+	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	o = msgp.AppendDuration(o, z.BatchWait)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *GlobalConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "batch_size":
+			z.BatchSize, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
+		case "batch_wait":
+			z.BatchWait, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z GlobalConfig) Msgsize() (s int) {
+	s = 1 + 11 + msgp.IntSize + 11 + msgp.DurationSize
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
 func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
@@ -93,6 +221,18 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 					return
 				}
 			}
+		case "batch_size":
+			z.BatchSize, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
+		case "batch_wait":
+			z.BatchWait, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -106,9 +246,9 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 5
+	// map header, size 7
 	// write "id"
-	err = en.Append(0x85, 0xa2, 0x69, 0x64)
+	err = en.Append(0x87, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -178,15 +318,35 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
+	// write "batch_size"
+	err = en.Append(0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.BatchSize)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchSize")
+		return
+	}
+	// write "batch_wait"
+	err = en.Append(0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.BatchWait)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchWait")
+		return
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 5
+	// map header, size 7
 	// string "id"
-	o = append(o, 0x85, 0xa2, 0x69, 0x64)
+	o = append(o, 0x87, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "name"
 	o = append(o, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
@@ -209,6 +369,12 @@ func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	for za0003 := range z.Tables {
 		o = msgp.AppendString(o, z.Tables[za0003])
 	}
+	// string "batch_size"
+	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = msgp.AppendInt(o, z.BatchSize)
+	// string "batch_wait"
+	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	o = msgp.AppendDuration(o, z.BatchWait)
 	return
 }
 
@@ -299,6 +465,18 @@ func (z *PipelineConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 					return
 				}
 			}
+		case "batch_size":
+			z.BatchSize, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
+		case "batch_wait":
+			z.BatchWait, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -325,6 +503,7 @@ func (z *PipelineConfig) Msgsize() (s int) {
 	for za0003 := range z.Tables {
 		s += msgp.StringPrefixSize + len(z.Tables[za0003])
 	}
+	s += 11 + msgp.IntSize + 11 + msgp.DurationSize
 	return
 }
 

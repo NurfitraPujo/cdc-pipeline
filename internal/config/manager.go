@@ -21,7 +21,7 @@ type ConfigManager struct {
 	factory        WorkerFactory
 	workers        map[string]engine.PipelineWorker
 	workersMu      sync.RWMutex
-	globalConfig   map[string]any
+	globalConfig   protocol.GlobalConfig
 	globalConfigMu sync.RWMutex
 }
 
@@ -30,6 +30,10 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 		kv:      kv,
 		factory: factory,
 		workers: make(map[string]engine.PipelineWorker),
+		globalConfig: protocol.GlobalConfig{
+			BatchSize: 1000,
+			BatchWait: 5 * time.Second,
+		},
 	}
 }
 
@@ -61,7 +65,7 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 				continue
 			}
 			log.Printf("Global config updated: %s", entry.Key())
-			var cfg map[string]any
+			var cfg protocol.GlobalConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
 				log.Printf("Error unmarshaling global config: %v", err)
 				continue
@@ -69,6 +73,10 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
+			
+			// Global config change might require restarting all workers to apply new defaults
+			// For now, we'll leave it to the user to trigger pipeline updates if needed,
+			// or we can implement a full reload.
 		}
 	}
 }
@@ -102,15 +110,29 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 				continue
 			}
 
+			// Apply hierarchy: Global Defaults -> Pipeline Overrides
+			m.applyHierarchy(&cfg)
+
 			m.transitionWorker(ctx, pipelineID, cfg)
 		}
+	}
+}
+
+func (m *ConfigManager) applyHierarchy(cfg *protocol.PipelineConfig) {
+	m.globalConfigMu.RLock()
+	defer m.globalConfigMu.RUnlock()
+
+	if cfg.BatchSize == 0 {
+		cfg.BatchSize = m.globalConfig.BatchSize
+	}
+	if cfg.BatchWait == 0 {
+		cfg.BatchWait = m.globalConfig.BatchWait
 	}
 }
 
 func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg protocol.PipelineConfig) {
 	m.workersMu.Lock()
 	oldWorker, exists := m.workers[id]
-	// Unlock immediately if we are going to start a worker or spawn a goroutine
 	m.workersMu.Unlock()
 
 	if exists {

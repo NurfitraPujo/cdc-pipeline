@@ -1,13 +1,22 @@
 package protocol
 
+import "time"
+
 //go:generate msgp
 
+type GlobalConfig struct {
+	BatchSize int           `msg:"batch_size"`
+	BatchWait time.Duration `msg:"batch_wait"`
+}
+
 type PipelineConfig struct {
-	ID      string   `msg:"id"`
-	Name    string   `msg:"name"`
-	Sources []string `msg:"sources"`
-	Sinks   []string `msg:"sinks"`
-	Tables  []string `msg:"tables"`
+	ID        string        `msg:"id"`
+	Name      string        `msg:"name"`
+	Sources   []string      `msg:"sources"`
+	Sinks     []string      `msg:"sinks"`
+	Tables    []string      `msg:"tables"`
+	BatchSize int           `msg:"batch_size"` // Override
+	BatchWait time.Duration `msg:"batch_wait"` // Override
 }
 
 type SourceConfig struct {
