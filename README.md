@@ -1,30 +1,40 @@
 # Daya Data Pipeline
 
-A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream.
+A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for reliability, zero-allocation efficiency, and reactive scalability.
 
-## Features
-- **Zero-Allocation Batching**: Optimized message handling for high throughput.
-- **Reliable Ingress**: Two-phase feedback loop with at-least-once delivery guarantees.
-- **Dynamic Configuration**: Reactive pipeline management via NATS KV (No restarts required).
-- **Graceful Transitions**: Safe two-phase reload protocol (Drain -> Resume).
-- **Real-time Monitoring**: SSE-based metrics for ingress and egress LSN tracking.
+## Core Features
+- **🚀 High-Performance Ingest**: Zero-allocation batching logic with MessagePack serialization.
+- **🛡️ Reliable Delivery**: Strict at-least-once guarantees via a two-phase ingress feedback loop (Postgres WAL only advances after NATS confirmation).
+- **⚙️ Dynamic Configuration**: Centralized, hierarchical configuration in NATS KV (Global Defaults > Pipeline Overrides).
+- **🔄 Graceful Transitions**: Automatic two-phase reload protocol (Drain -> Resume) for zero data loss during config updates.
+- **🚦 Dynamic Rate Limiting**: API-level protection to prevent concurrent pipeline restarts.
+- **📊 Real-time Monitoring**: Aggregated multi-table status tracking and SSE-based metrics.
+- **📚 Interactive Documentation**: Full Swagger/OpenAPI 2.0 integration.
 
 ---
 
 ## Architecture Overview
 
-The pipeline consists of three main components:
+The pipeline operates as a reactive distributed system:
 
-1.  **Control Plane (API)**: A REST API to manage pipeline and source configurations.
-2.  **Stateful Worker**: A reactive engine that watches NATS KV for config changes and orchestrates Producers/Consumers.
-3.  **NATS JetStream**: The persistent, high-performance messaging backbone.
+1.  **Control Plane (API)**: Manage configurations and monitor health.
+2.  **Stateful Worker**: Orchestrates Producers and Consumers. It bootstraps itself from an embedded config and reacts to KV changes.
+3.  **NATS JetStream**: The high-performance messaging backbone and persistent state store (`daya-dp-config` bucket).
 
-### The Lifecycle
-1.  **API POST**: Save a JSON config to NATS KV (`pipelines.{id}.config`).
-2.  **Worker Discovery**: `ConfigManager` detects the new key via a NATS Watcher.
-3.  **Reactive Factory**: The Worker resolves Source/Sink dependencies and starts the `Pipeline`.
-4.  **Producer (Postgres)**: Fetches WAL events and publishes batches to NATS.
-5.  **Consumer (Databend)**: Subscribes to the pipeline topic and performs idempotent `REPLACE INTO` uploads.
+### The Reactive Lifecycle
+1.  **Config Update**: User updates config via REST API.
+2.  **KV Trigger**: `ConfigManager` in the worker detects the change.
+3.  **Graceful Reload**: 
+    - **Phase 1**: Ingress (Producer) stops and returns the last processed LSN.
+    - **Phase 2**: Egress (Consumer) catches up to that LSN and commits to the Sink.
+4.  **Resumption**: A new worker instance starts precisely from the last known checkpoint.
+
+---
+
+## API Documentation
+
+Once the API server is running, access the interactive Swagger UI:
+👉 **[http://localhost:8080/swagger/index.html](http://localhost:8080/swagger/index.html)**
 
 ---
 
@@ -52,7 +62,8 @@ curl -X POST http://localhost:8080/api/v1/sources \
        "pass": "encrypted-pass",
        "database": "production_db",
        "slot_name": "daya_cdc_slot",
-       "publication_name": "daya_cdc_pub"
+       "publication_name": "daya_cdc_pub",
+       "batch_size": 100
      }'
 ```
 
@@ -67,35 +78,9 @@ curl -X POST http://localhost:8080/api/v1/pipelines \
        "sources": ["pg-primary"],
        "tables": ["users", "orders"],
        "batch_size": 1000,
-       "batch_wait": 5000000000
+       "batch_wait": "5s"
      }'
 ```
-
-### 4. Update Global Configuration
-```bash
-curl -X PUT http://localhost:8080/api/v1/global \
-     -H "Authorization: Bearer <TOKEN>" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "batch_size": 2000,
-       "batch_wait": 10000000000
-     }'
-```
-*Note: Updating global config triggers a graceful reload of all active pipelines.*
-
-### 5. Update a Pipeline
-```bash
-curl -X PUT http://localhost:8080/api/v1/pipelines/sync-01 \
-     -H "Authorization: Bearer <TOKEN>" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "name": "Updated Pipeline Name",
-       "sources": ["pg-primary"],
-       "tables": ["users", "orders", "new_table"],
-       "batch_size": 1500
-     }'
-```
-*Note: If a pipeline is already restarting, this will return 429 Too Many Requests.*
 
 ---
 
@@ -105,11 +90,6 @@ Get real-time status of all tables in a pipeline:
 curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/sync-01/status
 ```
 
-Or stream metrics via SSE:
-```bash
-curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/sync-01/metrics
-```
-
 ---
 
 ## Development
@@ -117,10 +97,11 @@ curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/s
 ### Prerequisites
 - Go 1.26.1
 - NATS Server with JetStream enabled (`nats-server -js`)
-- PostgreSQL (with logical replication enabled)
+- PostgreSQL (logical replication enabled)
 - Databend
 
 ### Running the Worker
+The worker automatically bootstraps NATS KV if empty.
 ```bash
 export NATS_URL="nats://localhost:4222"
 go run ./cmd/pipeline
