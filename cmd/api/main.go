@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 )

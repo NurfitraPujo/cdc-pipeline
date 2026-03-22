@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,7 +17,11 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
+	"gopkg.in/yaml.v3"
 )
+
+//go:embed config.example.yaml
+var defaultConfigFile []byte
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,6 +52,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to get or create KV bucket: %v", err)
 		}
+	}
+
+	// Bootstrap KV if empty
+	if err := bootstrapKV(kv); err != nil {
+		log.Printf("Warning: Failed to bootstrap KV: %v", err)
 	}
 
 	// Define Worker Factory
@@ -113,4 +123,49 @@ func main() {
 	log.Println("Daya Data Pipeline Worker started. Waiting for configuration...")
 	<-ctx.Done()
 	log.Println("Shutting down...")
+}
+
+func bootstrapKV(kv go_nats.KeyValue) error {
+	keys, err := kv.Keys()
+	// If bucket is not empty (err == nil and keys found), skip bootstrapping
+	if err == nil && len(keys) > 0 {
+		return nil
+	}
+
+	log.Println("KV bucket empty. Bootstrapping from embedded config.example.yaml...")
+
+	var seed struct {
+		Global    protocol.GlobalConfig     `yaml:"global"`
+		Sources   []protocol.SourceConfig   `yaml:"sources"`
+		Pipelines []protocol.PipelineConfig `yaml:"pipelines"`
+	}
+
+	if err := yaml.Unmarshal(defaultConfigFile, &seed); err != nil {
+		return fmt.Errorf("failed to unmarshal embedded config: %w", err)
+	}
+
+	// 1. Seed Global
+	globalData, _ := json.Marshal(seed.Global)
+	if _, err := kv.Put(protocol.KeyGlobalConfig, globalData); err != nil {
+		return fmt.Errorf("failed to seed global config: %w", err)
+	}
+
+	// 2. Seed Sources
+	for _, sc := range seed.Sources {
+		data, _ := json.Marshal(sc)
+		if _, err := kv.Put(protocol.SourceConfigKey(sc.ID), data); err != nil {
+			return fmt.Errorf("failed to seed source %s: %w", sc.ID, err)
+		}
+	}
+
+	// 3. Seed Pipelines
+	for _, pc := range seed.Pipelines {
+		data, _ := json.Marshal(pc)
+		if _, err := kv.Put(protocol.PipelineConfigKey(pc.ID), data); err != nil {
+			return fmt.Errorf("failed to seed pipeline %s: %w", pc.ID, err)
+		}
+	}
+
+	log.Println("Bootstrapping complete.")
+	return nil
 }
