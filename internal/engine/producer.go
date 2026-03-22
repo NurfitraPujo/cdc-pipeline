@@ -11,6 +11,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
@@ -39,6 +40,15 @@ func NewProducer(pipelineID string, src source.Source, pub stream.Publisher, kv 
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			log.Printf("Circuit Breaker [%s] changed from %s to %s", name, from, to)
+			
+			// Prometheus
+			stateVal := 0.0 // Closed
+			if to == gobreaker.StateOpen {
+				stateVal = 1.0
+			} else if to == gobreaker.StateHalfOpen {
+				stateVal = 2.0
+			}
+			metrics.CircuitBreakerState.WithLabelValues(pipelineID).Set(stateVal)
 		},
 	}
 

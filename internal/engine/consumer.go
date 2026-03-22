@@ -10,6 +10,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 )
@@ -72,6 +73,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				s.Status = "ERROR"
 				s.UpdatedAt = time.Now()
 				
+				// Prometheus
+				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
+
 				statsData, _ := s.MarshalMsg(nil)
 				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
 				// #nosec G104 -- non-critical stats update
@@ -123,14 +127,20 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				c.stats[key] = s
 			}
 			s.Status = "ACTIVE"
-			if count := countsByTable[key]; count > 0 {
-				s.TotalSynced += uint64(count)
+			count := uint64(countsByTable[key])
+			if count > 0 {
+				s.TotalSynced += count
+				// Prometheus
+				metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Add(float64(count))
 			}
 			s.LastSourceTS = m.Timestamp
 			s.LastProcessedTS = now
 			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
 			s.UpdatedAt = now
 			
+			// Prometheus Lag
+			metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
+
 			// Simple RPS calculation since last start
 			elapsed := now.Sub(startTime).Seconds()
 			if elapsed > 0 {

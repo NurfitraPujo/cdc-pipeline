@@ -8,13 +8,13 @@ import (
 	"sync"
 	"time"
 
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
 	"github.com/Trendyol/go-pq-cdc/pq/message/format"
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
 
 type PostgresSource struct {
@@ -113,7 +113,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	handler := func(lc *replication.ListenerContext) {
 		mu.Lock()
-		
+
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Insert:

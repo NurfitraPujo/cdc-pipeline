@@ -14,6 +14,7 @@ import (
 	_ "bitbucket.com/daya-engineering/daya-data-pipeline/docs"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
@@ -63,7 +64,7 @@ func main() {
 
 	r := gin.Default()
 
-	// Public Health Checks (for Kubernetes)
+	// Public Health Checks & Metrics (for Kubernetes)
 	r.GET("/healthz", func(c *gin.Context) {
 		c.String(http.StatusOK, "OK")
 	})
@@ -74,6 +75,7 @@ func main() {
 			c.String(http.StatusServiceUnavailable, "NATS NOT CONNECTED")
 		}
 	})
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 

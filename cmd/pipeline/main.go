@@ -15,10 +15,12 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/config"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -168,6 +170,9 @@ func main() {
 				if _, err := kv.Put(protocol.WorkerHeartbeatKey(workerID), data); err != nil {
 					log.Printf("Warning: Failed to update worker heartbeat: %v", err)
 				}
+				
+				// Prometheus
+				metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(t.Unix()))
 			}
 		}
 	}()
@@ -191,6 +196,7 @@ func main() {
 			_, _ = w.Write([]byte("NATS NOT CONNECTED"))
 		}
 	})
+	mux.Handle("/metrics", promhttp.Handler())
 
 	healthSrv := &http.Server{
 		Addr:              ":" + healthPort,
