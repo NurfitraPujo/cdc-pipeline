@@ -39,7 +39,7 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 
 func (m *ConfigManager) Watch(ctx context.Context) error {
 	// 1. Prime Global Config (Get latest if it exists)
-	if entry, err := m.kv.Get("global.config"); err == nil {
+	if entry, err := m.kv.Get(protocol.KeyGlobalConfig); err == nil {
 		var cfg protocol.GlobalConfig
 		if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
 			m.globalConfigMu.Lock()
@@ -50,12 +50,12 @@ func (m *ConfigManager) Watch(ctx context.Context) error {
 	}
 
 	// 2. Start Watchers
-	globalWatcher, err := m.kv.Watch("global.config")
+	globalWatcher, err := m.kv.Watch(protocol.KeyGlobalConfig)
 	if err != nil {
 		return fmt.Errorf("failed to watch global config: %w", err)
 	}
 
-	pipelineWatcher, err := m.kv.Watch("pipelines.*.config")
+	pipelineWatcher, err := m.kv.Watch(protocol.PrefixPipelineConfig + "*")
 	if err != nil {
 		return fmt.Errorf("failed to watch pipeline configs: %w", err)
 	}
@@ -202,10 +202,8 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 }
 
 func extractPipelineID(key string) string {
-	if !strings.HasPrefix(key, "pipelines.") || !strings.HasSuffix(key, ".config") {
+	if !strings.HasPrefix(key, protocol.PrefixPipelineConfig) {
 		return ""
 	}
-	id := strings.TrimPrefix(key, "pipelines.")
-	id = strings.TrimSuffix(id, ".config")
-	return id
+	return strings.TrimPrefix(key, protocol.PrefixPipelineConfig)
 }

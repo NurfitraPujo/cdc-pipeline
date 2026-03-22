@@ -71,7 +71,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			UpdatedAt: time.Now(),
 		}
 		cpData, _ := checkpoint.MarshalMsg(nil)
-		key := fmt.Sprintf("pipelines.%s.sources.%s.tables.%s.egress_checkpoint", c.pipelineID, last.SourceID, last.Table)
+		key := protocol.EgressCheckpointKey(c.pipelineID, last.SourceID, last.Table)
 		if _, err := c.kv.Put(key, cpData); err != nil {
 			log.Printf("Warning: Failed to update egress checkpoint: %v", err)
 		}

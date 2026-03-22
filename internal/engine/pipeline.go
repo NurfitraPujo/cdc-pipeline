@@ -58,7 +58,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		sourceID := p.config.Sources[0]
 		
 		// 1. Get Source Config
-		srcKey := fmt.Sprintf("sources.%s.config", sourceID)
+		srcKey := protocol.SourceConfigKey(sourceID)
 		entry, err := p.producer.kv.Get(srcKey)
 		if err != nil {
 			log.Printf("Failed to fetch source config %s: %v", sourceID, err)
@@ -76,7 +76,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		if len(p.config.Tables) > 0 {
 			table = p.config.Tables[0]
 		}
-		cpKey := fmt.Sprintf("pipelines.%s.sources.%s.tables.%s.ingress_checkpoint", p.id, sourceID, table)
+		cpKey := protocol.IngressCheckpointKey(p.id, sourceID, table)
 		cpEntry, err := p.producer.kv.Get(cpKey)
 		var cp protocol.Checkpoint
 		if err == nil {

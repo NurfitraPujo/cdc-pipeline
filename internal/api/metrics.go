@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
@@ -13,8 +12,7 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	pipelineID := c.Param("id")
 	
 	// Watch all ingress and egress checkpoints for this pipeline
-	// Key pattern: pipelines.{id}.sources.*.tables.*.*_checkpoint
-	pattern := fmt.Sprintf("pipelines.%s.sources.*.tables.*.*_checkpoint", pipelineID)
+	pattern := protocol.PipelineStatusPrefix(pipelineID) + "*"
 	watcher, err := h.kv.Watch(pattern)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})

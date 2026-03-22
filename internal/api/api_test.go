@@ -146,7 +146,8 @@ func TestAPI_Full(t *testing.T) {
 
 		pipeline := protocol.PipelineConfig{ID: "p1", Name: "Test"}
 		data, _ := json.Marshal(pipeline)
-		mockKV.On("Get", "pipelines.p1.config").Return(&mockKeyValueEntry{key: "pipelines.p1.config", value: data}, nil)
+		key := protocol.PipelineConfigKey("p1")
+		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
 
 		req, _ := http.NewRequest("GET", "/api/v1/pipelines/p1", nil)
 		req.Header.Set("Authorization", authHeader)
@@ -166,10 +167,11 @@ func TestAPI_Full(t *testing.T) {
 		token := getTestToken(t, router)
 		authHeader := "Bearer " + token
 
-		mockKV.On("Keys").Return([]string{"sources.s1.config"}, nil)
+		key := protocol.SourceConfigKey("s1")
+		mockKV.On("Keys").Return([]string{key}, nil)
 		source := protocol.SourceConfig{ID: "s1", Type: "postgres"}
 		data, _ := json.Marshal(source)
-		mockKV.On("Get", "sources.s1.config").Return(&mockKeyValueEntry{key: "sources.s1.config", value: data}, nil)
+		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
 
 		req, _ := http.NewRequest("GET", "/api/v1/sources", nil)
 		req.Header.Set("Authorization", authHeader)
@@ -190,7 +192,7 @@ func TestAPI_Full(t *testing.T) {
 		token := getTestToken(t, router)
 		authHeader := "Bearer " + token
 
-		key := "pipelines.p1.sources.s1.tables.t1.metadata"
+		key := "daya.pipeline.p1.sources.s1.tables.t1.metadata"
 		mockKV.On("Keys").Return([]string{key}, nil)
 		meta := protocol.TableMetadata{ID: "t1", Name: "users"}
 		data, _ := json.Marshal(meta)
@@ -211,7 +213,7 @@ func TestAPI_Full(t *testing.T) {
 
 	t.Run("Stream Metrics Call Verification", func(t *testing.T) {
 		mockKV := new(MockKV)
-		pattern := "pipelines.p1.sources.*.tables.*.*_checkpoint"
+		pattern := protocol.PipelineStatusPrefix("p1") + "*"
 		mockKV.On("Watch", pattern).Return(new(MockWatcher), nil)
 
 		// Just call the mock directly to verify the pattern used by StreamMetrics

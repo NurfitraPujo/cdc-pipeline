@@ -28,7 +28,7 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 
 	var pipelines []protocol.PipelineConfig
 	for _, key := range keys {
-		if strings.HasPrefix(key, "pipelines.") && strings.HasSuffix(key, ".config") {
+		if strings.HasPrefix(key, protocol.PrefixPipelineConfig) {
 			entry, err := h.kv.Get(key)
 			if err != nil {
 				continue
@@ -51,7 +51,7 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 	}
 
 	data, _ := json.Marshal(cfg)
-	key := fmt.Sprintf("pipelines.%s.config", cfg.ID)
+	key := protocol.PipelineConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -62,7 +62,7 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 
 func (h *Handler) GetPipeline(c *gin.Context) {
 	id := c.Param("id")
-	key := fmt.Sprintf("pipelines.%s.config", id)
+	key := protocol.PipelineConfigKey(id)
 	entry, err := h.kv.Get(key)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
@@ -87,7 +87,7 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	}
 
 	statusMap := make(map[string]protocol.Checkpoint)
-	prefix := fmt.Sprintf("pipelines.%s.sources.", id)
+	prefix := protocol.PipelineStatusPrefix(id)
 	for _, key := range keys {
 		if strings.HasPrefix(key, prefix) && (strings.HasSuffix(key, ".ingress_checkpoint") || strings.HasSuffix(key, ".egress_checkpoint")) {
 			entry, err := h.kv.Get(key)
@@ -113,7 +113,7 @@ func (h *Handler) ListSources(c *gin.Context) {
 
 	var sources []protocol.SourceConfig
 	for _, key := range keys {
-		if strings.HasPrefix(key, "sources.") && strings.HasSuffix(key, ".config") {
+		if strings.HasPrefix(key, protocol.PrefixSourceConfig) {
 			entry, err := h.kv.Get(key)
 			if err != nil {
 				continue
@@ -136,7 +136,7 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	}
 
 	data, _ := json.Marshal(cfg)
-	key := fmt.Sprintf("sources.%s.config", cfg.ID)
+	key := protocol.SourceConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -154,9 +154,7 @@ func (h *Handler) ListTables(c *gin.Context) {
 	}
 
 	var tables []protocol.TableMetadata
-	// Key pattern for metadata: pipelines.*.sources.{sourceID}.tables.*.metadata
-	// This might need refinement based on how metadata is stored.
-	// For now, let's search for keys containing the sourceID and ".metadata"
+	// Key pattern for metadata: daya.pipeline.*.sources.{sourceID}.tables.*.metadata
 	suffix := fmt.Sprintf(".sources.%s.tables.", sourceID)
 	for _, key := range keys {
 		if strings.Contains(key, suffix) && strings.HasSuffix(key, ".metadata") {

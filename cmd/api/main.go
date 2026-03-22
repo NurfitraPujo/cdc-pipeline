@@ -33,10 +33,10 @@ func main() {
 		log.Fatalf("Failed to get JetStream context: %v", err)
 	}
 
-	kv, err := js.KeyValue("config")
+	kv, err := js.KeyValue(protocol.KVBucketName)
 	if err != nil {
 		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket: "config",
+			Bucket: protocol.KVBucketName,
 		})
 		if err != nil {
 			log.Fatalf("Failed to get or create KV bucket: %v", err)

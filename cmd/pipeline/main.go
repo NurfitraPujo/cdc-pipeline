@@ -38,11 +38,11 @@ func main() {
 		log.Fatalf("Failed to get JetStream context: %v", err)
 	}
 
-	kv, err := js.KeyValue("config")
+	kv, err := js.KeyValue(protocol.KVBucketName)
 	if err != nil {
 		// Attempt to create bucket if it doesn't exist
 		kv, err = js.CreateKeyValue(&go_nats.KeyValueConfig{
-			Bucket: "config",
+			Bucket: protocol.KVBucketName,
 		})
 		if err != nil {
 			log.Fatalf("Failed to get or create KV bucket: %v", err)
@@ -59,7 +59,7 @@ func main() {
 		}
 		
 		sourceID := cfg.Sources[0]
-		sourceKey := fmt.Sprintf("sources.%s.config", sourceID)
+		sourceKey := protocol.SourceConfigKey(sourceID)
 		sourceEntry, err := kv.Get(sourceKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get source config for %s: %w", sourceID, err)

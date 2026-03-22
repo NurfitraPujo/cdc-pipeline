@@ -1,8 +1,45 @@
 package protocol
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 //go:generate msgp
+
+// NATS KV Constants
+const (
+	KVBucketName = "daya-dp-config"
+
+	// Configuration Keys
+	KeyGlobalConfig      = "daya.config.global"
+	PrefixPipelineConfig = "daya.config.pipelines."
+	PrefixSourceConfig   = "daya.config.sources."
+
+	// Operational/State Keys
+	PrefixPipelineState = "daya.pipeline."
+)
+
+// Helper functions for key construction
+func PipelineConfigKey(id string) string {
+	return PrefixPipelineConfig + id
+}
+
+func SourceConfigKey(id string) string {
+	return PrefixSourceConfig + id
+}
+
+func IngressCheckpointKey(pid, sid, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.ingress_checkpoint", PrefixPipelineState, pid, sid, table)
+}
+
+func EgressCheckpointKey(pid, sid, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, table)
+}
+
+func PipelineStatusPrefix(pid string) string {
+	return fmt.Sprintf("%s%s.sources.", PrefixPipelineState, pid)
+}
 
 type GlobalConfig struct {
 	BatchSize int           `msg:"batch_size"`

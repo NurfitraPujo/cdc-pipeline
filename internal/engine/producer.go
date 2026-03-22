@@ -77,7 +77,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				checkpoint.Status = "ACTIVE"
 				
 				cpData, _ := checkpoint.MarshalMsg(nil)
-				key := fmt.Sprintf("pipelines.%s.sources.%s.tables.%s.ingress_checkpoint", p.pipelineID, lastM.SourceID, lastM.Table)
+				key := protocol.IngressCheckpointKey(p.pipelineID, lastM.SourceID, lastM.Table)
 				if _, err := p.kv.Put(key, cpData); err != nil {
 					log.Printf("Warning: Failed to update ingress checkpoint: %v", err)
 				}
