@@ -126,3 +126,4 @@ export NATS_URL="nats://localhost:4222"
 export PORT="8080"
 go run ./cmd/api
 ```
+*Note: The API also exposes `/healthz` and `/readyz` on `:8080`.*

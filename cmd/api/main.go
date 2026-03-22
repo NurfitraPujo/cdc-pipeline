@@ -62,6 +62,18 @@ func main() {
 
 	r := gin.Default()
 
+	// Public Health Checks (for Kubernetes)
+	r.GET("/healthz", func(c *gin.Context) {
+		c.String(http.StatusOK, "OK")
+	})
+	r.GET("/readyz", func(c *gin.Context) {
+		if nc.Status() == nats.CONNECTED {
+			c.String(http.StatusOK, "READY")
+		} else {
+			c.String(http.StatusServiceUnavailable, "NATS NOT CONNECTED")
+		}
+	})
+
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	v1 := r.Group("/api/v1")
