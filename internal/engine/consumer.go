@@ -59,6 +59,26 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 		}
 
 		if err := c.sink.BatchUpload(ctx, batch); err != nil {
+			// Update error counts for all tables in the failed batch
+			c.statsMu.Lock()
+			for _, m := range batch {
+				key := m.SourceID + "." + m.Table
+				s, ok := c.stats[key]
+				if !ok {
+					s = &protocol.TableStats{Status: "ERROR"}
+					c.stats[key] = s
+				}
+				s.ErrorCount++
+				s.Status = "ERROR"
+				s.UpdatedAt = time.Now()
+				
+				statsData, _ := s.MarshalMsg(nil)
+				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+				// #nosec G104 -- non-critical stats update
+				c.kv.Put(statsKey, statsData)
+			}
+			c.statsMu.Unlock()
+
 			for _, m := range wmMsgs {
 				m.Nack()
 			}
