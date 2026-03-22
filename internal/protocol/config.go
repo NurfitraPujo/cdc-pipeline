@@ -117,10 +117,13 @@ type SourceConfig struct {
 	SlotName        string `msg:"slot_name" yaml:"slot_name" json:"slot_name"`
 	PublicationName string `msg:"publication_name" yaml:"publication_name" json:"publication_name"`
 	BatchSize       int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
-	BatchWait       time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
+	BatchWait         time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
 	DiscoveryInterval time.Duration `msg:"disc_int" yaml:"discovery_interval" json:"discovery_interval" swaggertype:"string" example:"30s"`
-	Schemas         []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
-}
+	SnapshotChunkSize int           `msg:"snap_size" yaml:"snapshot_chunk_size" json:"snapshot_chunk_size"`
+	SnapshotInterval  time.Duration `msg:"snap_int" yaml:"snapshot_interval" json:"snapshot_interval" swaggertype:"string" example:"1s"`
+	Schemas           []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
+	}
+
 
 func (s SourceConfig) Validate() error {
 	return validation.ValidateStruct(&s,

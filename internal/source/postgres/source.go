@@ -64,7 +64,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	msgs := make([]protocol.Message, 0, batchSize)
 	knownTables := make(map[string]bool)
 
-	// --- 1. Initialize DB Connection for Discovery & Type Resolution ---
+	// Initialize DB Connection for Discovery & Type Resolution
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		srcConfig.User, srcConfig.PassEncrypted, srcConfig.Host, srcConfig.Port, srcConfig.Database)
 	db, err := sql.Open("pgx", dsn)
@@ -73,7 +73,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		return nil, nil, fmt.Errorf("failed to open DB connection: %w", err)
 	}
 
-	// Prime OID Cache
 	if err := s.primeOIDCache(ctx, db); err != nil {
 		log.Printf("Warning: Failed to prime OID cache: %v", err)
 	}
@@ -144,8 +143,9 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			CreateIfNotExists: true,
 		},
 		Snapshot: config.SnapshotConfig{
-			Enabled: checkpoint.IngressLSN == 0,
-			Mode:    config.SnapshotModeInitial,
+			Enabled:   checkpoint.IngressLSN == 0,
+			Mode:      config.SnapshotModeInitial,
+			ChunkSize: int64(srcConfig.SnapshotChunkSize),
 		},
 	}
 
@@ -246,7 +246,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		}
 
 		if err := lc.Ack(); err != nil {
-			log.Printf("Warning: Failed to ack LSN: %v", err)
+			log.Printf("Warning: Failed to ack: %v", err)
 		}
 	}
 
@@ -319,6 +319,8 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 				mu.Lock()
 				if !known[fullKey] {
 					log.Printf("Poller: Discovered table %s", fullKey)
+					known[fullKey] = true
+					
 					m := protocol.Message{
 						SourceID:  srcConfig.ID,
 						Table:     tableName,
@@ -329,7 +331,6 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 							Schema: schema,
 						},
 					}
-					// Flush if needed
 					if len(*msgs) > 0 {
 						mu.Unlock()
 						flush()
@@ -339,7 +340,6 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 					mu.Unlock()
 					flush()
 					mu.Lock()
-					known[fullKey] = true
 				}
 				mu.Unlock()
 			}
