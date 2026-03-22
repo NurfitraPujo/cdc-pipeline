@@ -195,8 +195,12 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			if err := w.Drain(); err != nil {
 				log.Printf("Error draining worker %s: %v", id, err)
 			}
-			<-w.Finished()
-			log.Printf("Transition Phase 1 Complete: Worker %s drained", id)
+			select {
+			case <-w.Finished():
+				log.Printf("Transition Phase 1 Complete: Worker %s drained", id)
+			case <-time.After(10 * time.Second):
+				log.Printf("Warning: Drain timed out for worker %s, forcing shutdown", id)
+			}
 
 			log.Printf("Transition Phase 2: Shutting down worker %s", id)
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -205,6 +209,9 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 				log.Printf("Error shutting down worker %s: %v", id, err)
 			}
 			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
+
+			// Add a small buffer to ensure external resources (like replication slots) are released
+			time.Sleep(2 * time.Second)
 
 			m.startNewWorker(ctx, id, newCfg)
 			

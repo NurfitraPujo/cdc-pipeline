@@ -17,19 +17,19 @@ import (
 )
 
 type Consumer struct {
+	pipelineID string
 	subscriber stream.Subscriber
 	sink       sink.Sink
 	kv         nats.KeyValue
-	pipelineID string
 	batchSize  int
 	batchWait  time.Duration
-	targetLSN  uint64
+	stats      map[string]*protocol.TableStats
+	statsMu    sync.Mutex
+
+	// Drain control
 	mu         sync.RWMutex
 	isDraining bool
-
-	// Monitoring
-	statsMu sync.Mutex
-	stats   map[string]*protocol.TableStats
+	targetLSN  uint64
 }
 
 func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration) *Consumer {
@@ -69,7 +69,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 	var batch []protocol.Message
 	var wmMsgs []*message.Message
 	timer := time.NewTimer(c.batchWait)
-	startTime := time.Now()
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -77,7 +76,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 		}
 
 		if err := c.sink.BatchUpload(ctx, batch); err != nil {
-			// Update error counts for all tables in the failed batch
 			c.statsMu.Lock()
 			for _, m := range batch {
 				key := m.SourceID + "." + m.Table
@@ -90,12 +88,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				s.Status = "ERROR"
 				s.UpdatedAt = time.Now()
 				
-				// Prometheus
 				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
-
 				statsData, _ := s.MarshalMsg(nil)
 				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
-				// #nosec G104 -- non-critical stats update
 				c.kv.Put(statsKey, statsData)
 			}
 			c.statsMu.Unlock()
@@ -110,7 +105,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			m.Ack()
 		}
 
-		// Update checkpoints AND stats for all tables affected in this batch
 		c.statsMu.Lock()
 		defer c.statsMu.Unlock()
 
@@ -124,7 +118,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 		now := time.Now()
 		for key, m := range latestByTable {
-			// 1. Update Checkpoint
 			checkpoint := protocol.Checkpoint{
 				EgressLSN: m.LSN,
 				LastPK:    m.PK,
@@ -137,7 +130,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				return fmt.Errorf("failed to update egress checkpoint: %w", err)
 			}
 
-			// 2. Update Stats
 			s, ok := c.stats[key]
 			if !ok {
 				s = &protocol.TableStats{Status: "ACTIVE"}
@@ -147,7 +139,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			count := uint64(countsByTable[key])
 			if count > 0 {
 				s.TotalSynced += count
-				// Prometheus
 				metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Add(float64(count))
 			}
 			s.LastSourceTS = m.Timestamp
@@ -155,14 +146,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
 			s.UpdatedAt = now
 			
-			// Prometheus Lag
 			metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
-
-			// Simple RPS calculation since last start
-			elapsed := now.Sub(startTime).Seconds()
-			if elapsed > 0 {
-				s.RPS = float64(s.TotalSynced) / elapsed
-			}
 
 			statsData, _ := s.MarshalMsg(nil)
 			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
@@ -201,34 +185,44 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			var batchFromNats []protocol.Message
 			if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &batchFromNats); err != nil {
-				log.Printf("Error: Failed to unmarshal MessagePack batch payload: %v", err)
+				log.Printf("Consumer [%s]: Failed to unmarshal batch: %v", c.pipelineID, err)
 				wmMsg.Nack()
 				continue
 			}
 
 			for _, m := range batchFromNats {
+				if m.Op == "drain_marker" {
+					if err := flush(); err != nil {
+						return err
+					}
+					wmMsg.Ack()
+					return nil
+				}
+
 				if m.Op == "schema_change" && m.Schema != nil {
-					// Apply Schema Change to Sink
 					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
 						log.Printf("Error applying schema change for %s: %v", m.Table, err)
 						wmMsg.Nack()
 						return fmt.Errorf("failed to apply schema change: %w", err)
 					}
-					// Schema applied, continue to data processing
 				}
 
 				batch = append(batch, m)
-				if len(batch) >= c.batchSize {
+				if len(batch) >= c.batchSize || m.Op == "schema_change" || m.Op == "delete" {
+					wmMsgs = append(wmMsgs, wmMsg)
 					if err := flush(); err != nil {
 						return err
 					}
 					if c.checkDrained(m.LSN) {
-						wmMsg.Ack()
 						return nil
 					}
+					wmMsgs = nil 
+					continue
 				}
 			}
-			wmMsgs = append(wmMsgs, wmMsg)
+			if wmMsg != nil {
+				wmMsgs = append(wmMsgs, wmMsg)
+			}
 		}
 	}
 }
@@ -246,7 +240,7 @@ func (c *Consumer) checkDrained(currentLSN uint64) bool {
 	if !c.isDraining {
 		return false
 	}
-	if currentLSN >= c.targetLSN {
+	if currentLSN >= c.targetLSN && c.targetLSN > 0 {
 		return true
 	}
 	return false

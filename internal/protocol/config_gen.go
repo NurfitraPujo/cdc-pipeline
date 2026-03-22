@@ -744,6 +744,24 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "disc_int":
+			z.DiscoveryInterval, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "DiscoveryInterval")
+				return
+			}
+		case "snap_size":
+			z.SnapshotChunkSize, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotChunkSize")
+				return
+			}
+		case "snap_int":
+			z.SnapshotInterval, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotInterval")
+				return
+			}
 		case "schemas":
 			var zb0002 uint32
 			zb0002, err = dc.ReadArrayHeader()
@@ -763,6 +781,25 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 					return
 				}
 			}
+		case "tables":
+			var zb0003 uint32
+			zb0003, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Tables")
+				return
+			}
+			if cap(z.Tables) >= int(zb0003) {
+				z.Tables = (z.Tables)[:zb0003]
+			} else {
+				z.Tables = make([]string, zb0003)
+			}
+			for za0002 := range z.Tables {
+				z.Tables[za0002], err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Tables", za0002)
+					return
+				}
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -776,9 +813,9 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 12
+	// map header, size 16
 	// write "id"
-	err = en.Append(0x8c, 0xa2, 0x69, 0x64)
+	err = en.Append(0xde, 0x0, 0x10, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -887,6 +924,36 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "BatchWait")
 		return
 	}
+	// write "disc_int"
+	err = en.Append(0xa8, 0x64, 0x69, 0x73, 0x63, 0x5f, 0x69, 0x6e, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.DiscoveryInterval)
+	if err != nil {
+		err = msgp.WrapError(err, "DiscoveryInterval")
+		return
+	}
+	// write "snap_size"
+	err = en.Append(0xa9, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.SnapshotChunkSize)
+	if err != nil {
+		err = msgp.WrapError(err, "SnapshotChunkSize")
+		return
+	}
+	// write "snap_int"
+	err = en.Append(0xa8, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x69, 0x6e, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.SnapshotInterval)
+	if err != nil {
+		err = msgp.WrapError(err, "SnapshotInterval")
+		return
+	}
 	// write "schemas"
 	err = en.Append(0xa7, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x73)
 	if err != nil {
@@ -904,15 +971,32 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
+	// write "tables"
+	err = en.Append(0xa6, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.Tables)))
+	if err != nil {
+		err = msgp.WrapError(err, "Tables")
+		return
+	}
+	for za0002 := range z.Tables {
+		err = en.WriteString(z.Tables[za0002])
+		if err != nil {
+			err = msgp.WrapError(err, "Tables", za0002)
+			return
+		}
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 12
+	// map header, size 16
 	// string "id"
-	o = append(o, 0x8c, 0xa2, 0x69, 0x64)
+	o = append(o, 0xde, 0x0, 0x10, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -944,11 +1028,26 @@ func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "batch_wait"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
 	o = msgp.AppendDuration(o, z.BatchWait)
+	// string "disc_int"
+	o = append(o, 0xa8, 0x64, 0x69, 0x73, 0x63, 0x5f, 0x69, 0x6e, 0x74)
+	o = msgp.AppendDuration(o, z.DiscoveryInterval)
+	// string "snap_size"
+	o = append(o, 0xa9, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = msgp.AppendInt(o, z.SnapshotChunkSize)
+	// string "snap_int"
+	o = append(o, 0xa8, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x69, 0x6e, 0x74)
+	o = msgp.AppendDuration(o, z.SnapshotInterval)
 	// string "schemas"
 	o = append(o, 0xa7, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x73)
 	o = msgp.AppendArrayHeader(o, uint32(len(z.Schemas)))
 	for za0001 := range z.Schemas {
 		o = msgp.AppendString(o, z.Schemas[za0001])
+	}
+	// string "tables"
+	o = append(o, 0xa6, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.Tables)))
+	for za0002 := range z.Tables {
+		o = msgp.AppendString(o, z.Tables[za0002])
 	}
 	return
 }
@@ -1037,6 +1136,24 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "disc_int":
+			z.DiscoveryInterval, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "DiscoveryInterval")
+				return
+			}
+		case "snap_size":
+			z.SnapshotChunkSize, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotChunkSize")
+				return
+			}
+		case "snap_int":
+			z.SnapshotInterval, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotInterval")
+				return
+			}
 		case "schemas":
 			var zb0002 uint32
 			zb0002, bts, err = msgp.ReadArrayHeaderBytes(bts)
@@ -1056,6 +1173,25 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 					return
 				}
 			}
+		case "tables":
+			var zb0003 uint32
+			zb0003, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Tables")
+				return
+			}
+			if cap(z.Tables) >= int(zb0003) {
+				z.Tables = (z.Tables)[:zb0003]
+			} else {
+				z.Tables = make([]string, zb0003)
+			}
+			for za0002 := range z.Tables {
+				z.Tables[za0002], bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Tables", za0002)
+					return
+				}
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -1070,9 +1206,13 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *SourceConfig) Msgsize() (s int) {
-	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize + 11 + msgp.DurationSize + 8 + msgp.ArrayHeaderSize
+	s = 3 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize + 11 + msgp.DurationSize + 9 + msgp.DurationSize + 10 + msgp.IntSize + 9 + msgp.DurationSize + 8 + msgp.ArrayHeaderSize
 	for za0001 := range z.Schemas {
 		s += msgp.StringPrefixSize + len(z.Schemas[za0001])
+	}
+	s += 7 + msgp.ArrayHeaderSize
+	for za0002 := range z.Tables {
+		s += msgp.StringPrefixSize + len(z.Tables[za0002])
 	}
 	return
 }

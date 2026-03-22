@@ -20,10 +20,10 @@ func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(10*time.Second)),
+				WithStartupTimeout(30*time.Second)),
 		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{
-				Cmd: []string{"postgres", "-c", "wal_level=logical"},
+				Cmd: []string{"-c", "wal_level=logical"},
 			},
 		}),
 	)
@@ -32,7 +32,11 @@ func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 func StartNats(ctx context.Context) (*nats.NATSContainer, error) {
 	return nats.Run(ctx,
 		"nats:2.10-alpine",
-		nats.WithJetStream(),
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Cmd: []string{"-js"},
+			},
+		}),
 	)
 }
 
@@ -40,8 +44,8 @@ func StartDatabend(ctx context.Context) (testcontainers.Container, string, error
 	req := testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "datafuselabs/databend:latest",
-			ExposedPorts: []string{"8000/tcp", "3307/tcp"},
-			Wait:         wait.ForHTTP("/v1/health").WithPort("8000"),
+			ExposedPorts: []string{"8000/tcp"},
+			WaitingFor:   wait.ForListeningPort("8000/tcp").WithStartupTimeout(2 * time.Minute),
 		},
 		Started: true,
 	}
@@ -52,7 +56,7 @@ func StartDatabend(ctx context.Context) (testcontainers.Container, string, error
 
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, "8000")
-	// Databend DSN format for databend-go: http://root:root@localhost:8000
+	// Databend DSN format for databend-go: http://root:@localhost:8000
 	dsn := fmt.Sprintf("http://root:@%s:%s", host, port.Port())
 	return c, dsn, nil
 }

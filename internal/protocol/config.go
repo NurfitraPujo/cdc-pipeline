@@ -122,8 +122,8 @@ type SourceConfig struct {
 	SnapshotChunkSize int           `msg:"snap_size" yaml:"snapshot_chunk_size" json:"snapshot_chunk_size"`
 	SnapshotInterval  time.Duration `msg:"snap_int" yaml:"snapshot_interval" json:"snapshot_interval" swaggertype:"string" example:"1s"`
 	Schemas           []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
+	Tables            []string      `msg:"tables" yaml:"tables" json:"tables"`
 	}
-
 
 func (s SourceConfig) Validate() error {
 	return validation.ValidateStruct(&s,

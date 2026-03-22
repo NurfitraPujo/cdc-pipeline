@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
@@ -15,21 +16,21 @@ type Pipeline struct {
 	producer   *Producer
 	consumer   *Consumer
 	config     protocol.PipelineConfig
-	srcConfigs map[string]protocol.SourceConfig
-	
-	finished   chan struct{}
-	drainOnce  sync.Once
-	wg         sync.WaitGroup
 	ctx        context.Context
 	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	finished   chan struct{}
 }
 
-func NewPipeline(id string, p *Producer, c *Consumer, cfg protocol.PipelineConfig) *Pipeline {
+func NewPipeline(id string, prod *Producer, cons *Consumer, cfg protocol.PipelineConfig) *Pipeline {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
 		id:       id,
-		producer: p,
-		consumer: c,
+		producer: prod,
+		consumer: cons,
 		config:   cfg,
+		ctx:      ctx,
+		cancel:   cancel,
 		finished: make(chan struct{}),
 	}
 }
@@ -39,57 +40,64 @@ func (p *Pipeline) ID() string {
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
-	p.ctx, p.cancel = context.WithCancel(ctx)
-	
+	log.Printf("Starting pipeline %s", p.id)
+
 	p.wg.Add(2)
-	
-	// Start Producer
+	go func() {
+		defer p.wg.Done()
+		topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.id)
+		if err := p.consumer.Run(p.ctx, topic); err != nil && err != context.Canceled {
+			log.Printf("Consumer for pipeline %s failed: %v", p.id, err)
+		}
+	}()
+
 	go func() {
 		defer p.wg.Done()
 		
+		// 1. Resolve Sources
 		if len(p.config.Sources) == 0 {
 			log.Printf("No sources defined for pipeline %s", p.id)
 			return
 		}
-
 		sourceID := p.config.Sources[0]
-		
-		// 1. Get Source Config
 		srcKey := protocol.SourceConfigKey(sourceID)
 		entry, err := p.producer.kv.Get(srcKey)
 		if err != nil {
-			log.Printf("Failed to fetch source config %s: %v", sourceID, err)
+			log.Printf("Failed to get source config for %s: %v", sourceID, err)
 			return
 		}
+		
 		var srcCfg protocol.SourceConfig
 		if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
 			log.Printf("Failed to unmarshal source config %s: %v", sourceID, err)
 			return
 		}
 
+		// Apply pipeline overrides
+		if p.config.BatchSize > 0 {
+			srcCfg.BatchSize = p.config.BatchSize
+		}
+		if p.config.BatchWait > 0 {
+			srcCfg.BatchWait = p.config.BatchWait
+		}
+		srcCfg.Tables = p.config.Tables
+		// Ensure unique slot for every worker instance to avoid contention on reload
+		if srcCfg.Type == "postgres" && srcCfg.SlotName != "" {
+			srcCfg.SlotName = fmt.Sprintf("%s_%d", srcCfg.SlotName, time.Now().UnixNano())
+		}
+
 		// 2. Get Checkpoints for all tables
-		checkpoints := make(map[string]protocol.Checkpoint)
+		minLSN := uint64(0)
 		for _, table := range p.config.Tables {
 			cpKey := protocol.IngressCheckpointKey(p.id, sourceID, table)
 			cpEntry, err := p.producer.kv.Get(cpKey)
 			if err == nil {
 				var cp protocol.Checkpoint
 				if err := json.Unmarshal(cpEntry.Value(), &cp); err == nil {
-					checkpoints[table] = cp
+					if minLSN == 0 || cp.IngressLSN < minLSN {
+						minLSN = cp.IngressLSN
+					}
 				}
-			}
-		}
-
-		// Update Producer to handle multi-table checkpoints if needed
-		// For now, we pass the first found LSN or 0 to the source start
-		// In a real multi-table CDC, go-pq-cdc uses one slot for all tables,
-		// so the lowest LSN among all tables is the safe starting point.
-		var minLSN uint64
-		var first = true
-		for _, cp := range checkpoints {
-			if first || cp.IngressLSN < minLSN {
-				minLSN = cp.IngressLSN
-				first = false
 			}
 		}
 		
@@ -103,20 +111,15 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Printf("Producer for pipeline %s failed: %v", p.id, err)
 		}
 		
-		// Phase 1 Handover: notify consumer of target LSN
+		// In a drain scenario, the producer finishes.
+		// We should tell the consumer to drain until this LSN.
+		log.Printf("Producer for pipeline %s finished at LSN %d. Signaling consumer drain.", p.id, lsn)
 		p.consumer.Drain(lsn)
 	}()
 
-	// Start Consumer
+	// Background waiter to close finished channel
 	go func() {
-		defer p.wg.Done()
-		topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.id)
-		err := p.consumer.Run(p.ctx, topic)
-		if err != nil && err != context.Canceled {
-			log.Printf("Consumer for pipeline %s failed: %v", p.id, err)
-		}
-		
-		// If consumer stops, the whole pipeline is considered finished for this config generation
+		p.wg.Wait()
 		close(p.finished)
 	}()
 
@@ -124,11 +127,8 @@ func (p *Pipeline) Start(ctx context.Context) error {
 }
 
 func (p *Pipeline) Drain() error {
-	p.drainOnce.Do(func() {
-		log.Printf("Draining pipeline %s", p.id)
-		p.producer.Drain()
-	})
-	return nil
+	log.Printf("Draining pipeline %s", p.id)
+	return p.producer.Drain()
 }
 
 func (p *Pipeline) Finished() <-chan struct{} {
@@ -138,16 +138,10 @@ func (p *Pipeline) Finished() <-chan struct{} {
 func (p *Pipeline) Shutdown(ctx context.Context) error {
 	p.cancel()
 	
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-done:
+	case <-p.finished:
 		return nil
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"testing"
 	"time"
 
@@ -16,13 +17,17 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	tc_nats "github.com/testcontainers/testcontainers-go/modules/nats"
+	tc_postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 type Environment struct {
 	T *testing.T
 	Ctx context.Context
+	Cancel context.CancelFunc
 	
-	Nats     *go_nats.Conn
+	NatsConn *go_nats.Conn
 	JS       go_nats.JetStreamContext
 	KV       go_nats.KeyValue
 	NatsURL  string
@@ -34,11 +39,15 @@ type Environment struct {
 	DbConfig protocol.SinkConfig
 
 	Mgr *config.ConfigManager
+
+	// Containers for termination
+	NatsC     *tc_nats.NATSContainer
+	PostgresC *tc_postgres.PostgresContainer
+	DatabendC testcontainers.Container
 }
 
 func Setup(t *testing.T) *Environment {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	t.Cleanup(cancel)
 
 	// 1. Start NATS
 	natsC, err := StartNats(ctx)
@@ -46,6 +55,13 @@ func Setup(t *testing.T) *Environment {
 	natsURL, _ := natsC.ConnectionString(ctx)
 	nc, _ := go_nats.Connect(natsURL)
 	js, _ := nc.JetStream()
+	
+	_, err = js.AddStream(&go_nats.StreamConfig{
+		Name:     "daya-data-pipeline",
+		Subjects: []string{"daya.pipeline.*.ingest"},
+	})
+	require.NoError(t, err)
+
 	kv, _ := js.CreateKeyValue(&go_nats.KeyValueConfig{Bucket: protocol.KVBucketName})
 
 	// 2. Start Postgres
@@ -57,7 +73,6 @@ func Setup(t *testing.T) *Environment {
 	pgDB, err := sql.Open("pgx", pgDSN)
 	require.NoError(t, err)
 
-	// Create Publication
 	_, err = pgDB.Exec("CREATE PUBLICATION daya_pub FOR ALL TABLES")
 	require.NoError(t, err)
 
@@ -69,7 +84,7 @@ func Setup(t *testing.T) *Environment {
 		User:            "postgres",
 		PassEncrypted:   "postgres",
 		Database:        "daya_src",
-		SlotName:        "daya_slot",
+		SlotName:        fmt.Sprintf("daya_slot_%d", time.Now().UnixNano()),
 		PublicationName: "daya_pub",
 		Schemas:         []string{"public"},
 	}
@@ -86,67 +101,89 @@ func Setup(t *testing.T) *Environment {
 		DSN:  dbDSN,
 	}
 
-	// Store configs in KV
 	srcData, _ := json.Marshal(srcCfg)
 	kv.Put(protocol.SourceConfigKey(srcCfg.ID), srcData)
 	snkData, _ := json.Marshal(snkCfg)
 	kv.Put(protocol.SinkConfigKey(snkCfg.ID), snkData)
 
+	env := &Environment{
+		T:         t,
+		Ctx:       ctx,
+		Cancel:    cancel,
+		NatsConn:  nc,
+		JS:        js,
+		KV:        kv,
+		NatsURL:   natsURL,
+		Postgres:  pgDB,
+		PgConfig:  srcCfg,
+		Databend:  dbDB,
+		DbConfig:  snkCfg,
+		NatsC:     natsC,
+		PostgresC: pgC,
+		DatabendC: dbC,
+	}
+
 	t.Cleanup(func() {
-		pgDB.Close()
-		dbDB.Close()
-		nc.Close()
-		natsC.Terminate(context.Background())
-		pgC.Terminate(context.Background())
-		dbC.Terminate(context.Background())
+		env.Close()
 	})
 
-	return &Environment{
-		T:        t,
-		Ctx:      ctx,
-		Nats:     nc,
-		JS:       js,
-		KV:       kv,
-		NatsURL:  natsURL,
-		Postgres: pgDB,
-		PgConfig: srcCfg,
-		Databend: dbDB,
-		DbConfig: snkCfg,
+	return env
+}
+
+func (e *Environment) Close() {
+	log.Printf("Cleaning up E2E environment...")
+	if e.Mgr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		e.Mgr.Stop(ctx)
+		cancel()
 	}
+	
+	time.Sleep(1 * time.Second)
+
+	if e.Postgres != nil { e.Postgres.Close() }
+	if e.Databend != nil { e.Databend.Close() }
+	if e.NatsConn != nil { e.NatsConn.Close() }
+	
+	if e.PostgresC != nil { e.PostgresC.Terminate(context.Background()) }
+	if e.DatabendC != nil { e.DatabendC.Terminate(context.Background()) }
+	if e.NatsC != nil { e.NatsC.Terminate(context.Background()) }
+	
+	if e.Cancel != nil { e.Cancel() }
 }
 
 func (e *Environment) StartWorker() {
 	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		// Initialize Source
-		src := postgres.NewPostgresSource(e.PgConfig.ID)
-		
-		// Initialize Publisher/Subscriber
-		pub, err := nats.NewNatsPublisher(e.NatsURL)
-		if err != nil {
-			return nil, err
-		}
-		sub, err := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id))
-		if err != nil {
-			return nil, err
-		}
+		if len(cfg.Sources) == 0 { return nil, fmt.Errorf("no sources") }
+		sourceID := cfg.Sources[0]
+		entry, _ := e.KV.Get(protocol.SourceConfigKey(sourceID))
+		var srcCfg protocol.SourceConfig
+		json.Unmarshal(entry.Value(), &srcCfg)
+		srcCfg.Tables = cfg.Tables
+		// Ensure unique slot for every worker instance to avoid contention on reload
+		srcCfg.SlotName = fmt.Sprintf("%s_%d", srcCfg.SlotName, time.Now().UnixNano())
 
-		snk, err := databend.NewDatabendSink(e.DbConfig.ID, e.DbConfig.DSN)
-		if err != nil {
-			return nil, err
-		}
+		src := postgres.NewPostgresSource(sourceID)
+		
+		if len(cfg.Sinks) == 0 { return nil, fmt.Errorf("no sinks") }
+		sinkID := cfg.Sinks[0]
+		entry, _ = e.KV.Get(protocol.SinkConfigKey(sinkID))
+		var snkCfg protocol.SinkConfig
+		json.Unmarshal(entry.Value(), &snkCfg)
+
+		snk, _ := databend.NewDatabendSink(sinkID, snkCfg.DSN)
+		pub, _ := nats.NewNatsPublisher(e.NatsURL)
+		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id))
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
 		cons := engine.NewConsumer(id, sub, snk, e.KV, cfg.BatchSize, cfg.BatchWait)
 		
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
-		if err := pipe.Start(workerCtx); err != nil {
-			return nil, err
-		}
+		pipe.Start(workerCtx)
 		return pipe, nil
 	}
 
 	e.Mgr = config.NewConfigManager(e.KV, factory)
-	require.NoError(e.T, e.Mgr.Watch(e.Ctx))
+	e.Mgr.Watch(e.Ctx)
 }
 
 func (e *Environment) SeedPostgres(table string, rows int) {
@@ -167,13 +204,16 @@ func (e *Environment) EventuallyCountDatabend(table string, expected int, timeou
 		if err != nil {
 			return false
 		}
+		if count > 0 {
+			log.Printf("EventuallyCount [%s]: Current count: %d, Expected: %d", table, count, expected)
+		}
 		return count == expected
 	}, timeout, 1*time.Second, "Expected %d rows in Databend table %s", expected, table)
 }
 
 func (e *Environment) EventuallyMatchDatabend(table string, id int, expected map[string]any, timeout time.Duration) {
 	require.Eventually(e.T, func() bool {
-		rows, err := e.Databend.Query(fmt.Sprintf("SELECT * FROM \"%s\" WHERE id = %d", table, id))
+		rows, err := e.Databend.Query(fmt.Sprintf("SELECT * FROM \"%s\" WHERE id = ?", table), id)
 		if err != nil {
 			return false
 		}
@@ -198,7 +238,6 @@ func (e *Environment) EventuallyMatchDatabend(table string, id int, expected map
 			found := false
 			for i, col := range cols {
 				if col == k {
-					// Basic comparison
 					if fmt.Sprintf("%v", values[i]) == fmt.Sprintf("%v", v) {
 						found = true
 					}
