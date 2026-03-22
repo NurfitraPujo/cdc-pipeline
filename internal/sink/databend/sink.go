@@ -130,23 +130,43 @@ func (s *DatabendSink) getCurrentColumns(ctx context.Context, table string) (map
 }
 
 func mapPgTypeToDatabend(pgType string) string {
-	// pgType is currently an OID string in our PostgresSource implementation
-	// Common OIDs: 23=int4, 20=int8, 1043=varchar, 25=text, 16=bool, 1114=timestamp, 3802=jsonb
-	switch pgType {
-	case "16":
+	// Normalized type mapping (Postgres type name -> Databend type)
+	// We handle both OID-fallback strings and actual type names.
+	t := strings.ToLower(pgType)
+
+	switch {
+	case strings.Contains(t, "bool"):
 		return "BOOLEAN"
-	case "23", "20":
+	case strings.Contains(t, "int"):
 		return "INT64"
-	case "1043", "25":
-		return "STRING"
-	case "1114", "1184":
-		return "TIMESTAMP"
-	case "3802":
-		return "VARIANT"
-	case "700", "701":
+	case strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
 		return "FLOAT64"
+	case strings.Contains(t, "timestamp"):
+		return "TIMESTAMP"
+	case strings.Contains(t, "date"):
+		return "DATE"
+	case strings.Contains(t, "json") || strings.Contains(t, "variant"):
+		return "VARIANT"
+	case strings.Contains(t, "bytea") || strings.Contains(t, "blob"):
+		return "BINARY"
+	case strings.Contains(t, "uuid") || strings.Contains(t, "text") || strings.Contains(t, "varchar") || strings.Contains(t, "char"):
+		return "STRING"
 	default:
-		return "STRING" // Fallback
+		// Check OIDs for backward compatibility
+		switch pgType {
+		case "16":
+			return "BOOLEAN"
+		case "23", "20":
+			return "INT64"
+		case "1043", "25":
+			return "STRING"
+		case "1114", "1184":
+			return "TIMESTAMP"
+		case "3802":
+			return "VARIANT"
+		default:
+			return "STRING" // Global fallback
+		}
 	}
 }
 

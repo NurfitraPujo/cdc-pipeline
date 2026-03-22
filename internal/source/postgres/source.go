@@ -23,10 +23,17 @@ type PostgresSource struct {
 	name      string
 	connector cdc.Connector
 	cancel    context.CancelFunc
+
+	// Type Resolution
+	oidMu    sync.RWMutex
+	oidCache map[uint32]string
 }
 
 func NewPostgresSource(name string) *PostgresSource {
-	return &PostgresSource{name: name}
+	return &PostgresSource{
+		name:     name,
+		oidCache: make(map[uint32]string),
+	}
 }
 
 func (s *PostgresSource) Name() string {
@@ -55,7 +62,21 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	var mu sync.Mutex
 	msgs := make([]protocol.Message, 0, batchSize)
-	knownTables := make(map[string]bool) // internal cache
+	knownTables := make(map[string]bool)
+
+	// --- 1. Initialize DB Connection for Discovery & Type Resolution ---
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		srcConfig.User, srcConfig.PassEncrypted, srcConfig.Host, srcConfig.Port, srcConfig.Database)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to open DB connection: %w", err)
+	}
+
+	// Prime OID Cache
+	if err := s.primeOIDCache(ctx, db); err != nil {
+		log.Printf("Warning: Failed to prime OID cache: %v", err)
+	}
 
 	flush := func() {
 		mu.Lock()
@@ -93,17 +114,9 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		}
 	}()
 
-	// Periodic Discovery Poller
+	// Discovery Poller
 	go func() {
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-			srcConfig.User, srcConfig.PassEncrypted, srcConfig.Host, srcConfig.Port, srcConfig.Database)
-		db, err := sql.Open("pgx", dsn)
-		if err != nil {
-			log.Printf("Poller: Failed to open DB connection: %v", err)
-			return
-		}
 		defer db.Close()
-
 		ticker := time.NewTicker(discoveryInterval)
 		defer ticker.Stop()
 		for {
@@ -111,53 +124,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Query for tables in allowed schemas
-				for _, schema := range srcConfig.Schemas {
-					rows, err := db.QueryContext(ctx, 
-						"SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
-					if err != nil {
-						log.Printf("Poller: Error querying tables for schema %s: %v", schema, err)
-						continue
-					}
-					for rows.Next() {
-						var tableName string
-						if err := rows.Scan(&tableName); err == nil {
-							fullKey := schema + "." + tableName
-							mu.Lock()
-							if !knownTables[fullKey] {
-								log.Printf("Poller: Discovered new table %s", fullKey)
-								// Emitting a schema_change event for discovery
-								m := protocol.Message{
-									SourceID:  srcConfig.ID,
-									Table:     tableName,
-									Op:        "schema_change",
-									Timestamp: time.Now(),
-									Schema: &protocol.SchemaMetadata{
-										Table:  tableName,
-										Schema: schema,
-									},
-								}
-								if len(msgs) > 0 {
-									mu.Unlock()
-									flush()
-									mu.Lock()
-								}
-								msgs = append(msgs, m)
-								mu.Unlock()
-								flush()
-								mu.Lock()
-								knownTables[fullKey] = true
-							}
-							mu.Unlock()
-						}
-					}
-					rows.Close()
-				}
+				s.discoverTables(ctx, db, srcConfig, &mu, &msgs, knownTables, flush)
 			}
 		}
 	}()
-
-	snapshotEnabled := checkpoint.IngressLSN == 0
 
 	cfg := config.Config{
 		Host:     srcConfig.Host,
@@ -174,7 +144,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			CreateIfNotExists: true,
 		},
 		Snapshot: config.SnapshotConfig{
-			Enabled: snapshotEnabled,
+			Enabled: checkpoint.IngressLSN == 0,
 			Mode:    config.SnapshotModeInitial,
 		},
 	}
@@ -185,14 +155,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Relation:
-			isAllowedSchema := false
-			for _, s := range srcConfig.Schemas {
-				if s == msg.Namespace {
-					isAllowedSchema = true
-					break
-				}
-			}
-			if !isAllowedSchema && len(srcConfig.Schemas) > 0 {
+			if !s.isSchemaAllowed(msg.Namespace, srcConfig.Schemas) {
 				mu.Unlock()
 				lc.Ack()
 				return
@@ -203,7 +166,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 			cols := make(map[string]string)
 			for _, col := range msg.Columns {
-				cols[col.Name] = fmt.Sprintf("%d", col.DataType)
+				cols[col.Name] = s.resolveTypeName(col.DataType)
 			}
 
 			m = protocol.Message{
@@ -300,6 +263,89 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	}()
 
 	return out, ack, nil
+}
+
+func (s *PostgresSource) isSchemaAllowed(namespace string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		if a == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *PostgresSource) resolveTypeName(oid uint32) string {
+	s.oidMu.RLock()
+	name, ok := s.oidCache[oid]
+	s.oidMu.RUnlock()
+	if ok {
+		return name
+	}
+	return fmt.Sprintf("oid:%d", oid)
+}
+
+func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, "SELECT oid, typname FROM pg_type")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	s.oidMu.Lock()
+	defer s.oidMu.Unlock()
+	for rows.Next() {
+		var oid uint32
+		var name string
+		if err := rows.Scan(&oid, &name); err == nil {
+			s.oidCache[oid] = name
+		}
+	}
+	return nil
+}
+
+func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConfig protocol.SourceConfig, mu *sync.Mutex, msgs *[]protocol.Message, known map[string]bool, flush func()) {
+	for _, schema := range srcConfig.Schemas {
+		rows, err := db.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var tableName string
+			if err := rows.Scan(&tableName); err == nil {
+				fullKey := schema + "." + tableName
+				mu.Lock()
+				if !known[fullKey] {
+					log.Printf("Poller: Discovered table %s", fullKey)
+					m := protocol.Message{
+						SourceID:  srcConfig.ID,
+						Table:     tableName,
+						Op:        "schema_change",
+						Timestamp: time.Now(),
+						Schema: &protocol.SchemaMetadata{
+							Table:  tableName,
+							Schema: schema,
+						},
+					}
+					// Flush if needed
+					if len(*msgs) > 0 {
+						mu.Unlock()
+						flush()
+						mu.Lock()
+					}
+					*msgs = append(*msgs, m)
+					mu.Unlock()
+					flush()
+					mu.Lock()
+					known[fullKey] = true
+				}
+				mu.Unlock()
+			}
+		}
+		rows.Close()
+	}
 }
 
 func (s *PostgresSource) Stop() error {
