@@ -207,6 +207,16 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 
 			for _, m := range batchFromNats {
+				if m.Op == "schema_change" && m.Schema != nil {
+					// Apply Schema Change to Sink
+					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
+						log.Printf("Error applying schema change for %s: %v", m.Table, err)
+						wmMsg.Nack()
+						return fmt.Errorf("failed to apply schema change: %w", err)
+					}
+					// Schema applied, continue to data processing
+				}
+
 				batch = append(batch, m)
 				if len(batch) >= c.batchSize {
 					if err := flush(); err != nil {

@@ -126,7 +126,7 @@ func main() {
 		}
 
 		// 4. Create Engine components using overrides from merged cfg
-		prod := engine.NewProducer(id, src, pub, kv)
+		prod := engine.NewProducer(id, cfg, src, pub, kv)
 		cons := engine.NewConsumer(id, sub, snk, kv, cfg.BatchSize, cfg.BatchWait)
 		
 		pipe := engine.NewPipeline(id, prod, cons, cfg)

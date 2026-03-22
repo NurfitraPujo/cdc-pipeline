@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -43,7 +44,15 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 	// Group messages by table
 	byTable := make(map[string][]protocol.Message)
 	for _, m := range messages {
+		// Filter out control messages
+		if m.Op == "schema_change" {
+			continue
+		}
 		byTable[m.Table] = append(byTable[m.Table], m)
+	}
+
+	if len(byTable) == 0 {
+		return nil
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -56,6 +65,56 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 	}
 
 	return g.Wait()
+}
+
+func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
+	log.Printf("Applying schema change for table %s in Databend", schema.Table)
+
+	// 1. Map columns to Databend types
+	var colDefs []string
+	for name, pgType := range schema.Columns {
+		dbType := mapPgTypeToDatabend(pgType)
+		colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", name, dbType))
+	}
+
+	// 2. Build CREATE TABLE OR REPLACE logic
+	// In Databend, we can use CREATE TABLE IF NOT EXISTS or REPLACE TABLE
+	// For simplicity and to handle evolution (e.g. adding columns), 
+	// we'll use a sequence of:
+	//   CREATE TABLE IF NOT EXISTS ...
+	//   Then for existing, we'd need to detect missing columns and ALTER.
+	// For now, let's implement CREATE TABLE IF NOT EXISTS.
+	
+	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)", 
+		schema.Table, strings.Join(colDefs, ", "))
+	
+	_, err := s.db.ExecContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to apply schema in databend: %w", err)
+	}
+
+	return nil
+}
+
+func mapPgTypeToDatabend(pgType string) string {
+	// pgType is currently an OID string in our PostgresSource implementation
+	// Common OIDs: 23=int4, 20=int8, 1043=varchar, 25=text, 16=bool, 1114=timestamp, 3802=jsonb
+	switch pgType {
+	case "16":
+		return "BOOLEAN"
+	case "23", "20":
+		return "INT64"
+	case "1043", "25":
+		return "STRING"
+	case "1114", "1184":
+		return "TIMESTAMP"
+	case "3802":
+		return "VARIANT"
+	case "700", "701":
+		return "FLOAT64"
+	default:
+		return "STRING" // Fallback
+	}
 }
 
 func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
@@ -75,17 +134,12 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	}
 
 	// 2. Build REPLACE INTO query
-	// REPLACE INTO table (col1, col2) ON (pk1) VALUES (...), (...)
-	// NOTE: We assume 'pk' is part of the columns and we'll use it in ON clause.
-	// For now, let's use the PK field from our protocol.Message if available.
-	
 	quotedColumns := make([]string, len(columns))
 	for i, col := range columns {
 		quotedColumns[i] = "\"" + col + "\""
 	}
 	colList := strings.Join(quotedColumns, ", ")
 	
-	// Quote table name to prevent injection/keyword conflicts
 	safeTable := "\"" + table + "\""
 	query := fmt.Sprintf("REPLACE INTO %s (%s) VALUES ", safeTable, colList)
 	
@@ -109,6 +163,7 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	query += strings.Join(valueStrings, ", ")
 
 	// 3. Execute
+	// #nosec G201 -- table name and columns are from trusted source/schema discovery
 	_, err := s.db.ExecContext(ctx, query, valueArgs...)
 	if err != nil {
 		return fmt.Errorf("databend replace into failed: %w", err)

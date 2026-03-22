@@ -20,15 +20,20 @@ import (
 
 type Producer struct {
 	pipelineID   string
+	config       protocol.PipelineConfig
 	source       source.Source
 	publisher    stream.Publisher
 	kv           nats.KeyValue
 	mu           sync.Mutex
 	cancelSource context.CancelFunc
 	cb           *gobreaker.CircuitBreaker
+
+	// Discovery state
+	snapshotMu    sync.RWMutex
+	snapshotting  map[string]uint64 // Table -> SnapshotLSN
 }
 
-func NewProducer(pipelineID string, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
+func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
 	settings := gobreaker.Settings{
 		Name:        "nats-publisher",
 		MaxRequests: 3,
@@ -53,11 +58,13 @@ func NewProducer(pipelineID string, src source.Source, pub stream.Publisher, kv 
 	}
 
 	return &Producer{
-		pipelineID: pipelineID,
-		source:     src,
-		publisher:  pub,
-		kv:         kv,
-		cb:         gobreaker.NewCircuitBreaker(settings),
+		pipelineID:   pipelineID,
+		config:       cfg,
+		source:       src,
+		publisher:    pub,
+		kv:           kv,
+		cb:           gobreaker.NewCircuitBreaker(settings),
+		snapshotting: make(map[string]uint64),
 	}
 }
 
@@ -83,10 +90,44 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			}
 
 		retryPublish:
+			// 1. Process Discovery & Filtering
+			filteredMsgs := make([]protocol.Message, 0, len(msgs))
+			for _, m := range msgs {
+				// Handle Discovery
+				if m.Op == "schema_change" && m.Schema != nil {
+					p.handleDiscovery(m)
+				}
+
+				// LSN Cut-over Filtering
+				p.snapshotMu.RLock()
+				snapshotLSN, isSnapshotting := p.snapshotting[m.Table]
+				p.snapshotMu.RUnlock()
+
+				if isSnapshotting {
+					if m.Op != "snapshot" && m.LSN < snapshotLSN {
+						// Discard old CDC data for table currently being snapshotted
+						continue
+					}
+					// If snapshot is complete (m.Op == "snapshot" and IsLast?), we'd clear snapshotting map.
+					// For now, let's assume simple LSN cut-over.
+				}
+
+				filteredMsgs = append(filteredMsgs, m)
+			}
+
+			if len(filteredMsgs) == 0 {
+				// Signal ACK even if we discarded everything to unblock source
+				select {
+				case ackChan <- struct{}{}:
+				case <-ctx.Done():
+					return lastLSN, ctx.Err()
+				}
+				continue
+			}
+
 			// Wrap NATS publishing in a circuit breaker
 			_, err := p.cb.Execute(func() (interface{}, error) {
-				// Marshal the entire batch
-				batch := protocol.MessageBatch(msgs)
+				batch := protocol.MessageBatch(filteredMsgs)
 				payload, err := batch.MarshalMsg(nil)
 				if err != nil {
 					return nil, err
@@ -104,9 +145,9 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			if err != nil {
 				log.Printf("NATS Publish blocked by circuit breaker: %v", err)
 				
-				// Update table stats to show CIRCUIT_OPEN status
-				if len(msgs) > 0 {
-					m := msgs[0]
+				// Optional: Update table stats to show CIRCUIT_OPEN status
+				if len(filteredMsgs) > 0 {
+					m := filteredMsgs[0]
 					stKey := protocol.TableStatsKey(p.pipelineID, m.SourceID, m.Table)
 					if entry, err := p.kv.Get(stKey); err == nil {
 						var st protocol.TableStats
@@ -120,7 +161,6 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					}
 				}
 
-				// Wait before retrying the SAME batch
 				select {
 				case <-time.After(2 * time.Second):
 					goto retryPublish
@@ -130,9 +170,9 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			}
 
 			// Success! Update checkpoints
-			if len(msgs) > 0 {
+			if len(filteredMsgs) > 0 {
 				latestByTable := make(map[string]protocol.Message)
-				for _, m := range msgs {
+				for _, m := range filteredMsgs {
 					latestByTable[m.SourceID+"."+m.Table] = m
 					if m.LSN > lastLSN {
 						lastLSN = m.LSN
@@ -161,6 +201,42 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, ctx.Err()
 			}
 		}
+	}
+}
+
+func (p *Producer) handleDiscovery(m protocol.Message) {
+	// Check if table is new to this pipeline
+	isNew := true
+	for _, t := range p.config.Tables {
+		if t == m.Schema.Table {
+			isNew = false
+			break
+		}
+	}
+
+	if isNew {
+		log.Printf("New table discovered via CDC: %s.%s", m.Schema.Schema, m.Schema.Table)
+		p.config.Tables = append(p.config.Tables, m.Schema.Table)
+		
+		// 1. Mark as snapshotting with current LSN
+		p.snapshotMu.Lock()
+		p.snapshotting[m.Schema.Table] = m.LSN
+		p.snapshotMu.Unlock()
+
+		// 2. Update PipelineConfig in NATS KV to trigger reload and snapshot
+		// NOTE: In a granular worker model, we might not want a full reload here.
+		// But based on our "Self-Expanding Loop" design, we do.
+		data, _ := json.Marshal(p.config)
+		if _, err := p.kv.Put(protocol.PipelineConfigKey(p.pipelineID), data); err != nil {
+			log.Printf("Error updating pipeline config for discovery: %v", err)
+		}
+	}
+
+	// Update TableMetadata in KV
+	metaKey := fmt.Sprintf("daya.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
+	metaData, _ := json.Marshal(m.Schema)
+	if _, err := p.kv.Put(metaKey, metaData); err != nil {
+		log.Printf("Error updating table metadata: %v", err)
 	}
 }
 

@@ -10,5 +10,7 @@ type Sink interface {
 	// BatchUpload sends a batch of messages to the analytical sink.
 	// It should handle deduplication and ensures idempotency.
 	BatchUpload(ctx context.Context, messages []protocol.Message) error
+	// ApplySchema updates the sink's schema (DDL).
+	ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error
 	Stop() error
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type PostgresSource struct {
@@ -46,9 +48,14 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	if batchWait <= 0 {
 		batchWait = 5 * time.Second
 	}
+	discoveryInterval := srcConfig.DiscoveryInterval
+	if discoveryInterval <= 0 {
+		discoveryInterval = 30 * time.Second
+	}
 
 	var mu sync.Mutex
 	msgs := make([]protocol.Message, 0, batchSize)
+	knownTables := make(map[string]bool) // internal cache
 
 	flush := func() {
 		mu.Lock()
@@ -60,7 +67,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		select {
 		case out <- msgs:
 			mu.Unlock()
-			// Wait for producer to signal that it has published the batch
 			select {
 			case <-ack:
 				mu.Lock()
@@ -73,7 +79,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		}
 	}
 
-	// Periodic flusher for low-traffic scenarios
+	// Periodic flusher
 	go func() {
 		ticker := time.NewTicker(batchWait)
 		defer ticker.Stop()
@@ -83,6 +89,70 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 				return
 			case <-ticker.C:
 				flush()
+			}
+		}
+	}()
+
+	// Periodic Discovery Poller
+	go func() {
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			srcConfig.User, srcConfig.PassEncrypted, srcConfig.Host, srcConfig.Port, srcConfig.Database)
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			log.Printf("Poller: Failed to open DB connection: %v", err)
+			return
+		}
+		defer db.Close()
+
+		ticker := time.NewTicker(discoveryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Query for tables in allowed schemas
+				for _, schema := range srcConfig.Schemas {
+					rows, err := db.QueryContext(ctx, 
+						"SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
+					if err != nil {
+						log.Printf("Poller: Error querying tables for schema %s: %v", schema, err)
+						continue
+					}
+					for rows.Next() {
+						var tableName string
+						if err := rows.Scan(&tableName); err == nil {
+							fullKey := schema + "." + tableName
+							mu.Lock()
+							if !knownTables[fullKey] {
+								log.Printf("Poller: Discovered new table %s", fullKey)
+								// Emitting a schema_change event for discovery
+								m := protocol.Message{
+									SourceID:  srcConfig.ID,
+									Table:     tableName,
+									Op:        "schema_change",
+									Timestamp: time.Now(),
+									Schema: &protocol.SchemaMetadata{
+										Table:  tableName,
+										Schema: schema,
+									},
+								}
+								if len(msgs) > 0 {
+									mu.Unlock()
+									flush()
+									mu.Lock()
+								}
+								msgs = append(msgs, m)
+								mu.Unlock()
+								flush()
+								mu.Lock()
+								knownTables[fullKey] = true
+							}
+							mu.Unlock()
+						}
+					}
+					rows.Close()
+				}
 			}
 		}
 	}()
@@ -114,6 +184,40 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
+		case *format.Relation:
+			isAllowedSchema := false
+			for _, s := range srcConfig.Schemas {
+				if s == msg.Namespace {
+					isAllowedSchema = true
+					break
+				}
+			}
+			if !isAllowedSchema && len(srcConfig.Schemas) > 0 {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+
+			fullKey := msg.Namespace + "." + msg.Name
+			knownTables[fullKey] = true
+
+			cols := make(map[string]string)
+			for _, col := range msg.Columns {
+				cols[col.Name] = fmt.Sprintf("%d", col.DataType)
+			}
+
+			m = protocol.Message{
+				SourceID:  srcConfig.ID,
+				Table:     msg.Name,
+				Op:        "schema_change",
+				Timestamp: time.Now(),
+				Schema: &protocol.SchemaMetadata{
+					Table:   msg.Name,
+					Schema:  msg.Namespace,
+					Columns: cols,
+				},
+			}
+
 		case *format.Insert:
 			payload, _ := json.Marshal(msg.Decoded)
 			m = protocol.Message{
@@ -156,12 +260,24 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		}
 
 		if m.SourceID != "" {
-			msgs = append(msgs, m)
-		}
-
-		if len(msgs) >= batchSize {
-			mu.Unlock()
-			flush()
+			if m.Op == "schema_change" {
+				if len(msgs) > 0 {
+					mu.Unlock()
+					flush()
+					mu.Lock()
+				}
+				msgs = append(msgs, m)
+				mu.Unlock()
+				flush()
+			} else {
+				msgs = append(msgs, m)
+				if len(msgs) >= batchSize {
+					mu.Unlock()
+					flush()
+				} else {
+					mu.Unlock()
+				}
+			}
 		} else {
 			mu.Unlock()
 		}

@@ -118,6 +118,7 @@ type SourceConfig struct {
 	PublicationName string `msg:"publication_name" yaml:"publication_name" json:"publication_name"`
 	BatchSize       int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
 	BatchWait       time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
+	DiscoveryInterval time.Duration `msg:"disc_int" yaml:"discovery_interval" json:"discovery_interval" swaggertype:"string" example:"30s"`
 	Schemas         []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
 }
 
