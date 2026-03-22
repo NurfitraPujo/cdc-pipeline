@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
@@ -11,7 +12,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var jwtSecret = []byte("daya-secret-key")
+func getJWTSecret() []byte {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return []byte("daya-secret-key-change-me-in-production")
+	}
+	return []byte(secret)
+}
 
 // Login handles user authentication.
 // @Summary      Authenticate user
@@ -52,7 +59,7 @@ func (h *Handler) Login(c *gin.Context) {
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),
 		})
 
-		tokenString, _ := token.SignedString(jwtSecret)
+		tokenString, _ := token.SignedString(getJWTSecret())
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 		return
 	}
@@ -77,7 +84,7 @@ func AuthMiddleware() gin.HandlerFunc {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method")
 			}
-			return jwtSecret, nil
+			return getJWTSecret(), nil
 		})
 
 		if err != nil || !token.Valid {

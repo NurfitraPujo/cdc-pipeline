@@ -116,7 +116,39 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 		}
 
 		m.applyHierarchy(&cfg)
+		// No lock held here, transitionWorker will acquire its own lock
 		m.transitionWorker(ctx, id, cfg)
+	}
+}
+
+func (m *ConfigManager) Stop(ctx context.Context) {
+	m.workersMu.Lock()
+	ids := make([]string, 0, len(m.workers))
+	for id := range m.workers {
+		ids = append(ids, id)
+	}
+	m.workersMu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(pid string) {
+			defer wg.Done()
+			m.stopWorker(ctx, pid)
+		}(id)
+	}
+	
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Graceful shutdown timed out")
+	case <-done:
+		log.Println("All pipelines stopped gracefully")
 	}
 }
 

@@ -177,6 +177,10 @@ func main() {
 	log.Printf("Daya Data Pipeline Worker [%s] started. Waiting for configuration...", workerID)
 	<-ctx.Done()
 	log.Println("Shutting down...")
+	
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mgr.Stop(shutdownCtx)
 }
 
 func bootstrapKV(kv go_nats.KeyValue) error {

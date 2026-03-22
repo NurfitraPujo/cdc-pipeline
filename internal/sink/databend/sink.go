@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/datafuselabs/databend-go"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"golang.org/x/sync/errgroup"
 )
 
 type DatabendSink struct {
@@ -21,6 +23,11 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Configure connection pool
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	
 	return &DatabendSink{name: name, db: db}, nil
 }
 
@@ -33,19 +40,22 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 		return nil
 	}
 
-	// Group messages by table (spec says they should be same but let's be safe)
+	// Group messages by table
 	byTable := make(map[string][]protocol.Message)
 	for _, m := range messages {
 		byTable[m.Table] = append(byTable[m.Table], m)
 	}
 
+	g, gCtx := errgroup.WithContext(ctx)
+
 	for table, msgs := range byTable {
-		if err := s.uploadTableBatch(ctx, table, msgs); err != nil {
-			return err
-		}
+		t, m := table, msgs // capture for closure
+		g.Go(func() error {
+			return s.uploadTableBatch(gCtx, t, m)
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
