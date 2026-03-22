@@ -10,9 +10,23 @@ import (
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	_ "bitbucket.com/daya-engineering/daya-data-pipeline/docs"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
+
+// @title           Daya Data Pipeline API
+// @version         1.0
+// @description     Control plane API for managing CDC data pipelines.
+// @host            localhost:8080
+// @BasePath        /api/v1
+
+// @securityDefinitions.apikey Bearer
+// @in header
+// @name Authorization
+// @description Type "Bearer " followed by your JWT token.
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,6 +61,8 @@ func main() {
 	h := api.NewHandler(kv)
 
 	r := gin.Default()
+
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	v1 := r.Group("/api/v1")
 	{

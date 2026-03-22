@@ -21,6 +21,15 @@ func NewHandler(kv nats.KeyValue) *Handler {
 
 // --- Global Config ---
 
+// GetGlobalConfig retrieves global defaults.
+// @Summary      Get global configuration
+// @Description  Retrieve global batching settings
+// @Tags         config
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {object}  protocol.GlobalConfig
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /global [get]
 func (h *Handler) GetGlobalConfig(c *gin.Context) {
 	entry, err := h.kv.Get(protocol.KeyGlobalConfig)
 	if err != nil {
@@ -37,6 +46,17 @@ func (h *Handler) GetGlobalConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+// UpdateGlobalConfig updates global defaults.
+// @Summary      Update global configuration
+// @Description  Update global batching settings and reload all pipelines
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        config  body      protocol.GlobalConfig  true  "Global Config"
+// @Success      200     {object}  protocol.GlobalConfig
+// @Failure      429     {object}  map[string]string "too many requests"
+// @Router       /global [put]
 func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 	var cfg protocol.GlobalConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
@@ -72,6 +92,14 @@ func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 
 // --- Pipelines ---
 
+// ListPipelines returns all pipelines.
+// @Summary      List pipelines
+// @Description  Retrieve all pipeline configurations
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {object}  map[string][]protocol.PipelineConfig
+// @Router       /pipelines [get]
 func (h *Handler) ListPipelines(c *gin.Context) {
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -96,6 +124,17 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"pipelines": pipelines})
 }
 
+// CreatePipeline creates a new pipeline.
+// @Summary      Create pipeline
+// @Description  Create a new pipeline configuration
+// @Tags         pipelines
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        pipeline  body      protocol.PipelineConfig  true  "Pipeline Config"
+// @Success      201       {object}  protocol.PipelineConfig
+// @Failure      429       {object}  map[string]string "too many requests"
+// @Router       /pipelines [post]
 func (h *Handler) CreatePipeline(c *gin.Context) {
 	var cfg protocol.PipelineConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
@@ -131,6 +170,18 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 	c.JSON(http.StatusCreated, cfg)
 }
 
+// UpdatePipeline updates an existing pipeline.
+// @Summary      Update pipeline
+// @Description  Update an existing pipeline configuration
+// @Tags         pipelines
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        id        path      string                   true  "Pipeline ID"
+// @Param        pipeline  body      protocol.PipelineConfig  true  "Pipeline Config"
+// @Success      200       {object}  protocol.PipelineConfig
+// @Failure      429       {object}  map[string]string "too many requests"
+// @Router       /pipelines/{id} [put]
 func (h *Handler) UpdatePipeline(c *gin.Context) {
 	id := c.Param("id")
 	var cfg protocol.PipelineConfig
@@ -167,6 +218,16 @@ func (h *Handler) UpdatePipeline(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+// GetPipeline returns a single pipeline.
+// @Summary      Get pipeline
+// @Description  Retrieve a specific pipeline configuration
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Pipeline ID"
+// @Success      200  {object}  protocol.PipelineConfig
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /pipelines/{id} [get]
 func (h *Handler) GetPipeline(c *gin.Context) {
 	id := c.Param("id")
 	key := protocol.PipelineConfigKey(id)
@@ -185,6 +246,14 @@ func (h *Handler) GetPipeline(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+// DeletePipeline deletes a pipeline.
+// @Summary      Delete pipeline
+// @Description  Delete a pipeline configuration and stop its worker
+// @Tags         pipelines
+// @Security     Bearer
+// @Param        id   path      string  true  "Pipeline ID"
+// @Success      204  "No Content"
+// @Router       /pipelines/{id} [delete]
 func (h *Handler) DeletePipeline(c *gin.Context) {
 	id := c.Param("id")
 	key := protocol.PipelineConfigKey(id)
@@ -195,6 +264,15 @@ func (h *Handler) DeletePipeline(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
+// GetPipelineStatus returns current LSN status.
+// @Summary      Get pipeline status
+// @Description  Retrieve aggregated multi-table status for a pipeline
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Pipeline ID"
+// @Success      200  {object}  map[string]any
+// @Router       /pipelines/{id}/status [get]
 func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	id := c.Param("id")
 	keys, err := h.kv.Keys()
@@ -223,6 +301,14 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 
 // --- Sources ---
 
+// ListSources returns all sources.
+// @Summary      List sources
+// @Description  Retrieve all source configurations
+// @Tags         sources
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {object}  map[string][]protocol.SourceConfig
+// @Router       /sources [get]
 func (h *Handler) ListSources(c *gin.Context) {
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -247,6 +333,16 @@ func (h *Handler) ListSources(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"sources": sources})
 }
 
+// CreateSource creates a new source.
+// @Summary      Create source
+// @Description  Create a new source configuration
+// @Tags         sources
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        source  body      protocol.SourceConfig  true  "Source Config"
+// @Success      201     {object}  protocol.SourceConfig
+// @Router       /sources [post]
 func (h *Handler) CreateSource(c *gin.Context) {
 	var cfg protocol.SourceConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
@@ -269,6 +365,17 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	c.JSON(http.StatusCreated, cfg)
 }
 
+// UpdateSource updates an existing source.
+// @Summary      Update source
+// @Description  Update an existing source configuration
+// @Tags         sources
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        id      path      string                 true  "Source ID"
+// @Param        source  body      protocol.SourceConfig  true  "Source Config"
+// @Success      200     {object}  protocol.SourceConfig
+// @Router       /sources/{id} [put]
 func (h *Handler) UpdateSource(c *gin.Context) {
 	id := c.Param("id")
 	var cfg protocol.SourceConfig
@@ -293,6 +400,14 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+// DeleteSource deletes a source.
+// @Summary      Delete source
+// @Description  Delete a source configuration
+// @Tags         sources
+// @Security     Bearer
+// @Param        id   path      string  true  "Source ID"
+// @Success      204  "No Content"
+// @Router       /sources/{id} [delete]
 func (h *Handler) DeleteSource(c *gin.Context) {
 	id := c.Param("id")
 	key := protocol.SourceConfigKey(id)
@@ -303,6 +418,15 @@ func (h *Handler) DeleteSource(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
+// ListTables returns all tables for a source.
+// @Summary      List source tables
+// @Description  Retrieve metadata for all tables in a source
+// @Tags         sources
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]any
+// @Router       /sources/{id}/tables [get]
 func (h *Handler) ListTables(c *gin.Context) {
 	sourceID := c.Param("id")
 	keys, err := h.kv.Keys()

@@ -49,8 +49,8 @@ func PipelineStatusPrefix(pid string) string {
 }
 
 type UserConfig struct {
-	Username string `msg:"username" yaml:"username"`
-	Password string `msg:"password" yaml:"password"`
+	Username string `msg:"username" yaml:"username" json:"username"`
+	Password string `msg:"password" yaml:"password" json:"password"`
 }
 
 func (u UserConfig) Validate() error {
@@ -61,8 +61,8 @@ func (u UserConfig) Validate() error {
 }
 
 type GlobalConfig struct {
-	BatchSize int           `msg:"batch_size" yaml:"batch_size"`
-	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait"`
+	BatchSize int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
+	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
 }
 
 func (g GlobalConfig) Validate() error {
@@ -73,13 +73,13 @@ func (g GlobalConfig) Validate() error {
 }
 
 type PipelineConfig struct {
-	ID        string        `msg:"id" yaml:"id"`
-	Name      string        `msg:"name" yaml:"name"`
-	Sources   []string      `msg:"sources" yaml:"sources"`
-	Sinks     []string      `msg:"sinks" yaml:"sinks"`
-	Tables    []string      `msg:"tables" yaml:"tables"`
-	BatchSize int           `msg:"batch_size" yaml:"batch_size"` // Override
-	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait"` // Override
+	ID        string        `msg:"id" yaml:"id" json:"id"`
+	Name      string        `msg:"name" yaml:"name" json:"name"`
+	Sources   []string      `msg:"sources" yaml:"sources" json:"sources"`
+	Sinks     []string      `msg:"sinks" yaml:"sinks" json:"sinks"`
+	Tables    []string      `msg:"tables" yaml:"tables" json:"tables"`
+	BatchSize int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"` // Override
+	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"10s"` // Override
 }
 
 func (p PipelineConfig) Validate() error {
@@ -92,16 +92,16 @@ func (p PipelineConfig) Validate() error {
 }
 
 type SourceConfig struct {
-	ID              string `msg:"id" yaml:"id"`
-	Type            string `msg:"type" yaml:"type"` // e.g., "postgres"
-	Host            string `msg:"host" yaml:"host"`
-	Port            int    `msg:"port" yaml:"port"`
-	User            string `msg:"user" yaml:"user"`
-	PassEncrypted   string `msg:"pass" yaml:"pass"`
-	Database        string `msg:"database" yaml:"database"`
-	SlotName        string `msg:"slot_name" yaml:"slot_name"`
-	PublicationName string `msg:"publication_name" yaml:"publication_name"`
-	BatchSize       int    `msg:"batch_size" yaml:"batch_size"`
+	ID              string `msg:"id" yaml:"id" json:"id"`
+	Type            string `msg:"type" yaml:"type" json:"type"` // e.g., "postgres"
+	Host            string `msg:"host" yaml:"host" json:"host"`
+	Port            int    `msg:"port" yaml:"port" json:"port"`
+	User            string `msg:"user" yaml:"user" json:"user"`
+	PassEncrypted   string `msg:"pass" yaml:"pass" json:"pass"`
+	Database        string `msg:"database" yaml:"database" json:"database"`
+	SlotName        string `msg:"slot_name" yaml:"slot_name" json:"slot_name"`
+	PublicationName string `msg:"publication_name" yaml:"publication_name" json:"publication_name"`
+	BatchSize       int    `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
 }
 
 func (s SourceConfig) Validate() error {

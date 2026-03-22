@@ -1,0 +1,410 @@
+basePath: /api/v1
+definitions:
+  protocol.GlobalConfig:
+    properties:
+      batch_size:
+        type: integer
+      batch_wait:
+        example: 5s
+        type: string
+    type: object
+  protocol.PipelineConfig:
+    properties:
+      batch_size:
+        description: Override
+        type: integer
+      batch_wait:
+        description: Override
+        example: 10s
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      sinks:
+        items:
+          type: string
+        type: array
+      sources:
+        items:
+          type: string
+        type: array
+      tables:
+        items:
+          type: string
+        type: array
+    type: object
+  protocol.SourceConfig:
+    properties:
+      batch_size:
+        type: integer
+      database:
+        type: string
+      host:
+        type: string
+      id:
+        type: string
+      pass:
+        type: string
+      port:
+        type: integer
+      publication_name:
+        type: string
+      slot_name:
+        type: string
+      type:
+        description: e.g., "postgres"
+        type: string
+      user:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: Control plane API for managing CDC data pipelines.
+  title: Daya Data Pipeline API
+  version: "1.0"
+paths:
+  /global:
+    get:
+      description: Retrieve global batching settings
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.GlobalConfig'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Get global configuration
+      tags:
+      - config
+    put:
+      consumes:
+      - application/json
+      description: Update global batching settings and reload all pipelines
+      parameters:
+      - description: Global Config
+        in: body
+        name: config
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.GlobalConfig'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.GlobalConfig'
+        "429":
+          description: too many requests
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Update global configuration
+      tags:
+      - config
+  /login:
+    post:
+      consumes:
+      - application/json
+      description: Get a JWT token for authorized requests
+      parameters:
+      - description: Username and Password
+        in: body
+        name: credentials
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: token
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Authenticate user
+      tags:
+      - auth
+  /pipelines:
+    get:
+      description: Retrieve all pipeline configurations
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/protocol.PipelineConfig'
+              type: array
+            type: object
+      security:
+      - Bearer: []
+      summary: List pipelines
+      tags:
+      - pipelines
+    post:
+      consumes:
+      - application/json
+      description: Create a new pipeline configuration
+      parameters:
+      - description: Pipeline Config
+        in: body
+        name: pipeline
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.PipelineConfig'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/protocol.PipelineConfig'
+        "429":
+          description: too many requests
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Create pipeline
+      tags:
+      - pipelines
+  /pipelines/{id}:
+    delete:
+      description: Delete a pipeline configuration and stop its worker
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+      security:
+      - Bearer: []
+      summary: Delete pipeline
+      tags:
+      - pipelines
+    get:
+      description: Retrieve a specific pipeline configuration
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.PipelineConfig'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Get pipeline
+      tags:
+      - pipelines
+    put:
+      consumes:
+      - application/json
+      description: Update an existing pipeline configuration
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Pipeline Config
+        in: body
+        name: pipeline
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.PipelineConfig'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.PipelineConfig'
+        "429":
+          description: too many requests
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Update pipeline
+      tags:
+      - pipelines
+  /pipelines/{id}/status:
+    get:
+      description: Retrieve aggregated multi-table status for a pipeline
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - Bearer: []
+      summary: Get pipeline status
+      tags:
+      - pipelines
+  /sources:
+    get:
+      description: Retrieve all source configurations
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/protocol.SourceConfig'
+              type: array
+            type: object
+      security:
+      - Bearer: []
+      summary: List sources
+      tags:
+      - sources
+    post:
+      consumes:
+      - application/json
+      description: Create a new source configuration
+      parameters:
+      - description: Source Config
+        in: body
+        name: source
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.SourceConfig'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/protocol.SourceConfig'
+      security:
+      - Bearer: []
+      summary: Create source
+      tags:
+      - sources
+  /sources/{id}:
+    delete:
+      description: Delete a source configuration
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+      security:
+      - Bearer: []
+      summary: Delete source
+      tags:
+      - sources
+    put:
+      consumes:
+      - application/json
+      description: Update an existing source configuration
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Source Config
+        in: body
+        name: source
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.SourceConfig'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.SourceConfig'
+      security:
+      - Bearer: []
+      summary: Update source
+      tags:
+      - sources
+  /sources/{id}/tables:
+    get:
+      description: Retrieve metadata for all tables in a source
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - Bearer: []
+      summary: List source tables
+      tags:
+      - sources
+securityDefinitions:
+  Bearer:
+    description: Type "Bearer " followed by your JWT token.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

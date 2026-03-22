@@ -13,6 +13,16 @@ import (
 
 var jwtSecret = []byte("daya-secret-key")
 
+// Login handles user authentication.
+// @Summary      Authenticate user
+// @Description  Get a JWT token for authorized requests
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        credentials  body      object  true  "Username and Password"
+// @Success      200  {object}  map[string]string "token"
+// @Failure      401  {object}  map[string]string "unauthorized"
+// @Router       /login [post]
 func (h *Handler) Login(c *gin.Context) {
 	var creds struct {
 		Username string `json:"username"`
