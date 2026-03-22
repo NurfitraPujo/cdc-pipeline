@@ -702,6 +702,12 @@ func (z *TableStats) DecodeMsg(dc *msgp.Reader) (err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
+		case "status":
+			z.Status, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Status")
+				return
+			}
 		case "rps":
 			z.RPS, err = dc.ReadFloat64()
 			if err != nil {
@@ -757,9 +763,19 @@ func (z *TableStats) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *TableStats) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 7
+	// map header, size 8
+	// write "status"
+	err = en.Append(0x88, 0xa6, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Status)
+	if err != nil {
+		err = msgp.WrapError(err, "Status")
+		return
+	}
 	// write "rps"
-	err = en.Append(0x87, 0xa3, 0x72, 0x70, 0x73)
+	err = en.Append(0xa3, 0x72, 0x70, 0x73)
 	if err != nil {
 		return
 	}
@@ -834,9 +850,12 @@ func (z *TableStats) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *TableStats) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 7
+	// map header, size 8
+	// string "status"
+	o = append(o, 0x88, 0xa6, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73)
+	o = msgp.AppendString(o, z.Status)
 	// string "rps"
-	o = append(o, 0x87, 0xa3, 0x72, 0x70, 0x73)
+	o = append(o, 0xa3, 0x72, 0x70, 0x73)
 	o = msgp.AppendFloat64(o, z.RPS)
 	// string "total"
 	o = append(o, 0xa5, 0x74, 0x6f, 0x74, 0x61, 0x6c)
@@ -877,6 +896,12 @@ func (z *TableStats) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
+		case "status":
+			z.Status, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Status")
+				return
+			}
 		case "rps":
 			z.RPS, bts, err = msgp.ReadFloat64Bytes(bts)
 			if err != nil {
@@ -933,7 +958,7 @@ func (z *TableStats) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *TableStats) Msgsize() (s int) {
-	s = 1 + 4 + msgp.Float64Size + 6 + msgp.Uint64Size + 5 + msgp.Uint64Size + 7 + msgp.TimeSize + 8 + msgp.TimeSize + 4 + msgp.Int64Size + 4 + msgp.TimeSize
+	s = 1 + 7 + msgp.StringPrefixSize + len(z.Status) + 4 + msgp.Float64Size + 6 + msgp.Uint64Size + 5 + msgp.Uint64Size + 7 + msgp.TimeSize + 8 + msgp.TimeSize + 4 + msgp.Int64Size + 4 + msgp.TimeSize
 	return
 }
 

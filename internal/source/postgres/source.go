@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
@@ -36,16 +38,57 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	// Bound for batching, default to 100 if not specified
 	batchSize := srcConfig.BatchSize
 	if batchSize <= 0 {
 		batchSize = 100
 	}
+	batchWait := srcConfig.BatchWait
+	if batchWait <= 0 {
+		batchWait = 5 * time.Second
+	}
 
-	// Pre-allocated slice for zero-allocation batching
+	var mu sync.Mutex
 	msgs := make([]protocol.Message, 0, batchSize)
+	var lastAck sync.WaitGroup // To coordinate handler and producer
 
-	// Determine snapshot mode: if we have an LSN, we resume from there and skip initial snapshot
+	flush := func() {
+		mu.Lock()
+		if len(msgs) == 0 {
+			mu.Unlock()
+			return
+		}
+
+		select {
+		case out <- msgs:
+			mu.Unlock()
+			// Wait for producer to signal that it has published the batch
+			select {
+			case <-ack:
+				mu.Lock()
+				msgs = msgs[:0]
+				mu.Unlock()
+			case <-ctx.Done():
+				// Don't unlock here, let the caller handle it or it will be done on exit
+			}
+		case <-ctx.Done():
+			mu.Unlock()
+		}
+	}
+
+	// Periodic flusher for low-traffic scenarios
+	go func() {
+		ticker := time.NewTicker(batchWait)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
 	snapshotEnabled := checkpoint.IngressLSN == 0
 
 	cfg := config.Config{
@@ -69,65 +112,62 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	}
 
 	handler := func(lc *replication.ListenerContext) {
+		mu.Lock()
+		
+		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Insert:
 			payload, _ := json.Marshal(msg.Decoded)
-			msgs = append(msgs, protocol.Message{
+			m = protocol.Message{
 				SourceID:  srcConfig.ID,
 				Table:     msg.TableName,
 				Op:        "insert",
 				Payload:   payload,
 				Timestamp: msg.MessageTime,
-			})
+			}
 		case *format.Update:
 			payload, _ := json.Marshal(msg.NewDecoded)
-			msgs = append(msgs, protocol.Message{
+			m = protocol.Message{
 				SourceID:  srcConfig.ID,
 				Table:     msg.TableName,
 				Op:        "update",
 				Payload:   payload,
 				Timestamp: msg.MessageTime,
-			})
+			}
 		case *format.Delete:
 			payload, _ := json.Marshal(msg.OldDecoded)
-			msgs = append(msgs, protocol.Message{
+			m = protocol.Message{
 				SourceID:  srcConfig.ID,
 				Table:     msg.TableName,
 				Op:        "delete",
 				Payload:   payload,
 				Timestamp: msg.MessageTime,
-			})
+			}
 		case *format.Snapshot:
 			if msg.EventType == format.SnapshotEventTypeData {
 				payload, _ := json.Marshal(msg.Data)
-				msgs = append(msgs, protocol.Message{
+				m = protocol.Message{
 					SourceID:  srcConfig.ID,
 					Table:     msg.Table,
 					Op:        "snapshot",
 					LSN:       uint64(msg.LSN),
 					Payload:   payload,
 					Timestamp: msg.ServerTime,
-				})
+				}
 			}
 		}
 
-		// Flush if we reached the batch limit OR if it's a Snapshot control event
-		// or if we have at least one message and it's a "COMMIT" equivalent in the library.
-		// For now, let's stick to the requested bound check logic.
-		if len(msgs) >= batchSize {
-			select {
-			case out <- msgs:
-				select {
-				case <-ack:
-					// IMPORTANT: Reset length while keeping underlying array for reuse
-					msgs = msgs[:0]
-				case <-ctx.Done():
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
+		if m.SourceID != "" {
+			msgs = append(msgs, m)
 		}
+
+		if len(msgs) >= batchSize {
+			mu.Unlock()
+			flush()
+		} else {
+			mu.Unlock()
+		}
+
 		if err := lc.Ack(); err != nil {
 			log.Printf("Warning: Failed to ack LSN: %v", err)
 		}
@@ -145,6 +185,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		s.connector.Start(ctx)
 	}()
 
+	_ = lastAck // Placeholder
 	return out, ack, nil
 }
 

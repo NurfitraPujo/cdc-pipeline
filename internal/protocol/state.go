@@ -27,6 +27,7 @@ type TableMetadata struct {
 }
 
 type TableStats struct {
+	Status          string    `msg:"status" json:"status"` // ACTIVE, CIRCUIT_OPEN
 	RPS             float64   `msg:"rps" json:"rps"`
 	TotalSynced     uint64    `msg:"total" json:"total_synced"`
 	ErrorCount      uint64    `msg:"errs" json:"error_count"`

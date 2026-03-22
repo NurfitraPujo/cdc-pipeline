@@ -99,9 +99,10 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			// 2. Update Stats
 			s, ok := c.stats[key]
 			if !ok {
-				s = &protocol.TableStats{}
+				s = &protocol.TableStats{Status: "ACTIVE"}
 				c.stats[key] = s
 			}
+			s.Status = "ACTIVE"
 			if count := countsByTable[key]; count > 0 {
 				s.TotalSynced += uint64(count)
 			}

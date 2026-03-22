@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
+	"github.com/sony/gobreaker"
 )
 
 type Producer struct {
@@ -21,14 +24,30 @@ type Producer struct {
 	kv           nats.KeyValue
 	mu           sync.Mutex
 	cancelSource context.CancelFunc
+	cb           *gobreaker.CircuitBreaker
 }
 
 func NewProducer(pipelineID string, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
+	settings := gobreaker.Settings{
+		Name:        "nats-publisher",
+		MaxRequests: 3,
+		Interval:    5 * time.Second,
+		Timeout:     10 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 3 && failureRatio >= 0.6
+		},
+		OnStateChange: func(name string, from, to gobreaker.State) {
+			log.Printf("Circuit Breaker [%s] changed from %s to %s", name, from, to)
+		},
+	}
+
 	return &Producer{
 		pipelineID: pipelineID,
 		source:     src,
 		publisher:  pub,
 		kv:         kv,
+		cb:         gobreaker.NewCircuitBreaker(settings),
 	}
 }
 
@@ -53,22 +72,54 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, nil
 			}
 
-			// Marshal the entire batch
-			batch := protocol.MessageBatch(msgs)
-			payload, err := batch.MarshalMsg(nil)
+		retryPublish:
+			// Wrap NATS publishing in a circuit breaker
+			_, err := p.cb.Execute(func() (interface{}, error) {
+				// Marshal the entire batch
+				batch := protocol.MessageBatch(msgs)
+				payload, err := batch.MarshalMsg(nil)
+				if err != nil {
+					return nil, err
+				}
+
+				topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.pipelineID)
+				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
+				
+				if err := p.publisher.Publish(topic, wmMsg); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			})
+
 			if err != nil {
-				return lastLSN, fmt.Errorf("failed to marshal message batch: %w", err)
+				log.Printf("NATS Publish blocked by circuit breaker: %v", err)
+				
+				// Update table stats to show CIRCUIT_OPEN status
+				if len(msgs) > 0 {
+					m := msgs[0]
+					stKey := protocol.TableStatsKey(p.pipelineID, m.SourceID, m.Table)
+					if entry, err := p.kv.Get(stKey); err == nil {
+						var st protocol.TableStats
+						if err := json.Unmarshal(entry.Value(), &st); err == nil {
+							st.Status = "CIRCUIT_OPEN"
+							stData, _ := st.MarshalMsg(nil)
+							if _, err := p.kv.Put(stKey, stData); err != nil {
+								log.Printf("Warning: Failed to update stats: %v", err)
+							}
+						}
+					}
+				}
+
+				// Wait before retrying the SAME batch
+				select {
+				case <-time.After(2 * time.Second):
+					goto retryPublish
+				case <-ctx.Done():
+					return lastLSN, ctx.Err()
+				}
 			}
 
-			// Use a pipeline-wide ingest topic for batches
-			topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.pipelineID)
-			wmMsg := message.NewMessage(watermill.NewUUID(), payload)
-			
-			if err := p.publisher.Publish(topic, wmMsg); err != nil {
-				return lastLSN, fmt.Errorf("failed to publish message batch: %w", err)
-			}
-
-			// Update checkpoints for all tables affected in this batch
+			// Success! Update checkpoints
 			if len(msgs) > 0 {
 				latestByTable := make(map[string]protocol.Message)
 				for _, m := range msgs {

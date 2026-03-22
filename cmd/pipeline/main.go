@@ -82,6 +82,14 @@ func main() {
 			return nil, fmt.Errorf("failed to unmarshal source config %s: %w", sourceID, err)
 		}
 		
+		// Apply pipeline overrides to source if needed
+		if cfg.BatchSize > 0 {
+			srcCfg.BatchSize = cfg.BatchSize
+		}
+		if cfg.BatchWait > 0 {
+			srcCfg.BatchWait = cfg.BatchWait
+		}
+
 		// 1. Initialize Source
 		src := postgres.NewPostgresSource(sourceID)
 		
