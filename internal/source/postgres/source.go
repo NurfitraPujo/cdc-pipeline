@@ -49,7 +49,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	var mu sync.Mutex
 	msgs := make([]protocol.Message, 0, batchSize)
-	var lastAck sync.WaitGroup // To coordinate handler and producer
 
 	flush := func() {
 		mu.Lock()
@@ -68,7 +67,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 				msgs = msgs[:0]
 				mu.Unlock()
 			case <-ctx.Done():
-				// Don't unlock here, let the caller handle it or it will be done on exit
 			}
 		case <-ctx.Done():
 			mu.Unlock()
@@ -185,7 +183,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		s.connector.Start(ctx)
 	}()
 
-	_ = lastAck // Placeholder
 	return out, ack, nil
 }
 

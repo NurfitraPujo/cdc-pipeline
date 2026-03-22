@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -40,6 +41,22 @@ func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nat
 		batchSize:  batchSize,
 		batchWait:  batchWait,
 		stats:      make(map[string]*protocol.TableStats),
+	}
+}
+
+func (c *Consumer) LoadStats(sourceID string, tables []string) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+
+	for _, table := range tables {
+		key := protocol.TableStatsKey(c.pipelineID, sourceID, table)
+		entry, err := c.kv.Get(key)
+		if err == nil {
+			var st protocol.TableStats
+			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+				c.stats[sourceID+"."+table] = &st
+			}
+		}
 	}
 }
 

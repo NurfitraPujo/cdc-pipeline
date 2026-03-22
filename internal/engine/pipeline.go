@@ -95,6 +95,9 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		
 		initialCP := protocol.Checkpoint{IngressLSN: minLSN}
 
+		// 3. Load Egress Stats for the consumer
+		p.consumer.LoadStats(sourceID, p.config.Tables)
+
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
 			log.Printf("Producer for pipeline %s failed: %v", p.id, err)
