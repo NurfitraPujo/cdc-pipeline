@@ -426,15 +426,6 @@ func (h *Handler) DeleteSource(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
-// ListTables returns all tables for a source.
-// @Summary      List source tables
-// @Description  Retrieve metadata for all tables in a source
-// @Tags         sources
-// @Produce      json
-// @Security     Bearer
-// @Param        id   path      string  true  "Source ID"
-// @Success      200  {object}  map[string]any
-// @Router       /sources/{id}/tables [get]
 func (h *Handler) ListTables(c *gin.Context) {
 	sourceID := c.Param("id")
 	keys, err := h.kv.Keys()
@@ -459,6 +450,125 @@ func (h *Handler) ListTables(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
+}
+
+// --- Sinks ---
+
+// ListSinks returns all sinks.
+// @Summary      List sinks
+// @Description  Retrieve all sink configurations
+// @Tags         sinks
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {object}  map[string][]protocol.SinkConfig
+// @Router       /sinks [get]
+func (h *Handler) ListSinks(c *gin.Context) {
+	keys, err := h.kv.Keys()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var sinks []protocol.SinkConfig
+	for _, key := range keys {
+		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
+			entry, err := h.kv.Get(key)
+			if err != nil {
+				continue
+			}
+			var cfg protocol.SinkConfig
+			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+				sinks = append(sinks, cfg)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"sinks": sinks})
+}
+
+// CreateSink creates a new sink.
+// @Summary      Create sink
+// @Description  Create a new sink configuration
+// @Tags         sinks
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        sink  body      protocol.SinkConfig  true  "Sink Config"
+// @Success      201   {object}  protocol.SinkConfig
+// @Router       /sinks [post]
+func (h *Handler) CreateSink(c *gin.Context) {
+	var cfg protocol.SinkConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	data, _ := json.Marshal(cfg)
+	key := protocol.SinkConfigKey(cfg.ID)
+	if _, err := h.kv.Put(key, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, cfg)
+}
+
+// UpdateSink updates an existing sink.
+// @Summary      Update sink
+// @Description  Update an existing sink configuration
+// @Tags         sinks
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        id    path      string               true  "Sink ID"
+// @Param        sink  body      protocol.SinkConfig  true  "Sink Config"
+// @Success      200   {object}  protocol.SinkConfig
+// @Router       /sinks/{id} [put]
+func (h *Handler) UpdateSink(c *gin.Context) {
+	id := c.Param("id")
+	var cfg protocol.SinkConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg.ID = id
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	data, _ := json.Marshal(cfg)
+	key := protocol.SinkConfigKey(id)
+	if _, err := h.kv.Put(key, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
+}
+
+// DeleteSink deletes a sink.
+// @Summary      Delete sink
+// @Description  Delete a sink configuration
+// @Tags         sinks
+// @Security     Bearer
+// @Param        id   path      string  true  "Sink ID"
+// @Success      204  "No Content"
+// @Router       /sinks/{id} [delete]
+func (h *Handler) DeleteSink(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.SinkConfigKey(id)
+	if err := h.kv.Delete(key); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
 }
 
 // --- Workers ---

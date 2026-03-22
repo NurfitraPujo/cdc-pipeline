@@ -44,6 +44,13 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/tables", h.ListTables)
 			}
+			sinks := authorized.Group("/sinks")
+			{
+				sinks.GET("", h.ListSinks)
+				sinks.POST("", h.CreateSink)
+				sinks.PUT("/:id", h.UpdateSink)
+				sinks.DELETE("/:id", h.DeleteSink)
+			}
 		}
 	}
 	return r
@@ -194,6 +201,38 @@ func TestAPI_Full(t *testing.T) {
 		json.Unmarshal(w.Body.Bytes(), &resp)
 		assert.Len(t, resp["sources"], 1)
 		assert.Equal(t, "s1", resp["sources"][0].ID)
+		mockKV.AssertExpectations(t)
+	})
+
+	t.Run("Create and Get Sink Success", func(t *testing.T) {
+		mockKV := new(MockKV)
+		router := setupTestRouter(mockKV)
+		token := getTestToken(t, router, mockKV)
+		authHeader := "Bearer " + token
+
+		sink := protocol.SinkConfig{ID: "snk1", Type: "databend", DSN: "http://root:@localhost:8000"}
+		data, _ := json.Marshal(sink)
+		key := protocol.SinkConfigKey("snk1")
+		
+		mockKV.On("Put", key, data).Return(uint64(1), nil)
+		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
+
+		// Create
+		body, _ := json.Marshal(sink)
+		req, _ := http.NewRequest("POST", "/api/v1/sinks", bytes.NewBuffer(body))
+		req.Header.Set("Authorization", authHeader)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusCreated, w.Code)
+
+		// Get List
+		mockKV.On("Keys").Return([]string{key}, nil)
+		req, _ = http.NewRequest("GET", "/api/v1/sinks", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
 		mockKV.AssertExpectations(t)
 	})
 

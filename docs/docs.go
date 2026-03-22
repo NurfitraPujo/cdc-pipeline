@@ -375,6 +375,146 @@ const docTemplate = `{
                 }
             }
         },
+        "/sinks": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve all sink configurations",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sinks"
+                ],
+                "summary": "List sinks",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "array",
+                                "items": {
+                                    "$ref": "#/definitions/protocol.SinkConfig"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Create a new sink configuration",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sinks"
+                ],
+                "summary": "Create sink",
+                "parameters": [
+                    {
+                        "description": "Sink Config",
+                        "name": "sink",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SinkConfig"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SinkConfig"
+                        }
+                    }
+                }
+            }
+        },
+        "/sinks/{id}": {
+            "put": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Update an existing sink configuration",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sinks"
+                ],
+                "summary": "Update sink",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Sink ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Sink Config",
+                        "name": "sink",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SinkConfig"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SinkConfig"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Delete a sink configuration",
+                "tags": [
+                    "sinks"
+                ],
+                "summary": "Delete sink",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Sink ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            }
+        },
         "/sources": {
             "get": {
                 "security": [
@@ -515,41 +655,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/sources/{id}/tables": {
-            "get": {
-                "security": [
-                    {
-                        "Bearer": []
-                    }
-                ],
-                "description": "Retrieve metadata for all tables in a source",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "sources"
-                ],
-                "summary": "List source tables",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Source ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    }
-                }
-            }
-        },
         "/workers/{id}/heartbeat": {
             "get": {
                 "security": [
@@ -633,6 +738,22 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "protocol.SinkConfig": {
+            "type": "object",
+            "properties": {
+                "dsn": {
+                    "description": "Data Source Name",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "type": {
+                    "description": "e.g., \"databend\"",
+                    "type": "string"
                 }
             }
         },

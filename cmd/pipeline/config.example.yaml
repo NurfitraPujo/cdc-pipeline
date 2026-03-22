@@ -11,7 +11,7 @@ global:
   batch_size: 1000
   batch_wait: 5s
 
-# Source Configurations (Stored in NATS KV as 'sources.{id}.config')
+# Source Configurations (Stored in NATS KV as 'daya.config.sources.{id}')
 sources:
   - id: "postgres-primary"
     type: "postgres"
@@ -22,13 +22,20 @@ sources:
     database: "production_db"
     slot_name: "daya_cdc_slot"
     publication_name: "daya_cdc_pub"
+    batch_size: 100
 
-# Pipeline Configurations (Stored in NATS KV as 'pipelines.{id}.config')
+# Sink Configurations (Stored in NATS KV as 'daya.config.sinks.{id}')
+sinks:
+  - id: "databend-analytics"
+    type: "databend"
+    dsn: "http://root:@localhost:8000"
+
+# Pipeline Configurations (Stored in NATS KV as 'daya.config.pipelines.{id}')
 pipelines:
   - id: "pipe-01"
     name: "Main Data Sync"
     sources: ["postgres-primary"]
-    sinks: ["databend-analytics"] # Sinks are pluggable (e.g., Databend)
+    sinks: ["databend-analytics"]
     tables:
       - "users"
       - "orders"

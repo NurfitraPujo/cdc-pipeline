@@ -94,13 +94,27 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		
-		// 3. Initialize Sink (Using default Databend for now, but should also be resolved from KV)
-		snk, err := databend.NewDatabendSink("databend-sink", "http://root:@localhost:8000")
+
+		// 3. Initialize Sink (Resolved from KV)
+		if len(cfg.Sinks) == 0 {
+			return nil, fmt.Errorf("no sinks defined for pipeline %s", id)
+		}
+		sinkID := cfg.Sinks[0]
+		sinkKey := protocol.SinkConfigKey(sinkID)
+		sinkEntry, err := kv.Get(sinkKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get sink config for %s: %w", sinkID, err)
+		}
+		var snkCfg protocol.SinkConfig
+		if err := json.Unmarshal(sinkEntry.Value(), &snkCfg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal sink config %s: %w", sinkID, err)
+		}
+
+		snk, err := databend.NewDatabendSink(sinkID, snkCfg.DSN)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// 4. Create Engine components using overrides from merged cfg
 		prod := engine.NewProducer(id, src, pub, kv)
 		cons := engine.NewConsumer(id, sub, snk, kv, cfg.BatchSize, cfg.BatchWait)
@@ -196,6 +210,7 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 		Auth      protocol.UserConfig       `yaml:"auth"`
 		Global    protocol.GlobalConfig     `yaml:"global"`
 		Sources   []protocol.SourceConfig   `yaml:"sources"`
+		Sinks     []protocol.SinkConfig     `yaml:"sinks"`
 		Pipelines []protocol.PipelineConfig `yaml:"pipelines"`
 	}
 
@@ -223,7 +238,15 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 		}
 	}
 
-	// 3. Seed Pipelines
+	// 3. Seed Sinks
+	for _, sc := range seed.Sinks {
+		data, _ := json.Marshal(sc)
+		if _, err := kv.Put(protocol.SinkConfigKey(sc.ID), data); err != nil {
+			return fmt.Errorf("failed to seed sink %s: %w", sc.ID, err)
+		}
+	}
+
+	// 4. Seed Pipelines
 	for _, pc := range seed.Pipelines {
 		data, _ := json.Marshal(pc)
 		if _, err := kv.Put(protocol.PipelineConfigKey(pc.ID), data); err != nil {

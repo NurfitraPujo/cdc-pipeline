@@ -34,6 +34,17 @@ definitions:
           type: string
         type: array
     type: object
+  protocol.SinkConfig:
+    properties:
+      dsn:
+        description: Data Source Name
+        type: string
+      id:
+        type: string
+      type:
+        description: e.g., "databend"
+        type: string
+    type: object
   protocol.SourceConfig:
     properties:
       batch_size:
@@ -303,6 +314,93 @@ paths:
       summary: Get pipeline status
       tags:
       - pipelines
+  /sinks:
+    get:
+      description: Retrieve all sink configurations
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/protocol.SinkConfig'
+              type: array
+            type: object
+      security:
+      - Bearer: []
+      summary: List sinks
+      tags:
+      - sinks
+    post:
+      consumes:
+      - application/json
+      description: Create a new sink configuration
+      parameters:
+      - description: Sink Config
+        in: body
+        name: sink
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.SinkConfig'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/protocol.SinkConfig'
+      security:
+      - Bearer: []
+      summary: Create sink
+      tags:
+      - sinks
+  /sinks/{id}:
+    delete:
+      description: Delete a sink configuration
+      parameters:
+      - description: Sink ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+      security:
+      - Bearer: []
+      summary: Delete sink
+      tags:
+      - sinks
+    put:
+      consumes:
+      - application/json
+      description: Update an existing sink configuration
+      parameters:
+      - description: Sink ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Sink Config
+        in: body
+        name: sink
+        required: true
+        schema:
+          $ref: '#/definitions/protocol.SinkConfig'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.SinkConfig'
+      security:
+      - Bearer: []
+      summary: Update sink
+      tags:
+      - sinks
   /sources:
     get:
       description: Retrieve all source configurations
@@ -388,28 +486,6 @@ paths:
       security:
       - Bearer: []
       summary: Update source
-      tags:
-      - sources
-  /sources/{id}/tables:
-    get:
-      description: Retrieve metadata for all tables in a source
-      parameters:
-      - description: Source ID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            additionalProperties: true
-            type: object
-      security:
-      - Bearer: []
-      summary: List source tables
       tags:
       - sources
   /workers/{id}/heartbeat:

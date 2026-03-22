@@ -106,6 +106,14 @@ func main() {
 				sources.GET("/:id/tables", h.ListTables)
 			}
 
+			sinks := authorized.Group("/sinks")
+			{
+				sinks.GET("", h.ListSinks)
+				sinks.POST("", h.CreateSink)
+				sinks.PUT("/:id", h.UpdateSink)
+				sinks.DELETE("/:id", h.DeleteSink)
+			}
+
 			workers := authorized.Group("/workers")
 			{
 				workers.GET("/:id/heartbeat", h.GetWorkerHeartbeat)

@@ -19,6 +19,7 @@ const (
 	KeyAuthConfig        = "daya.config.auth"
 	PrefixPipelineConfig = "daya.config.pipelines."
 	PrefixSourceConfig   = "daya.config.sources."
+	PrefixSinkConfig     = "daya.config.sinks."
 
 	// Operational/State Keys
 	PrefixPipelineState = "daya.pipeline."
@@ -26,13 +27,6 @@ const (
 )
 
 // Helper functions for key construction
-func WorkerHeartbeatKey(id string) string {
-	return fmt.Sprintf("%s%s.heartbeat", PrefixWorkerState, id)
-}
-
-func TableStatsKey(pid, sid, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table)
-}
 func TransitionStateKey(id string) string {
 	return fmt.Sprintf("%s%s.transition", PrefixPipelineState, id)
 }
@@ -42,6 +36,18 @@ func PipelineConfigKey(id string) string {
 
 func SourceConfigKey(id string) string {
 	return PrefixSourceConfig + id
+}
+
+func SinkConfigKey(id string) string {
+	return PrefixSinkConfig + id
+}
+
+func WorkerHeartbeatKey(id string) string {
+	return fmt.Sprintf("%s%s.heartbeat", PrefixWorkerState, id)
+}
+
+func TableStatsKey(pid, sid, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table)
 }
 
 func IngressCheckpointKey(pid, sid, table string) string {
@@ -95,6 +101,7 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.ID, validation.Required, is.Alphanumeric),
 		validation.Field(&p.Name, validation.Required),
 		validation.Field(&p.Sources, validation.Required, validation.Length(1, 0)),
+		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Tables, validation.Required, validation.Length(1, 0)),
 	)
 }
@@ -119,5 +126,19 @@ func (s SourceConfig) Validate() error {
 		validation.Field(&s.Host, validation.Required),
 		validation.Field(&s.Port, validation.Required, validation.Min(1), validation.Max(65535)),
 		validation.Field(&s.Database, validation.Required),
+	)
+}
+
+type SinkConfig struct {
+	ID   string `msg:"id" yaml:"id" json:"id"`
+	Type string `msg:"type" yaml:"type" json:"type"` // e.g., "databend"
+	DSN  string `msg:"dsn" yaml:"dsn" json:"dsn"`   // Data Source Name
+}
+
+func (s SinkConfig) Validate() error {
+	return validation.ValidateStruct(&s,
+		validation.Field(&s.ID, validation.Required, is.Alphanumeric),
+		validation.Field(&s.Type, validation.Required, validation.In("databend")),
+		validation.Field(&s.DSN, validation.Required),
 	)
 }
