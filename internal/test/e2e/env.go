@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
 	"testing"
 	"time"
 
@@ -149,4 +147,68 @@ func (e *Environment) StartWorker() {
 
 	e.Mgr = config.NewConfigManager(e.KV, factory)
 	require.NoError(e.T, e.Mgr.Watch(e.Ctx))
+}
+
+func (e *Environment) SeedPostgres(table string, rows int) {
+	_, err := e.Postgres.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id SERIAL PRIMARY KEY, name TEXT, age INT, metadata JSONB, created_at TIMESTAMP DEFAULT NOW())", table))
+	require.NoError(e.T, err)
+
+	for i := 0; i < rows; i++ {
+		_, err = e.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age, metadata) VALUES ($1, $2, $3)", table), 
+			fmt.Sprintf("user-%d", i), 20+(i%50), `{"key": "value"}`)
+		require.NoError(e.T, err)
+	}
+}
+
+func (e *Environment) EventuallyCountDatabend(table string, expected int, timeout time.Duration) {
+	require.Eventually(e.T, func() bool {
+		var count int
+		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM \"%s\"", table)).Scan(&count)
+		if err != nil {
+			return false
+		}
+		return count == expected
+	}, timeout, 1*time.Second, "Expected %d rows in Databend table %s", expected, table)
+}
+
+func (e *Environment) EventuallyMatchDatabend(table string, id int, expected map[string]any, timeout time.Duration) {
+	require.Eventually(e.T, func() bool {
+		rows, err := e.Databend.Query(fmt.Sprintf("SELECT * FROM \"%s\" WHERE id = %d", table, id))
+		if err != nil {
+			return false
+		}
+		defer rows.Close()
+
+		if !rows.Next() {
+			return false
+		}
+
+		cols, _ := rows.Columns()
+		values := make([]any, len(cols))
+		pointers := make([]any, len(cols))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+
+		if err := rows.Scan(pointers...); err != nil {
+			return false
+		}
+
+		for k, v := range expected {
+			found := false
+			for i, col := range cols {
+				if col == k {
+					// Basic comparison
+					if fmt.Sprintf("%v", values[i]) == fmt.Sprintf("%v", v) {
+						found = true
+					}
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}, timeout, 1*time.Second)
 }
