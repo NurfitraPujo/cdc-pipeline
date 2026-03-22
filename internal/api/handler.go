@@ -19,6 +19,47 @@ func NewHandler(kv nats.KeyValue) *Handler {
 	return &Handler{kv: kv}
 }
 
+// --- Global Config ---
+
+func (h *Handler) GetGlobalConfig(c *gin.Context) {
+	entry, err := h.kv.Get(protocol.KeyGlobalConfig)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "global config not found"})
+		return
+	}
+
+	var cfg protocol.GlobalConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
+}
+
+func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
+	var cfg protocol.GlobalConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	data, _ := json.Marshal(cfg)
+	if _, err := h.kv.Put(protocol.KeyGlobalConfig, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
+}
+
+// --- Pipelines ---
+
 func (h *Handler) ListPipelines(c *gin.Context) {
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -55,7 +96,7 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 		return
 	}
 
-	// 1. Dynamic Rate Limit: Check if pipeline is currently transitioning
+	// Dynamic Rate Limit: Check if pipeline is currently transitioning
 	tsKey := protocol.TransitionStateKey(cfg.ID)
 	if entry, err := h.kv.Get(tsKey); err == nil {
 		var ts protocol.PipelineTransitionState
@@ -76,6 +117,42 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, cfg)
+}
+
+func (h *Handler) UpdatePipeline(c *gin.Context) {
+	id := c.Param("id")
+	var cfg protocol.PipelineConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg.ID = id
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	tsKey := protocol.TransitionStateKey(id)
+	if entry, err := h.kv.Get(tsKey); err == nil {
+		var ts protocol.PipelineTransitionState
+		if err := json.Unmarshal(entry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":      "pipeline is currently transitioning/restarting",
+				"started_at": ts.StartedAt,
+			})
+			return
+		}
+	}
+
+	data, _ := json.Marshal(cfg)
+	key := protocol.PipelineConfigKey(id)
+	if _, err := h.kv.Put(key, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
 }
 
 func (h *Handler) GetPipeline(c *gin.Context) {
@@ -117,7 +194,6 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	statusMap := make(map[string]protocol.Checkpoint)
 	prefix := protocol.PipelineStatusPrefix(id)
 	for _, key := range keys {
-		// Key pattern includes .sources.{sid}.tables.{table}.*_checkpoint
 		if strings.HasPrefix(key, prefix) && (strings.HasSuffix(key, ".ingress_checkpoint") || strings.HasSuffix(key, ".egress_checkpoint")) {
 			entry, err := h.kv.Get(key)
 			if err != nil {
@@ -132,6 +208,8 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"pipeline_id": id, "status": statusMap})
 }
+
+// --- Sources ---
 
 func (h *Handler) ListSources(c *gin.Context) {
 	keys, err := h.kv.Keys()
@@ -179,6 +257,30 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	c.JSON(http.StatusCreated, cfg)
 }
 
+func (h *Handler) UpdateSource(c *gin.Context) {
+	id := c.Param("id")
+	var cfg protocol.SourceConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg.ID = id
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	data, _ := json.Marshal(cfg)
+	key := protocol.SourceConfigKey(id)
+	if _, err := h.kv.Put(key, data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
+}
+
 func (h *Handler) DeleteSource(c *gin.Context) {
 	id := c.Param("id")
 	key := protocol.SourceConfigKey(id)
@@ -198,7 +300,6 @@ func (h *Handler) ListTables(c *gin.Context) {
 	}
 
 	var tables []protocol.TableMetadata
-	// Key pattern for metadata: daya.pipeline.*.sources.{sourceID}.tables.*.metadata
 	suffix := fmt.Sprintf(".sources.%s.tables.", sourceID)
 	for _, key := range keys {
 		if strings.Contains(key, suffix) && strings.HasSuffix(key, ".metadata") {

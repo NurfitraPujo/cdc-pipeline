@@ -71,6 +71,32 @@ curl -X POST http://localhost:8080/api/v1/pipelines \
      }'
 ```
 
+### 4. Update Global Configuration
+```bash
+curl -X PUT http://localhost:8080/api/v1/global \
+     -H "Authorization: Bearer <TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "batch_size": 2000,
+       "batch_wait": 10000000000
+     }'
+```
+*Note: Updating global config triggers a graceful reload of all active pipelines.*
+
+### 5. Update a Pipeline
+```bash
+curl -X PUT http://localhost:8080/api/v1/pipelines/sync-01 \
+     -H "Authorization: Bearer <TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "Updated Pipeline Name",
+       "sources": ["pg-primary"],
+       "tables": ["users", "orders", "new_table"],
+       "batch_size": 1500
+     }'
+```
+*Note: If a pipeline is already restarting, this will return 429 Too Many Requests.*
+
 ---
 
 ## Monitoring

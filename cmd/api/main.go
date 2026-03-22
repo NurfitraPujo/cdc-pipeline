@@ -55,11 +55,15 @@ func main() {
 		authorized := v1.Group("/")
 		authorized.Use(api.AuthMiddleware())
 		{
+			authorized.GET("/global", h.GetGlobalConfig)
+			authorized.PUT("/global", h.UpdateGlobalConfig)
+
 			pipelines := authorized.Group("/pipelines")
 			{
 				pipelines.GET("", h.ListPipelines)
 				pipelines.POST("", h.CreatePipeline)
 				pipelines.GET("/:id", h.GetPipeline)
+				pipelines.PUT("/:id", h.UpdatePipeline)
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
@@ -69,6 +73,7 @@ func main() {
 			{
 				sources.GET("", h.ListSources)
 				sources.POST("", h.CreateSource)
+				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/tables", h.ListTables)
 			}
