@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -144,6 +145,32 @@ func main() {
 				data, _ := json.Marshal(hb)
 				kv.Put(protocol.WorkerHeartbeatKey(workerID), data)
 			}
+		}
+	}()
+
+	// 6. Health Check Server (for Kubernetes)
+	healthPort := os.Getenv("HEALTH_PORT")
+	if healthPort == "" {
+		healthPort = "8081"
+	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+			if nc.Status() == go_nats.CONNECTED {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("READY"))
+			} else {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("NATS NOT CONNECTED"))
+			}
+		})
+		log.Printf("Health check server started on :%s", healthPort)
+		if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+			log.Printf("Health check server failed: %v", err)
 		}
 	}()
 

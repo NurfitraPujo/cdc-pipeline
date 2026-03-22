@@ -106,6 +106,19 @@ The worker automatically bootstraps NATS KV if empty.
 export NATS_URL="nats://localhost:4222"
 go run ./cmd/pipeline
 ```
+*Note: The worker exposes health checks on `:8081` (`/healthz` and `/readyz`) for Kubernetes.*
+
+#### Kubernetes Probe Example:
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8081
+```
 
 ### Running the API
 ```bash
