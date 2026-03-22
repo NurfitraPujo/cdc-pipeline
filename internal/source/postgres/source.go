@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
@@ -127,7 +128,9 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 				return
 			}
 		}
-		lc.Ack()
+		if err := lc.Ack(); err != nil {
+			log.Printf("Warning: Failed to ack LSN: %v", err)
+		}
 	}
 
 	connector, err := cdc.NewConnector(ctx, cfg, handler)

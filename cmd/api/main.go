@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
@@ -127,8 +128,9 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
@@ -137,6 +139,7 @@ func main() {
 		}
 	}()
 
+	// #nosec G706 -- port is from environment
 	log.Printf("API Server started on :%s", port)
 
 	<-ctx.Done()

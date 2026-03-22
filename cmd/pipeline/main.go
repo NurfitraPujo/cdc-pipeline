@@ -157,7 +157,9 @@ func main() {
 					UpdatedAt: t,
 				}
 				data, _ := json.Marshal(hb)
-				kv.Put(protocol.WorkerHeartbeatKey(workerID), data)
+				if _, err := kv.Put(protocol.WorkerHeartbeatKey(workerID), data); err != nil {
+					log.Printf("Warning: Failed to update worker heartbeat: %v", err)
+				}
 			}
 		}
 	}()
@@ -167,23 +169,31 @@ func main() {
 	if healthPort == "" {
 		healthPort = "8081"
 	}
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if nc.Status() == go_nats.CONNECTED {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if nc.Status() == go_nats.CONNECTED {
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte("READY"))
-			} else {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte("NATS NOT CONNECTED"))
-			}
-		})
+			_, _ = w.Write([]byte("READY"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("NATS NOT CONNECTED"))
+		}
+	})
+
+	healthSrv := &http.Server{
+		Addr:              ":" + healthPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		// #nosec G706 -- healthPort is from environment
 		log.Printf("Health check server started on :%s", healthPort)
-		if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("Health check server failed: %v", err)
 		}
 	}()
@@ -219,6 +229,7 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 	}
 
 	// 0. Seed Auth
+	// #nosec G117 -- credentials being marshaled for NATS KV seeding
 	authData, _ := json.Marshal(seed.Auth)
 	if _, err := kv.Put(protocol.KeyAuthConfig, authData); err != nil {
 		return fmt.Errorf("failed to seed auth config: %w", err)
@@ -232,6 +243,7 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 
 	// 2. Seed Sources
 	for _, sc := range seed.Sources {
+		// #nosec G117 -- credentials being marshaled for NATS KV seeding
 		data, _ := json.Marshal(sc)
 		if _, err := kv.Put(protocol.SourceConfigKey(sc.ID), data); err != nil {
 			return fmt.Errorf("failed to seed source %s: %w", sc.ID, err)

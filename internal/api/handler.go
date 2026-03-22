@@ -363,6 +363,7 @@ func (h *Handler) CreateSource(c *gin.Context) {
 		return
 	}
 
+	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SourceConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -398,6 +399,7 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 		return
 	}
 
+	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SourceConfigKey(id)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -508,6 +510,7 @@ func (h *Handler) CreateSink(c *gin.Context) {
 		return
 	}
 
+	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SinkConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -543,6 +546,7 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 		return
 	}
 
+	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SinkConfigKey(id)
 	if _, err := h.kv.Put(key, data); err != nil {

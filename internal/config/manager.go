@@ -121,37 +121,6 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 	}
 }
 
-func (m *ConfigManager) Stop(ctx context.Context) {
-	m.workersMu.Lock()
-	ids := make([]string, 0, len(m.workers))
-	for id := range m.workers {
-		ids = append(ids, id)
-	}
-	m.workersMu.Unlock()
-
-	var wg sync.WaitGroup
-	for _, id := range ids {
-		wg.Add(1)
-		go func(pid string) {
-			defer wg.Done()
-			m.stopWorker(ctx, pid)
-		}(id)
-	}
-	
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Println("Graceful shutdown timed out")
-	case <-done:
-		log.Println("All pipelines stopped gracefully")
-	}
-}
-
 func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.KeyWatcher) {
 	defer watcher.Stop()
 	for {
@@ -213,7 +182,9 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 		StartedAt: time.Now(),
 	}
 	tsData, _ := json.Marshal(ts)
-	m.kv.Put(protocol.TransitionStateKey(id), tsData)
+	if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
+		log.Printf("Warning: Failed to set transition state for %s: %v", id, err)
+	}
 
 	if exists {
 		log.Printf("Initiating two-phase transition for pipeline %s", id)
@@ -228,19 +199,25 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			log.Printf("Transition Phase 2: Shutting down worker %s", id)
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			w.Shutdown(shutdownCtx)
+			if err := w.Shutdown(shutdownCtx); err != nil {
+				log.Printf("Error shutting down worker %s: %v", id, err)
+			}
 			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
 
 			m.startNewWorker(ctx, id, newCfg)
 			
 			// 2. Clear Transitioning state
-			m.kv.Delete(protocol.TransitionStateKey(id))
+			if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
+				log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
+			}
 		}(oldWorker, cfg)
 	} else {
 		log.Printf("Starting initial worker for pipeline %s", id)
 		m.startNewWorker(ctx, id, cfg)
 		// 2. Clear Transitioning state
-		m.kv.Delete(protocol.TransitionStateKey(id))
+		if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
+			log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
+		}
 	}
 }
 
@@ -266,11 +243,46 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 
 	if ok {
 		log.Printf("Stopping pipeline %s", id)
-		w.Drain()
+		if err := w.Drain(); err != nil {
+			log.Printf("Error draining worker %s during stop: %v", id, err)
+		}
 		go func(worker engine.PipelineWorker) {
 			<-worker.Finished()
-			worker.Shutdown(context.Background())
+			if err := worker.Shutdown(context.Background()); err != nil {
+				log.Printf("Error shutting down worker %s during stop: %v", id, err)
+			}
 		}(w)
+	}
+}
+
+func (m *ConfigManager) Stop(ctx context.Context) {
+	m.workersMu.Lock()
+	ids := make([]string, 0, len(m.workers))
+	for id := range m.workers {
+		ids = append(ids, id)
+	}
+	m.workersMu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(pid string) {
+			defer wg.Done()
+			m.stopWorker(ctx, pid)
+		}(id)
+	}
+	
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Graceful shutdown timed out")
+	case <-done:
+		log.Println("All pipelines stopped gracefully")
 	}
 }
 

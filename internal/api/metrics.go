@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"strings"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
@@ -35,15 +36,24 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 
 			if strings.HasSuffix(key, "_checkpoint") {
 				var cp protocol.Checkpoint
-				json.Unmarshal(entry.Value(), &cp)
+				if err := json.Unmarshal(entry.Value(), &cp); err != nil {
+					log.Printf("Error unmarshaling checkpoint %s: %v", key, err)
+					return true
+				}
 				data = cp
 			} else if strings.HasSuffix(key, ".stats") {
 				var st protocol.TableStats
-				json.Unmarshal(entry.Value(), &st)
+				if err := json.Unmarshal(entry.Value(), &st); err != nil {
+					log.Printf("Error unmarshaling stats %s: %v", key, err)
+					return true
+				}
 				data = st
 			} else if strings.HasSuffix(key, ".transition") {
 				var ts protocol.PipelineTransitionState
-				json.Unmarshal(entry.Value(), &ts)
+				if err := json.Unmarshal(entry.Value(), &ts); err != nil {
+					log.Printf("Error unmarshaling transition %s: %v", key, err)
+					return true
+				}
 				data = ts
 			} else {
 				data = string(entry.Value())

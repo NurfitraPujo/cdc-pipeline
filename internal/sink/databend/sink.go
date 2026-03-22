@@ -79,13 +79,15 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	// NOTE: We assume 'pk' is part of the columns and we'll use it in ON clause.
 	// For now, let's use the PK field from our protocol.Message if available.
 	
-	colList := strings.Join(columns, ", ")
+	quotedColumns := make([]string, len(columns))
+	for i, col := range columns {
+		quotedColumns[i] = "\"" + col + "\""
+	}
+	colList := strings.Join(quotedColumns, ", ")
 	
-	// We'll use "REPLACE INTO" which handles deduplication on unique keys/PKs
-	// Databend REPLACE INTO syntax: REPLACE INTO [db.]table [(c1, c2, ...)] ON (c1, [c2, ...]) VALUES (v1, v2, ...), ...
-	// For simplicity, let's assume the table has a unique key that matches the source PK.
-	
-	query := fmt.Sprintf("REPLACE INTO %s (%s) VALUES ", table, colList)
+	// Quote table name to prevent injection/keyword conflicts
+	safeTable := "\"" + table + "\""
+	query := fmt.Sprintf("REPLACE INTO %s (%s) VALUES ", safeTable, colList)
 	
 	valueStrings := make([]string, 0, len(messages))
 	valueArgs := make([]any, 0, len(messages)*len(columns))

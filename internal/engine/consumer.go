@@ -92,6 +92,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 			cpData, _ := checkpoint.MarshalMsg(nil)
 			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
+			// #nosec G104 -- checkpoint update
 			c.kv.Put(cpKey, cpData)
 
 			// 2. Update Stats
@@ -100,7 +101,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				s = &protocol.TableStats{}
 				c.stats[key] = s
 			}
-			s.TotalSynced += uint64(countsByTable[key])
+			if count := countsByTable[key]; count > 0 {
+				s.TotalSynced += uint64(count)
+			}
 			s.LastSourceTS = m.Timestamp
 			s.LastProcessedTS = now
 			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
@@ -114,6 +117,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			statsData, _ := s.MarshalMsg(nil)
 			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+			// #nosec G104 -- non-critical stats update
 			c.kv.Put(statsKey, statsData)
 		}
 
