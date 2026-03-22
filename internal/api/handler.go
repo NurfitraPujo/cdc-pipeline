@@ -49,6 +49,18 @@ func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 		return
 	}
 
+	// Dynamic Rate Limit for Global: Check if ANY pipeline is currently transitioning
+	// since global update triggers a reload for all.
+	keys, _ := h.kv.Keys()
+	for _, key := range keys {
+		if strings.HasSuffix(key, ".transition") {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "cannot update global config while pipelines are transitioning",
+			})
+			return
+		}
+	}
+
 	data, _ := json.Marshal(cfg)
 	if _, err := h.kv.Put(protocol.KeyGlobalConfig, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
