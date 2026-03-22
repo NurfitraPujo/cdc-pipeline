@@ -93,6 +93,11 @@ func main() {
 				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/tables", h.ListTables)
 			}
+
+			workers := authorized.Group("/workers")
+			{
+				workers.GET("/:id/heartbeat", h.GetWorkerHeartbeat)
+			}
 		}
 	}
 

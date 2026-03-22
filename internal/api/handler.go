@@ -264,9 +264,9 @@ func (h *Handler) DeletePipeline(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
-// GetPipelineStatus returns current LSN status.
+// GetPipelineStatus returns current LSN status and stats.
 // @Summary      Get pipeline status
-// @Description  Retrieve aggregated multi-table status for a pipeline
+// @Description  Retrieve aggregated multi-table status and stats for a pipeline
 // @Tags         pipelines
 // @Produce      json
 // @Security     Bearer
@@ -281,17 +281,25 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 		return
 	}
 
-	statusMap := make(map[string]protocol.Checkpoint)
+	statusMap := make(map[string]any)
 	prefix := protocol.PipelineStatusPrefix(id)
 	for _, key := range keys {
-		if strings.HasPrefix(key, prefix) && (strings.HasSuffix(key, ".ingress_checkpoint") || strings.HasSuffix(key, ".egress_checkpoint")) {
+		if strings.HasPrefix(key, prefix) {
 			entry, err := h.kv.Get(key)
 			if err != nil {
 				continue
 			}
-			var cp protocol.Checkpoint
-			if err := json.Unmarshal(entry.Value(), &cp); err == nil {
-				statusMap[key] = cp
+
+			if strings.HasSuffix(key, "_checkpoint") {
+				var cp protocol.Checkpoint
+				if err := json.Unmarshal(entry.Value(), &cp); err == nil {
+					statusMap[key] = cp
+				}
+			} else if strings.HasSuffix(key, ".stats") {
+				var st protocol.TableStats
+				if err := json.Unmarshal(entry.Value(), &st); err == nil {
+					statusMap[key] = st
+				}
 			}
 		}
 	}
@@ -451,4 +459,33 @@ func (h *Handler) ListTables(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
+}
+
+// --- Workers ---
+
+// GetWorkerHeartbeat returns worker status.
+// @Summary      Get worker status
+// @Description  Retrieve heartbeat and uptime for a worker
+// @Tags         workers
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Worker ID"
+// @Success      200  {object}  protocol.WorkerHeartbeat
+// @Router       /workers/{id}/heartbeat [get]
+func (h *Handler) GetWorkerHeartbeat(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.WorkerHeartbeatKey(id)
+	entry, err := h.kv.Get(key)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "worker not found"})
+		return
+	}
+
+	var hb protocol.WorkerHeartbeat
+	if err := json.Unmarshal(entry.Value(), &hb); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, hb)
 }

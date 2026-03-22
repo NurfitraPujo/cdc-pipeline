@@ -58,6 +58,17 @@ definitions:
       user:
         type: string
     type: object
+  protocol.WorkerHeartbeat:
+    properties:
+      status:
+        type: string
+      updated_at:
+        type: string
+      uptime_sec:
+        type: integer
+      worker_id:
+        type: string
+    type: object
 host: localhost:8080
 info:
   contact: {}
@@ -272,7 +283,7 @@ paths:
       - pipelines
   /pipelines/{id}/status:
     get:
-      description: Retrieve aggregated multi-table status for a pipeline
+      description: Retrieve aggregated multi-table status and stats for a pipeline
       parameters:
       - description: Pipeline ID
         in: path
@@ -401,6 +412,27 @@ paths:
       summary: List source tables
       tags:
       - sources
+  /workers/{id}/heartbeat:
+    get:
+      description: Retrieve heartbeat and uptime for a worker
+      parameters:
+      - description: Worker ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.WorkerHeartbeat'
+      security:
+      - Bearer: []
+      summary: Get worker status
+      tags:
+      - workers
 securityDefinitions:
   Bearer:
     description: Type "Bearer " followed by your JWT token.

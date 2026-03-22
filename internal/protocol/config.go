@@ -22,9 +22,17 @@ const (
 
 	// Operational/State Keys
 	PrefixPipelineState = "daya.pipeline."
+	PrefixWorkerState   = "daya.worker."
 )
 
 // Helper functions for key construction
+func WorkerHeartbeatKey(id string) string {
+	return fmt.Sprintf("%s%s.heartbeat", PrefixWorkerState, id)
+}
+
+func TableStatsKey(pid, sid, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table)
+}
 func TransitionStateKey(id string) string {
 	return fmt.Sprintf("%s%s.transition", PrefixPipelineState, id)
 }

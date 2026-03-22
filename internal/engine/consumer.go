@@ -24,6 +24,10 @@ type Consumer struct {
 	targetLSN  uint64
 	mu         sync.RWMutex
 	isDraining bool
+
+	// Monitoring
+	statsMu sync.Mutex
+	stats   map[string]*protocol.TableStats
 }
 
 func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration) *Consumer {
@@ -34,6 +38,7 @@ func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nat
 		kv:         kv,
 		batchSize:  batchSize,
 		batchWait:  batchWait,
+		stats:      make(map[string]*protocol.TableStats),
 	}
 }
 
@@ -46,6 +51,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 	var batch []protocol.Message
 	var wmMsgs []*message.Message
 	timer := time.NewTimer(c.batchWait)
+	startTime := time.Now()
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -63,25 +69,52 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			m.Ack()
 		}
 
-		// Update checkpoints for all tables affected in this batch
-		// We track the latest LSN per table in this batch
+		// Update checkpoints AND stats for all tables affected in this batch
+		c.statsMu.Lock()
+		defer c.statsMu.Unlock()
+
 		latestByTable := make(map[string]protocol.Message)
+		countsByTable := make(map[string]int)
 		for _, m := range batch {
-			latestByTable[m.SourceID+"."+m.Table] = m
+			key := m.SourceID + "." + m.Table
+			latestByTable[key] = m
+			countsByTable[key]++
 		}
 
-		for _, m := range latestByTable {
+		now := time.Now()
+		for key, m := range latestByTable {
+			// 1. Update Checkpoint
 			checkpoint := protocol.Checkpoint{
 				EgressLSN: m.LSN,
 				LastPK:    m.PK,
 				Status:    "ACTIVE",
-				UpdatedAt: time.Now(),
+				UpdatedAt: now,
 			}
 			cpData, _ := checkpoint.MarshalMsg(nil)
-			key := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
-			if _, err := c.kv.Put(key, cpData); err != nil {
-				log.Printf("Warning: Failed to update egress checkpoint for %s: %v", key, err)
+			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
+			c.kv.Put(cpKey, cpData)
+
+			// 2. Update Stats
+			s, ok := c.stats[key]
+			if !ok {
+				s = &protocol.TableStats{}
+				c.stats[key] = s
 			}
+			s.TotalSynced += uint64(countsByTable[key])
+			s.LastSourceTS = m.Timestamp
+			s.LastProcessedTS = now
+			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
+			s.UpdatedAt = now
+			
+			// Simple RPS calculation since last start
+			elapsed := now.Sub(startTime).Seconds()
+			if elapsed > 0 {
+				s.RPS = float64(s.TotalSynced) / elapsed
+			}
+
+			statsData, _ := s.MarshalMsg(nil)
+			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+			c.kv.Put(statsKey, statsData)
 		}
 
 		batch = nil

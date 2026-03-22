@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"strings"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
@@ -11,7 +12,7 @@ import (
 func (h *Handler) StreamMetrics(c *gin.Context) {
 	pipelineID := c.Param("id")
 	
-	// Watch all ingress and egress checkpoints for this pipeline
+	// Watch all ingress and egress checkpoints, stats and transition state for this pipeline
 	pattern := protocol.PipelineStatusPrefix(pipelineID) + "*"
 	watcher, err := h.kv.Watch(pattern)
 	if err != nil {
@@ -29,15 +30,29 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 				return true
 			}
 
-			var cp protocol.Checkpoint
-			if err := json.Unmarshal(entry.Value(), &cp); err != nil {
-				return true
+			var data any
+			key := entry.Key()
+
+			if strings.HasSuffix(key, "_checkpoint") {
+				var cp protocol.Checkpoint
+				json.Unmarshal(entry.Value(), &cp)
+				data = cp
+			} else if strings.HasSuffix(key, ".stats") {
+				var st protocol.TableStats
+				json.Unmarshal(entry.Value(), &st)
+				data = st
+			} else if strings.HasSuffix(key, ".transition") {
+				var ts protocol.PipelineTransitionState
+				json.Unmarshal(entry.Value(), &ts)
+				data = ts
+			} else {
+				data = string(entry.Value())
 			}
 
 			// Send as SSE event
 			c.SSEvent("message", map[string]any{
-				"key":        entry.Key(),
-				"checkpoint": cp,
+				"key":  key,
+				"data": data,
 			})
 			return true
 		}

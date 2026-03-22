@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/config"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
@@ -120,7 +121,33 @@ func main() {
 		log.Fatalf("Failed to start config watcher: %v", err)
 	}
 
-	log.Println("Daya Data Pipeline Worker started. Waiting for configuration...")
+	// 5. Worker Heartbeat
+	workerID, _ := os.Hostname()
+	if workerID == "" {
+		workerID = "unknown-worker"
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		startTime := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-ticker.C:
+				hb := protocol.WorkerHeartbeat{
+					WorkerID:  workerID,
+					Status:    "online",
+					UptimeSec: int64(t.Sub(startTime).Seconds()),
+					UpdatedAt: t,
+				}
+				data, _ := json.Marshal(hb)
+				kv.Put(protocol.WorkerHeartbeatKey(workerID), data)
+			}
+		}
+	}()
+
+	log.Printf("Daya Data Pipeline Worker [%s] started. Waiting for configuration...", workerID)
 	<-ctx.Done()
 	log.Println("Shutting down...")
 }

@@ -347,7 +347,7 @@ const docTemplate = `{
                         "Bearer": []
                     }
                 ],
-                "description": "Retrieve aggregated multi-table status for a pipeline",
+                "description": "Retrieve aggregated multi-table status and stats for a pipeline",
                 "produces": [
                     "application/json"
                 ],
@@ -549,6 +549,40 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/workers/{id}/heartbeat": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve heartbeat and uptime for a worker",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workers"
+                ],
+                "summary": "Get worker status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Worker ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.WorkerHeartbeat"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -634,6 +668,23 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "user": {
+                    "type": "string"
+                }
+            }
+        },
+        "protocol.WorkerHeartbeat": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "uptime_sec": {
+                    "type": "integer"
+                },
+                "worker_id": {
                     "type": "string"
                 }
             }
