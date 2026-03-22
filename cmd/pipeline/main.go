@@ -135,6 +135,7 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 	log.Println("KV bucket empty. Bootstrapping from embedded config.example.yaml...")
 
 	var seed struct {
+		Auth      protocol.UserConfig       `yaml:"auth"`
 		Global    protocol.GlobalConfig     `yaml:"global"`
 		Sources   []protocol.SourceConfig   `yaml:"sources"`
 		Pipelines []protocol.PipelineConfig `yaml:"pipelines"`
@@ -142,6 +143,12 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 
 	if err := yaml.Unmarshal(defaultConfigFile, &seed); err != nil {
 		return fmt.Errorf("failed to unmarshal embedded config: %w", err)
+	}
+
+	// 0. Seed Auth
+	authData, _ := json.Marshal(seed.Auth)
+	if _, err := kv.Put(protocol.KeyAuthConfig, authData); err != nil {
+		return fmt.Errorf("failed to seed auth config: %w", err)
 	}
 
 	// 1. Seed Global

@@ -1,17 +1,19 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gin-gonic/gin"
 )
 
 var jwtSecret = []byte("daya-secret-key")
 
-func Login(c *gin.Context) {
+func (h *Handler) Login(c *gin.Context) {
 	var creds struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -22,8 +24,19 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// TODO: Authenticate against NATS KV (hashed passwords)
-	if creds.Username == "admin" && creds.Password == "admin" {
+	entry, err := h.kv.Get(protocol.KeyAuthConfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch auth config"})
+		return
+	}
+
+	var authCfg protocol.UserConfig
+	if err := json.Unmarshal(entry.Value(), &authCfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse auth config"})
+		return
+	}
+
+	if creds.Username == authCfg.Username && creds.Password == authCfg.Password {
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"username": creds.Username,
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),

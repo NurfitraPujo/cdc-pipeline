@@ -1,7 +1,12 @@
 # Daya Data Pipeline - Configuration Template
 # This file serves as a reference for the settings stored in NATS KV.
 
-# Global Defaults (Stored in NATS KV as 'global.config')
+# Authentication (Stored in NATS KV as 'daya.config.auth')
+auth:
+  username: "admin"
+  password: "admin"
+
+# Global Defaults (Stored in NATS KV as 'daya.config.global')
 global:
   batch_size: 1000
   batch_wait: 5s

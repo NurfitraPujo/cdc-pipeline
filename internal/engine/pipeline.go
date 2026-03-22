@@ -16,7 +16,6 @@ type Pipeline struct {
 	consumer   *Consumer
 	config     protocol.PipelineConfig
 	srcConfigs map[string]protocol.SourceConfig
-	checkpoints map[string]protocol.Checkpoint
 	
 	finished   chan struct{}
 	drainOnce  sync.Once
@@ -48,8 +47,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	go func() {
 		defer p.wg.Done()
 		
-		// For now, we assume a single source per pipeline for simplicity, 
-		// but we fetch its actual configuration and checkpoint from KV.
 		if len(p.config.Sources) == 0 {
 			log.Printf("No sources defined for pipeline %s", p.id)
 			return
@@ -70,20 +67,35 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			return
 		}
 
-		// 2. Get Ingress Checkpoint (if any)
-		// Assuming we resume for the first table defined in config for now
-		table := "default"
-		if len(p.config.Tables) > 0 {
-			table = p.config.Tables[0]
-		}
-		cpKey := protocol.IngressCheckpointKey(p.id, sourceID, table)
-		cpEntry, err := p.producer.kv.Get(cpKey)
-		var cp protocol.Checkpoint
-		if err == nil {
-			json.Unmarshal(cpEntry.Value(), &cp)
+		// 2. Get Checkpoints for all tables
+		checkpoints := make(map[string]protocol.Checkpoint)
+		for _, table := range p.config.Tables {
+			cpKey := protocol.IngressCheckpointKey(p.id, sourceID, table)
+			cpEntry, err := p.producer.kv.Get(cpKey)
+			if err == nil {
+				var cp protocol.Checkpoint
+				if err := json.Unmarshal(cpEntry.Value(), &cp); err == nil {
+					checkpoints[table] = cp
+				}
+			}
 		}
 
-		lsn, err := p.producer.Run(p.ctx, srcCfg, cp)
+		// Update Producer to handle multi-table checkpoints if needed
+		// For now, we pass the first found LSN or 0 to the source start
+		// In a real multi-table CDC, go-pq-cdc uses one slot for all tables,
+		// so the lowest LSN among all tables is the safe starting point.
+		var minLSN uint64
+		var first = true
+		for _, cp := range checkpoints {
+			if first || cp.IngressLSN < minLSN {
+				minLSN = cp.IngressLSN
+				first = false
+			}
+		}
+		
+		initialCP := protocol.Checkpoint{IngressLSN: minLSN}
+
+		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
 			log.Printf("Producer for pipeline %s failed: %v", p.id, err)
 		}

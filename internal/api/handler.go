@@ -50,6 +50,11 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 		return
 	}
 
+	if err := cfg.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	data, _ := json.Marshal(cfg)
 	key := protocol.PipelineConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -89,6 +94,7 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	statusMap := make(map[string]protocol.Checkpoint)
 	prefix := protocol.PipelineStatusPrefix(id)
 	for _, key := range keys {
+		// Key pattern includes .sources.{sid}.tables.{table}.*_checkpoint
 		if strings.HasPrefix(key, prefix) && (strings.HasSuffix(key, ".ingress_checkpoint") || strings.HasSuffix(key, ".egress_checkpoint")) {
 			entry, err := h.kv.Get(key)
 			if err != nil {
@@ -131,6 +137,11 @@ func (h *Handler) ListSources(c *gin.Context) {
 func (h *Handler) CreateSource(c *gin.Context) {
 	var cfg protocol.SourceConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := cfg.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

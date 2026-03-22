@@ -50,7 +50,7 @@ func main() {
 
 	v1 := r.Group("/api/v1")
 	{
-		v1.POST("/login", api.Login)
+		v1.POST("/login", h.Login)
 
 		authorized := v1.Group("/")
 		authorized.Use(api.AuthMiddleware())
