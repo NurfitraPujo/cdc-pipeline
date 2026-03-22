@@ -87,6 +87,8 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			m.globalConfigMu.Unlock()
 
 			// Trigger reload for all active workers to apply new global defaults
+			// Add a small delay to prevent rapid restart loops if multiple global updates happen
+			time.Sleep(2 * time.Second)
 			m.reloadAllWorkers(ctx)
 		}
 	}

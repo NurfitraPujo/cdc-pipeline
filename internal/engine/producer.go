@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -16,12 +15,12 @@ import (
 )
 
 type Producer struct {
+	pipelineID   string
 	source       source.Source
 	publisher    stream.Publisher
 	kv           nats.KeyValue
-	pipelineID   string
-	cancelSource context.CancelFunc
 	mu           sync.Mutex
+	cancelSource context.CancelFunc
 }
 
 func NewProducer(pipelineID string, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
@@ -89,7 +88,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					cpData, _ := cp.MarshalMsg(nil)
 					key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
 					if _, err := p.kv.Put(key, cpData); err != nil {
-						log.Printf("Warning: Failed to update ingress checkpoint for %s: %v", key, err)
+						return lastLSN, fmt.Errorf("failed to update ingress checkpoint: %w", err)
 					}
 				}
 			}
@@ -104,10 +103,11 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	}
 }
 
-func (p *Producer) Drain() {
+func (p *Producer) Drain() error {
 	p.mu.Lock()
 	if p.cancelSource != nil {
 		p.cancelSource()
 	}
 	p.mu.Unlock()
+	return nil
 }

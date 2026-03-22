@@ -92,8 +92,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 			cpData, _ := checkpoint.MarshalMsg(nil)
 			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
-			// #nosec G104 -- checkpoint update
-			c.kv.Put(cpKey, cpData)
+			if _, err := c.kv.Put(cpKey, cpData); err != nil {
+				return fmt.Errorf("failed to update egress checkpoint: %w", err)
+			}
 
 			// 2. Update Stats
 			s, ok := c.stats[key]
@@ -117,8 +118,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			statsData, _ := s.MarshalMsg(nil)
 			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
-			// #nosec G104 -- non-critical stats update
-			c.kv.Put(statsKey, statsData)
+			if _, err := c.kv.Put(statsKey, statsData); err != nil {
+				return fmt.Errorf("failed to update table stats: %w", err)
+			}
 		}
 
 		batch = nil
