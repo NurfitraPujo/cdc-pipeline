@@ -60,6 +60,7 @@ func main() {
 				pipelines.GET("", h.ListPipelines)
 				pipelines.POST("", h.CreatePipeline)
 				pipelines.GET("/:id", h.GetPipeline)
+				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
@@ -68,6 +69,7 @@ func main() {
 			{
 				sources.GET("", h.ListSources)
 				sources.POST("", h.CreateSource)
+				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/tables", h.ListTables)
 			}
 		}

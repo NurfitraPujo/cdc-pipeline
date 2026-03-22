@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source"
@@ -68,18 +69,28 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, fmt.Errorf("failed to publish message batch: %w", err)
 			}
 
-			// Update last LSN and checkpoint based on the last message in the batch
+			// Update checkpoints for all tables affected in this batch
 			if len(msgs) > 0 {
-				lastM := msgs[len(msgs)-1]
-				lastLSN = lastM.LSN
-				checkpoint.IngressLSN = lastM.LSN
-				checkpoint.LastPK = lastM.PK
-				checkpoint.Status = "ACTIVE"
-				
-				cpData, _ := checkpoint.MarshalMsg(nil)
-				key := protocol.IngressCheckpointKey(p.pipelineID, lastM.SourceID, lastM.Table)
-				if _, err := p.kv.Put(key, cpData); err != nil {
-					log.Printf("Warning: Failed to update ingress checkpoint: %v", err)
+				latestByTable := make(map[string]protocol.Message)
+				for _, m := range msgs {
+					latestByTable[m.SourceID+"."+m.Table] = m
+					if m.LSN > lastLSN {
+						lastLSN = m.LSN
+					}
+				}
+
+				for _, m := range latestByTable {
+					cp := protocol.Checkpoint{
+						IngressLSN: m.LSN,
+						LastPK:     m.PK,
+						Status:     "ACTIVE",
+						UpdatedAt:  time.Now(),
+					}
+					cpData, _ := cp.MarshalMsg(nil)
+					key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
+					if _, err := p.kv.Put(key, cpData); err != nil {
+						log.Printf("Warning: Failed to update ingress checkpoint for %s: %v", key, err)
+					}
 				}
 			}
 

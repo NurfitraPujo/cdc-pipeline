@@ -85,11 +85,38 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
-			
-			// Global config change might require restarting all workers to apply new defaults
-			// For now, we'll leave it to the user to trigger pipeline updates if needed,
-			// or we can implement a full reload.
+
+			// Trigger reload for all active workers to apply new global defaults
+			m.reloadAllWorkers(ctx)
 		}
+	}
+}
+
+func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
+	m.workersMu.RLock()
+	ids := make([]string, 0, len(m.workers))
+	for id := range m.workers {
+		ids = append(ids, id)
+	}
+	m.workersMu.RUnlock()
+
+	for _, id := range ids {
+		// Re-fetch pipeline config from KV to get latest and apply hierarchy
+		key := protocol.PipelineConfigKey(id)
+		entry, err := m.kv.Get(key)
+		if err != nil {
+			log.Printf("Failed to re-fetch config for pipeline %s during global reload: %v", id, err)
+			continue
+		}
+
+		var cfg protocol.PipelineConfig
+		if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+			log.Printf("Error unmarshaling config for pipeline %s during global reload: %v", id, err)
+			continue
+		}
+
+		m.applyHierarchy(&cfg)
+		m.transitionWorker(ctx, id, cfg)
 	}
 }
 

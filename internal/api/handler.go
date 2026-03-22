@@ -83,6 +83,16 @@ func (h *Handler) GetPipeline(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+func (h *Handler) DeletePipeline(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.PipelineConfigKey(id)
+	if err := h.kv.Delete(key); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
+}
+
 func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	id := c.Param("id")
 	keys, err := h.kv.Keys()
@@ -154,6 +164,16 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, cfg)
+}
+
+func (h *Handler) DeleteSource(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.SourceConfigKey(id)
+	if err := h.kv.Delete(key); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
 }
 
 func (h *Handler) ListTables(c *gin.Context) {

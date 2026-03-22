@@ -63,17 +63,25 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			m.Ack()
 		}
 
-		last := batch[len(batch)-1]
-		checkpoint := protocol.Checkpoint{
-			EgressLSN: last.LSN,
-			LastPK:    last.PK,
-			Status:    "ACTIVE",
-			UpdatedAt: time.Now(),
+		// Update checkpoints for all tables affected in this batch
+		// We track the latest LSN per table in this batch
+		latestByTable := make(map[string]protocol.Message)
+		for _, m := range batch {
+			latestByTable[m.SourceID+"."+m.Table] = m
 		}
-		cpData, _ := checkpoint.MarshalMsg(nil)
-		key := protocol.EgressCheckpointKey(c.pipelineID, last.SourceID, last.Table)
-		if _, err := c.kv.Put(key, cpData); err != nil {
-			log.Printf("Warning: Failed to update egress checkpoint: %v", err)
+
+		for _, m := range latestByTable {
+			checkpoint := protocol.Checkpoint{
+				EgressLSN: m.LSN,
+				LastPK:    m.PK,
+				Status:    "ACTIVE",
+				UpdatedAt: time.Now(),
+			}
+			cpData, _ := checkpoint.MarshalMsg(nil)
+			key := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
+			if _, err := c.kv.Put(key, cpData); err != nil {
+				log.Printf("Warning: Failed to update egress checkpoint for %s: %v", key, err)
+			}
 		}
 
 		batch = nil
