@@ -25,6 +25,9 @@ const (
 )
 
 // Helper functions for key construction
+func TransitionStateKey(id string) string {
+	return fmt.Sprintf("%s%s.transition", PrefixPipelineState, id)
+}
 func PipelineConfigKey(id string) string {
 	return PrefixPipelineConfig + id
 }

@@ -174,6 +174,15 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 	oldWorker, exists := m.workers[id]
 	m.workersMu.Unlock()
 
+	// 1. Mark as Transitioning in KV
+	ts := protocol.PipelineTransitionState{
+		ID:        id,
+		Status:    "Transitioning",
+		StartedAt: time.Now(),
+	}
+	tsData, _ := json.Marshal(ts)
+	m.kv.Put(protocol.TransitionStateKey(id), tsData)
+
 	if exists {
 		log.Printf("Initiating two-phase transition for pipeline %s", id)
 		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig) {
@@ -191,10 +200,15 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
 
 			m.startNewWorker(ctx, id, newCfg)
+			
+			// 2. Clear Transitioning state
+			m.kv.Delete(protocol.TransitionStateKey(id))
 		}(oldWorker, cfg)
 	} else {
 		log.Printf("Starting initial worker for pipeline %s", id)
 		m.startNewWorker(ctx, id, cfg)
+		// 2. Clear Transitioning state
+		m.kv.Delete(protocol.TransitionStateKey(id))
 	}
 }
 

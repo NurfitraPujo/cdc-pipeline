@@ -12,6 +12,12 @@ type Checkpoint struct {
 	UpdatedAt  time.Time `msg:"updated"`
 }
 
+type PipelineTransitionState struct {
+	ID        string    `msg:"id"`
+	Status    string    `msg:"status"` // Transitioning, Ready
+	StartedAt time.Time `msg:"started"`
+}
+
 type TableMetadata struct {
 	ID        string   `msg:"id"`
 	Name      string   `msg:"name"`

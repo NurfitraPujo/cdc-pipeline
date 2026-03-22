@@ -55,6 +55,19 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 		return
 	}
 
+	// 1. Dynamic Rate Limit: Check if pipeline is currently transitioning
+	tsKey := protocol.TransitionStateKey(cfg.ID)
+	if entry, err := h.kv.Get(tsKey); err == nil {
+		var ts protocol.PipelineTransitionState
+		if err := json.Unmarshal(entry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":      "pipeline is currently transitioning/restarting",
+				"started_at": ts.StartedAt,
+			})
+			return
+		}
+	}
+
 	data, _ := json.Marshal(cfg)
 	key := protocol.PipelineConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
