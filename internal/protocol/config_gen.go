@@ -738,6 +738,31 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "BatchSize")
 				return
 			}
+		case "batch_wait":
+			z.BatchWait, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
+		case "schemas":
+			var zb0002 uint32
+			zb0002, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Schemas")
+				return
+			}
+			if cap(z.Schemas) >= int(zb0002) {
+				z.Schemas = (z.Schemas)[:zb0002]
+			} else {
+				z.Schemas = make([]string, zb0002)
+			}
+			for za0001 := range z.Schemas {
+				z.Schemas[za0001], err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Schemas", za0001)
+					return
+				}
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -751,9 +776,9 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 10
+	// map header, size 12
 	// write "id"
-	err = en.Append(0x8a, 0xa2, 0x69, 0x64)
+	err = en.Append(0x8c, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -852,15 +877,42 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "BatchSize")
 		return
 	}
+	// write "batch_wait"
+	err = en.Append(0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.BatchWait)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchWait")
+		return
+	}
+	// write "schemas"
+	err = en.Append(0xa7, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.Schemas)))
+	if err != nil {
+		err = msgp.WrapError(err, "Schemas")
+		return
+	}
+	for za0001 := range z.Schemas {
+		err = en.WriteString(z.Schemas[za0001])
+		if err != nil {
+			err = msgp.WrapError(err, "Schemas", za0001)
+			return
+		}
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 10
+	// map header, size 12
 	// string "id"
-	o = append(o, 0x8a, 0xa2, 0x69, 0x64)
+	o = append(o, 0x8c, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -889,6 +941,15 @@ func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "batch_size"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	o = msgp.AppendInt(o, z.BatchSize)
+	// string "batch_wait"
+	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
+	o = msgp.AppendDuration(o, z.BatchWait)
+	// string "schemas"
+	o = append(o, 0xa7, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.Schemas)))
+	for za0001 := range z.Schemas {
+		o = msgp.AppendString(o, z.Schemas[za0001])
+	}
 	return
 }
 
@@ -970,6 +1031,31 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "BatchSize")
 				return
 			}
+		case "batch_wait":
+			z.BatchWait, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchWait")
+				return
+			}
+		case "schemas":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Schemas")
+				return
+			}
+			if cap(z.Schemas) >= int(zb0002) {
+				z.Schemas = (z.Schemas)[:zb0002]
+			} else {
+				z.Schemas = make([]string, zb0002)
+			}
+			for za0001 := range z.Schemas {
+				z.Schemas[za0001], bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Schemas", za0001)
+					return
+				}
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -984,7 +1070,10 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *SourceConfig) Msgsize() (s int) {
-	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize
+	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize + 11 + msgp.DurationSize + 8 + msgp.ArrayHeaderSize
+	for za0001 := range z.Schemas {
+		s += msgp.StringPrefixSize + len(z.Schemas[za0001])
+	}
 	return
 }
 

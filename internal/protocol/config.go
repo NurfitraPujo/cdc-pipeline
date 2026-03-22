@@ -116,8 +116,9 @@ type SourceConfig struct {
 	Database        string `msg:"database" yaml:"database" json:"database"`
 	SlotName        string `msg:"slot_name" yaml:"slot_name" json:"slot_name"`
 	PublicationName string `msg:"publication_name" yaml:"publication_name" json:"publication_name"`
-	BatchSize       int    `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
+	BatchSize       int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
 	BatchWait       time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
+	Schemas         []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
 }
 
 func (s SourceConfig) Validate() error {

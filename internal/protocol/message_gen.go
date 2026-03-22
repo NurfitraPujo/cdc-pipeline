@@ -66,6 +66,24 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "Timestamp")
 				return
 			}
+		case "meta":
+			if dc.IsNil() {
+				err = dc.ReadNil()
+				if err != nil {
+					err = msgp.WrapError(err, "Schema")
+					return
+				}
+				z.Schema = nil
+			} else {
+				if z.Schema == nil {
+					z.Schema = new(SchemaMetadata)
+				}
+				err = z.Schema.DecodeMsg(dc)
+				if err != nil {
+					err = msgp.WrapError(err, "Schema")
+					return
+				}
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -79,76 +97,111 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 7
-	// write "sid"
-	err = en.Append(0x87, 0xa3, 0x73, 0x69, 0x64)
+	// check for omitted fields
+	zb0001Len := uint32(8)
+	var zb0001Mask uint8 /* 8 bits */
+	_ = zb0001Mask
+	if z.Schema == nil {
+		zb0001Len--
+		zb0001Mask |= 0x80
+	}
+	// variable map header, size zb0001Len
+	err = en.Append(0x80 | uint8(zb0001Len))
 	if err != nil {
 		return
 	}
-	err = en.WriteString(z.SourceID)
-	if err != nil {
-		err = msgp.WrapError(err, "SourceID")
-		return
-	}
-	// write "tbl"
-	err = en.Append(0xa3, 0x74, 0x62, 0x6c)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.Table)
-	if err != nil {
-		err = msgp.WrapError(err, "Table")
-		return
-	}
-	// write "op"
-	err = en.Append(0xa2, 0x6f, 0x70)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.Op)
-	if err != nil {
-		err = msgp.WrapError(err, "Op")
-		return
-	}
-	// write "lsn"
-	err = en.Append(0xa3, 0x6c, 0x73, 0x6e)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.LSN)
-	if err != nil {
-		err = msgp.WrapError(err, "LSN")
-		return
-	}
-	// write "pk"
-	err = en.Append(0xa2, 0x70, 0x6b)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.PK)
-	if err != nil {
-		err = msgp.WrapError(err, "PK")
-		return
-	}
-	// write "pay"
-	err = en.Append(0xa3, 0x70, 0x61, 0x79)
-	if err != nil {
-		return
-	}
-	err = en.WriteBytes(z.Payload)
-	if err != nil {
-		err = msgp.WrapError(err, "Payload")
-		return
-	}
-	// write "ts"
-	err = en.Append(0xa2, 0x74, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteTime(z.Timestamp)
-	if err != nil {
-		err = msgp.WrapError(err, "Timestamp")
-		return
+
+	// skip if no fields are to be emitted
+	if zb0001Len != 0 {
+		// write "sid"
+		err = en.Append(0xa3, 0x73, 0x69, 0x64)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.SourceID)
+		if err != nil {
+			err = msgp.WrapError(err, "SourceID")
+			return
+		}
+		// write "tbl"
+		err = en.Append(0xa3, 0x74, 0x62, 0x6c)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.Table)
+		if err != nil {
+			err = msgp.WrapError(err, "Table")
+			return
+		}
+		// write "op"
+		err = en.Append(0xa2, 0x6f, 0x70)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.Op)
+		if err != nil {
+			err = msgp.WrapError(err, "Op")
+			return
+		}
+		// write "lsn"
+		err = en.Append(0xa3, 0x6c, 0x73, 0x6e)
+		if err != nil {
+			return
+		}
+		err = en.WriteUint64(z.LSN)
+		if err != nil {
+			err = msgp.WrapError(err, "LSN")
+			return
+		}
+		// write "pk"
+		err = en.Append(0xa2, 0x70, 0x6b)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.PK)
+		if err != nil {
+			err = msgp.WrapError(err, "PK")
+			return
+		}
+		// write "pay"
+		err = en.Append(0xa3, 0x70, 0x61, 0x79)
+		if err != nil {
+			return
+		}
+		err = en.WriteBytes(z.Payload)
+		if err != nil {
+			err = msgp.WrapError(err, "Payload")
+			return
+		}
+		// write "ts"
+		err = en.Append(0xa2, 0x74, 0x73)
+		if err != nil {
+			return
+		}
+		err = en.WriteTime(z.Timestamp)
+		if err != nil {
+			err = msgp.WrapError(err, "Timestamp")
+			return
+		}
+		if (zb0001Mask & 0x80) == 0 { // if not omitted
+			// write "meta"
+			err = en.Append(0xa4, 0x6d, 0x65, 0x74, 0x61)
+			if err != nil {
+				return
+			}
+			if z.Schema == nil {
+				err = en.WriteNil()
+				if err != nil {
+					return
+				}
+			} else {
+				err = z.Schema.EncodeMsg(en)
+				if err != nil {
+					err = msgp.WrapError(err, "Schema")
+					return
+				}
+			}
+		}
 	}
 	return
 }
@@ -156,28 +209,54 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 7
-	// string "sid"
-	o = append(o, 0x87, 0xa3, 0x73, 0x69, 0x64)
-	o = msgp.AppendString(o, z.SourceID)
-	// string "tbl"
-	o = append(o, 0xa3, 0x74, 0x62, 0x6c)
-	o = msgp.AppendString(o, z.Table)
-	// string "op"
-	o = append(o, 0xa2, 0x6f, 0x70)
-	o = msgp.AppendString(o, z.Op)
-	// string "lsn"
-	o = append(o, 0xa3, 0x6c, 0x73, 0x6e)
-	o = msgp.AppendUint64(o, z.LSN)
-	// string "pk"
-	o = append(o, 0xa2, 0x70, 0x6b)
-	o = msgp.AppendString(o, z.PK)
-	// string "pay"
-	o = append(o, 0xa3, 0x70, 0x61, 0x79)
-	o = msgp.AppendBytes(o, z.Payload)
-	// string "ts"
-	o = append(o, 0xa2, 0x74, 0x73)
-	o = msgp.AppendTime(o, z.Timestamp)
+	// check for omitted fields
+	zb0001Len := uint32(8)
+	var zb0001Mask uint8 /* 8 bits */
+	_ = zb0001Mask
+	if z.Schema == nil {
+		zb0001Len--
+		zb0001Mask |= 0x80
+	}
+	// variable map header, size zb0001Len
+	o = append(o, 0x80|uint8(zb0001Len))
+
+	// skip if no fields are to be emitted
+	if zb0001Len != 0 {
+		// string "sid"
+		o = append(o, 0xa3, 0x73, 0x69, 0x64)
+		o = msgp.AppendString(o, z.SourceID)
+		// string "tbl"
+		o = append(o, 0xa3, 0x74, 0x62, 0x6c)
+		o = msgp.AppendString(o, z.Table)
+		// string "op"
+		o = append(o, 0xa2, 0x6f, 0x70)
+		o = msgp.AppendString(o, z.Op)
+		// string "lsn"
+		o = append(o, 0xa3, 0x6c, 0x73, 0x6e)
+		o = msgp.AppendUint64(o, z.LSN)
+		// string "pk"
+		o = append(o, 0xa2, 0x70, 0x6b)
+		o = msgp.AppendString(o, z.PK)
+		// string "pay"
+		o = append(o, 0xa3, 0x70, 0x61, 0x79)
+		o = msgp.AppendBytes(o, z.Payload)
+		// string "ts"
+		o = append(o, 0xa2, 0x74, 0x73)
+		o = msgp.AppendTime(o, z.Timestamp)
+		if (zb0001Mask & 0x80) == 0 { // if not omitted
+			// string "meta"
+			o = append(o, 0xa4, 0x6d, 0x65, 0x74, 0x61)
+			if z.Schema == nil {
+				o = msgp.AppendNil(o)
+			} else {
+				o, err = z.Schema.MarshalMsg(o)
+				if err != nil {
+					err = msgp.WrapError(err, "Schema")
+					return
+				}
+			}
+		}
+	}
 	return
 }
 
@@ -241,6 +320,23 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "Timestamp")
 				return
 			}
+		case "meta":
+			if msgp.IsNil(bts) {
+				bts, err = msgp.ReadNilBytes(bts)
+				if err != nil {
+					return
+				}
+				z.Schema = nil
+			} else {
+				if z.Schema == nil {
+					z.Schema = new(SchemaMetadata)
+				}
+				bts, err = z.Schema.UnmarshalMsg(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Schema")
+					return
+				}
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -255,7 +351,12 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *Message) Msgsize() (s int) {
-	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(z.Op) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 4 + msgp.BytesPrefixSize + len(z.Payload) + 3 + msgp.TimeSize
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(z.Op) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 4 + msgp.BytesPrefixSize + len(z.Payload) + 3 + msgp.TimeSize + 5
+	if z.Schema == nil {
+		s += msgp.NilSize
+	} else {
+		s += z.Schema.Msgsize()
+	}
 	return
 }
 
@@ -342,6 +443,290 @@ func (z MessageBatch) Msgsize() (s int) {
 	s = msgp.ArrayHeaderSize
 	for zb0003 := range z {
 		s += z[zb0003].Msgsize()
+	}
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
+func (z *SchemaMetadata) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "tbl":
+			z.Table, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Table")
+				return
+			}
+		case "sch":
+			z.Schema, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Schema")
+				return
+			}
+		case "cols":
+			var zb0002 uint32
+			zb0002, err = dc.ReadMapHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Columns")
+				return
+			}
+			if z.Columns == nil {
+				z.Columns = make(map[string]string, zb0002)
+			} else if len(z.Columns) > 0 {
+				clear(z.Columns)
+			}
+			for zb0002 > 0 {
+				zb0002--
+				var za0001 string
+				za0001, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Columns")
+					return
+				}
+				var za0002 string
+				za0002, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Columns", za0001)
+					return
+				}
+				z.Columns[za0001] = za0002
+			}
+		case "pks":
+			var zb0003 uint32
+			zb0003, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "PKColumns")
+				return
+			}
+			if cap(z.PKColumns) >= int(zb0003) {
+				z.PKColumns = (z.PKColumns)[:zb0003]
+			} else {
+				z.PKColumns = make([]string, zb0003)
+			}
+			for za0003 := range z.PKColumns {
+				z.PKColumns[za0003], err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "PKColumns", za0003)
+					return
+				}
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *SchemaMetadata) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 4
+	// write "tbl"
+	err = en.Append(0x84, 0xa3, 0x74, 0x62, 0x6c)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Table)
+	if err != nil {
+		err = msgp.WrapError(err, "Table")
+		return
+	}
+	// write "sch"
+	err = en.Append(0xa3, 0x73, 0x63, 0x68)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Schema)
+	if err != nil {
+		err = msgp.WrapError(err, "Schema")
+		return
+	}
+	// write "cols"
+	err = en.Append(0xa4, 0x63, 0x6f, 0x6c, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteMapHeader(uint32(len(z.Columns)))
+	if err != nil {
+		err = msgp.WrapError(err, "Columns")
+		return
+	}
+	for za0001, za0002 := range z.Columns {
+		err = en.WriteString(za0001)
+		if err != nil {
+			err = msgp.WrapError(err, "Columns")
+			return
+		}
+		err = en.WriteString(za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Columns", za0001)
+			return
+		}
+	}
+	// write "pks"
+	err = en.Append(0xa3, 0x70, 0x6b, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.PKColumns)))
+	if err != nil {
+		err = msgp.WrapError(err, "PKColumns")
+		return
+	}
+	for za0003 := range z.PKColumns {
+		err = en.WriteString(z.PKColumns[za0003])
+		if err != nil {
+			err = msgp.WrapError(err, "PKColumns", za0003)
+			return
+		}
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *SchemaMetadata) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 4
+	// string "tbl"
+	o = append(o, 0x84, 0xa3, 0x74, 0x62, 0x6c)
+	o = msgp.AppendString(o, z.Table)
+	// string "sch"
+	o = append(o, 0xa3, 0x73, 0x63, 0x68)
+	o = msgp.AppendString(o, z.Schema)
+	// string "cols"
+	o = append(o, 0xa4, 0x63, 0x6f, 0x6c, 0x73)
+	o = msgp.AppendMapHeader(o, uint32(len(z.Columns)))
+	for za0001, za0002 := range z.Columns {
+		o = msgp.AppendString(o, za0001)
+		o = msgp.AppendString(o, za0002)
+	}
+	// string "pks"
+	o = append(o, 0xa3, 0x70, 0x6b, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.PKColumns)))
+	for za0003 := range z.PKColumns {
+		o = msgp.AppendString(o, z.PKColumns[za0003])
+	}
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *SchemaMetadata) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "tbl":
+			z.Table, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Table")
+				return
+			}
+		case "sch":
+			z.Schema, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Schema")
+				return
+			}
+		case "cols":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadMapHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Columns")
+				return
+			}
+			if z.Columns == nil {
+				z.Columns = make(map[string]string, zb0002)
+			} else if len(z.Columns) > 0 {
+				clear(z.Columns)
+			}
+			for zb0002 > 0 {
+				var za0002 string
+				zb0002--
+				var za0001 string
+				za0001, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Columns")
+					return
+				}
+				za0002, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Columns", za0001)
+					return
+				}
+				z.Columns[za0001] = za0002
+			}
+		case "pks":
+			var zb0003 uint32
+			zb0003, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "PKColumns")
+				return
+			}
+			if cap(z.PKColumns) >= int(zb0003) {
+				z.PKColumns = (z.PKColumns)[:zb0003]
+			} else {
+				z.PKColumns = make([]string, zb0003)
+			}
+			for za0003 := range z.PKColumns {
+				z.PKColumns[za0003], bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "PKColumns", za0003)
+					return
+				}
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *SchemaMetadata) Msgsize() (s int) {
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.Table) + 4 + msgp.StringPrefixSize + len(z.Schema) + 5 + msgp.MapHeaderSize
+	if z.Columns != nil {
+		for za0001, za0002 := range z.Columns {
+			_ = za0002
+			s += msgp.StringPrefixSize + len(za0001) + msgp.StringPrefixSize + len(za0002)
+		}
+	}
+	s += 4 + msgp.ArrayHeaderSize
+	for za0003 := range z.PKColumns {
+		s += msgp.StringPrefixSize + len(z.PKColumns[za0003])
 	}
 	return
 }
