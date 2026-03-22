@@ -18,49 +18,29 @@
 - Modify: `internal/protocol/state.go`
 
 - [ ] **Step 1: Add Schemas to SourceConfig**
-```go
-type SourceConfig struct {
-    // ...
-    Schemas []string `msg:"schemas" yaml:"schemas" json:"schemas"`
-}
-```
 - [ ] **Step 2: Add SchemaMetadata and OpSchemaChange**
-```go
-type SchemaMetadata struct {
-    Table     string            `msg:"tbl" json:"table"`
-    Schema    string            `msg:"sch" json:"schema"`
-    Columns   map[string]string `msg:"cols" json:"columns"`
-    PKColumns []string          `msg:"pks" json:"pk_columns"`
-}
-
-type Message struct {
-    // ...
-    Op     string          `msg:"op"` // Add "schema_change"
-    Schema *SchemaMetadata `msg:"meta,omitempty" json:"schema,omitempty"`
-}
-```
 - [ ] **Step 3: Run `go generate ./internal/protocol/...`**
 - [ ] **Step 4: Commit**
 `git add internal/protocol && git commit -m "chore: add schema evolution structs to protocol"`
 
 ---
 
-### Task 2: Producer Active Discovery (Part 1 - Events)
+### Task 2: Producer Active Discovery (Part 1 - Events & Metadata)
 
 **Files:**
 - Modify: `internal/source/postgres/source.go`
 
 - [ ] **Step 1: Intercept Relation messages in handler**
-Compare incoming `Relation` against NATS KV `TableMetadata`.
-- [ ] **Step 2: Implement Dynamic Metadata Capture**
-Extract column names and types from `format.Relation`.
+- [ ] **Step 2: Implement Dynamic Metadata Capture from format.Relation**
 - [ ] **Step 3: Emit `schema_change` event to NATS**
-- [ ] **Step 4: Commit**
-`git add internal/source/postgres && git commit -m "feat: implement relation-based discovery in producer"`
+- [ ] **Step 4: Implement Table Discovery Trigger**
+When a new table is found via `Relation`, capture `SnapshotLSN` and signal the Orchestrator.
+- [ ] **Step 5: Commit**
+`git add internal/source/postgres && git commit -m "feat: implement relation-based discovery and metadata capture"`
 
 ---
 
-### Task 3: Producer Active Discovery (Part 2 - Poller)
+### Task 3: Producer Active Discovery (Part 2 - Poller & Orchestration)
 
 **Files:**
 - Modify: `internal/source/postgres/source.go`
@@ -68,10 +48,12 @@ Extract column names and types from `format.Relation`.
 
 - [ ] **Step 1: Implement background Discovery Poller**
 Query `information_schema.tables` periodically.
-- [ ] **Step 2: Implement Auto-Config Update**
-Update `PipelineConfig` in NATS KV when a new table matches the wildcard.
-- [ ] **Step 3: Commit**
-`git add internal/source/postgres internal/engine/producer.go && git commit -m "feat: implement background table discovery poller"`
+- [ ] **Step 2: Implement Dynamic Table Handshake**
+Signal the orchestrator when the poller finds a new table.
+- [ ] **Step 3: Implement Auto-Config Update in Producer Orchestrator**
+Update `PipelineConfig` in NATS KV when new tables are found to preserve state across restarts.
+- [ ] **Step 4: Commit**
+`git add internal/source/postgres internal/engine/producer.go && git commit -m "feat: implement background table discovery poller and orchestrator handshake"`
 
 ---
 
@@ -82,9 +64,8 @@ Update `PipelineConfig` in NATS KV when a new table matches the wildcard.
 - Modify: `internal/sink/databend/sink.go`
 
 - [ ] **Step 1: Implement DDL Generation in Databend Sink**
-Type mapper (Postgres -> Databend) and `CREATE/ALTER TABLE` SQL generator.
 - [ ] **Step 2: Implement Barrier logic in Consumer**
-Block data for table X until DDL is applied.
+Block data for table X until its specific `schema_change` is applied.
 - [ ] **Step 3: Commit**
 `git add internal/engine/consumer.go internal/sink/databend && git commit -m "feat: implement consumer-side ddl execution and barrier"`
 
@@ -97,7 +78,10 @@ Block data for table X until DDL is applied.
 - Create: `internal/engine/discovery_test.go`
 
 - [ ] **Step 1: Implement LSN Cut-over logic**
-Ensure snapshot handover for a single table is atomic.
-- [ ] **Step 2: Add integration tests for Dynamic Discovery**
-- [ ] **Step 3: Commit**
-`git add internal/engine && git commit -m "feat: implement snapshot cut-over and verify discovery"`
+Ensure the `Producer` discards CDC events with `LSN < SnapshotLSN` and buffers events with `LSN >= SnapshotLSN` for the new table.
+- [ ] **Step 2: Implement Snapshot Initiation**
+Spawn `TableSnapshotter` goroutines dynamically for new tables.
+- [ ] **Step 3: Add integration tests for Dynamic Discovery**
+Verify: Create table -> Auto-detect -> Snapshot -> CDC transition.
+- [ ] **Step 4: Commit**
+`git add internal/engine && git commit -m "feat: implement snapshot cut-over and verify discovery flow"`

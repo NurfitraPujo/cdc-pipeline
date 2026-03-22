@@ -10,7 +10,8 @@ Daya Data Pipeline must support dynamic custom tables built by platform users an
 
 ### 1. Active Discovery (Producer)
 - **Publication Scope:** The PostgreSQL publication must be created with `FOR ALL TABLES` to ensure the CDC stream includes events for newly created tables.
-- **Trigger:** The `Producer` intercepts every `Relation` message in the logical replication stream.
+- **Trigger 1 (Event-Driven):** The `Producer` intercepts every `Relation` message in the logical replication stream.
+- **Trigger 2 (Background Polling):** A background goroutine periodically queries `information_schema.tables` to detect new tables that haven't had activity yet (and thus haven't sent a `Relation` message).
 - **Filtering:** 
     - The `SourceConfig` is expanded to include a `Schemas` list (e.g., `["public", "tenant_custom"]`).
     - The `Producer` checks if the `schema` in the `Relation` message matches the allowed schemas AND if the table matches the `PipelineConfig.Tables` wildcard pattern (e.g., `*`).
