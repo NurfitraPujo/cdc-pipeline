@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -43,30 +44,58 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	
 	p.wg.Add(2)
 	
-	var lastLSN uint64
-	var prodErr error
-	
 	// Start Producer
 	go func() {
 		defer p.wg.Done()
-		// For simplicity, assuming single source for now as per skeleton
-		// In real world, would iterate p.config.Sources
-		lsn, err := p.producer.Run(p.ctx, protocol.SourceConfig{}, protocol.Checkpoint{})
-		lastLSN = lsn
-		prodErr = err
+		
+		// For now, we assume a single source per pipeline for simplicity, 
+		// but we fetch its actual configuration and checkpoint from KV.
+		if len(p.config.Sources) == 0 {
+			log.Printf("No sources defined for pipeline %s", p.id)
+			return
+		}
+
+		sourceID := p.config.Sources[0]
+		
+		// 1. Get Source Config
+		srcKey := fmt.Sprintf("sources.%s.config", sourceID)
+		entry, err := p.producer.kv.Get(srcKey)
+		if err != nil {
+			log.Printf("Failed to fetch source config %s: %v", sourceID, err)
+			return
+		}
+		var srcCfg protocol.SourceConfig
+		if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
+			log.Printf("Failed to unmarshal source config %s: %v", sourceID, err)
+			return
+		}
+
+		// 2. Get Ingress Checkpoint (if any)
+		// Assuming we resume for the first table defined in config for now
+		table := "default"
+		if len(p.config.Tables) > 0 {
+			table = p.config.Tables[0]
+		}
+		cpKey := fmt.Sprintf("pipelines.%s.sources.%s.tables.%s.ingress_checkpoint", p.id, sourceID, table)
+		cpEntry, err := p.producer.kv.Get(cpKey)
+		var cp protocol.Checkpoint
+		if err == nil {
+			json.Unmarshal(cpEntry.Value(), &cp)
+		}
+
+		lsn, err := p.producer.Run(p.ctx, srcCfg, cp)
 		if err != nil && err != context.Canceled {
 			log.Printf("Producer for pipeline %s failed: %v", p.id, err)
 		}
 		
-		// When producer stops (either normally or via Drain), 
-		// if we are draining, notify consumer of the target LSN
-		p.consumer.Drain(lastLSN)
+		// Phase 1 Handover: notify consumer of target LSN
+		p.consumer.Drain(lsn)
 	}()
 
 	// Start Consumer
 	go func() {
 		defer p.wg.Done()
-		topic := fmt.Sprintf("daya.pipeline.%s.>", p.id) // Listen to all sources/tables for this pipeline
+		topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.id)
 		err := p.consumer.Run(p.ctx, topic)
 		if err != nil && err != context.Canceled {
 			log.Printf("Consumer for pipeline %s failed: %v", p.id, err)
@@ -76,7 +105,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		close(p.finished)
 	}()
 
-	_ = prodErr // Use in actual implementation
 	return nil
 }
 

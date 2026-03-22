@@ -561,6 +561,30 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "PassEncrypted")
 				return
 			}
+		case "database":
+			z.Database, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Database")
+				return
+			}
+		case "slot_name":
+			z.SlotName, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SlotName")
+				return
+			}
+		case "publication_name":
+			z.PublicationName, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "PublicationName")
+				return
+			}
+		case "batch_size":
+			z.BatchSize, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -574,9 +598,9 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 6
+	// map header, size 10
 	// write "id"
-	err = en.Append(0x86, 0xa2, 0x69, 0x64)
+	err = en.Append(0x8a, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -635,15 +659,55 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "PassEncrypted")
 		return
 	}
+	// write "database"
+	err = en.Append(0xa8, 0x64, 0x61, 0x74, 0x61, 0x62, 0x61, 0x73, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Database)
+	if err != nil {
+		err = msgp.WrapError(err, "Database")
+		return
+	}
+	// write "slot_name"
+	err = en.Append(0xa9, 0x73, 0x6c, 0x6f, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.SlotName)
+	if err != nil {
+		err = msgp.WrapError(err, "SlotName")
+		return
+	}
+	// write "publication_name"
+	err = en.Append(0xb0, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x6e, 0x61, 0x6d, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.PublicationName)
+	if err != nil {
+		err = msgp.WrapError(err, "PublicationName")
+		return
+	}
+	// write "batch_size"
+	err = en.Append(0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.BatchSize)
+	if err != nil {
+		err = msgp.WrapError(err, "BatchSize")
+		return
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 6
+	// map header, size 10
 	// string "id"
-	o = append(o, 0x86, 0xa2, 0x69, 0x64)
+	o = append(o, 0x8a, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -660,6 +724,18 @@ func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "pass"
 	o = append(o, 0xa4, 0x70, 0x61, 0x73, 0x73)
 	o = msgp.AppendString(o, z.PassEncrypted)
+	// string "database"
+	o = append(o, 0xa8, 0x64, 0x61, 0x74, 0x61, 0x62, 0x61, 0x73, 0x65)
+	o = msgp.AppendString(o, z.Database)
+	// string "slot_name"
+	o = append(o, 0xa9, 0x73, 0x6c, 0x6f, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65)
+	o = msgp.AppendString(o, z.SlotName)
+	// string "publication_name"
+	o = append(o, 0xb0, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x6e, 0x61, 0x6d, 0x65)
+	o = msgp.AppendString(o, z.PublicationName)
+	// string "batch_size"
+	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = msgp.AppendInt(o, z.BatchSize)
 	return
 }
 
@@ -717,6 +793,30 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "PassEncrypted")
 				return
 			}
+		case "database":
+			z.Database, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Database")
+				return
+			}
+		case "slot_name":
+			z.SlotName, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SlotName")
+				return
+			}
+		case "publication_name":
+			z.PublicationName, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "PublicationName")
+				return
+			}
+		case "batch_size":
+			z.BatchSize, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BatchSize")
+				return
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -731,6 +831,6 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *SourceConfig) Msgsize() (s int) {
-	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted)
+	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize
 	return
 }

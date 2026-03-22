@@ -20,10 +20,14 @@ type PipelineConfig struct {
 }
 
 type SourceConfig struct {
-	ID            string `msg:"id"`
-	Type          string `msg:"type"` // e.g., "postgres"
-	Host          string `msg:"host"`
-	Port          int    `msg:"port"`
-	User          string `msg:"user"`
-	PassEncrypted string `msg:"pass"`
+	ID              string `msg:"id"`
+	Type            string `msg:"type"` // e.g., "postgres"
+	Host            string `msg:"host"`
+	Port            int    `msg:"port"`
+	User            string `msg:"user"`
+	PassEncrypted   string `msg:"pass"`
+	Database        string `msg:"database"`
+	SlotName        string `msg:"slot_name"`
+	PublicationName string `msg:"publication_name"`
+	BatchSize       int    `msg:"batch_size"`
 }

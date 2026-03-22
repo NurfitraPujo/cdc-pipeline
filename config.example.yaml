@@ -13,7 +13,10 @@ sources:
     host: "localhost"
     port: 5432
     user: "cdc_user"
-    pass: "your-encrypted-password" # The engine assumes this is handled/decrypted
+    pass: "your-encrypted-password"
+    database: "production_db"
+    slot_name: "daya_cdc_slot"
+    publication_name: "daya_cdc_pub"
 
 # Pipeline Configurations (Stored in NATS KV as 'pipelines.{id}.config')
 pipelines:

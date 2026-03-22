@@ -28,35 +28,46 @@ func (s *PostgresSource) Name() string {
 	return s.name
 }
 
-func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, error) {
-	out := make(chan []protocol.Message, 100)
+func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
+	out := make(chan []protocol.Message, 1)
+	ack := make(chan struct{})
 
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+
+	// Bound for batching, default to 100 if not specified
+	batchSize := srcConfig.BatchSize
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	// Pre-allocated slice for zero-allocation batching
+	msgs := make([]protocol.Message, 0, batchSize)
+
+	// Determine snapshot mode: if we have an LSN, we resume from there and skip initial snapshot
+	snapshotEnabled := checkpoint.IngressLSN == 0
 
 	cfg := config.Config{
 		Host:     srcConfig.Host,
 		Port:     srcConfig.Port,
 		Username: srcConfig.User,
 		Password: srcConfig.PassEncrypted,
-		Database: "postgres", // Should be part of srcConfig
+		Database: srcConfig.Database,
 		Slot: slot.Config{
-			Name:              "daya_cdc_slot_" + srcConfig.ID,
+			Name:              srcConfig.SlotName,
 			CreateIfNotExists: true,
 		},
 		Publication: publication.Config{
-			Name:              "daya_cdc_pub_" + srcConfig.ID,
+			Name:              srcConfig.PublicationName,
 			CreateIfNotExists: true,
 		},
 		Snapshot: config.SnapshotConfig{
-			Enabled: true,
+			Enabled: snapshotEnabled,
 			Mode:    config.SnapshotModeInitial,
 		},
 	}
 
 	handler := func(lc *replication.ListenerContext) {
-		var msgs []protocol.Message
-
 		switch msg := lc.Message.(type) {
 		case *format.Insert:
 			payload, _ := json.Marshal(msg.Decoded)
@@ -68,7 +79,6 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 				Timestamp: msg.MessageTime,
 			})
 		case *format.Update:
-			// For now just take NewDecoded
 			payload, _ := json.Marshal(msg.NewDecoded)
 			msgs = append(msgs, protocol.Message{
 				SourceID:  srcConfig.ID,
@@ -100,9 +110,19 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			}
 		}
 
-		if len(msgs) > 0 {
+		// Flush if we reached the batch limit OR if it's a Snapshot control event
+		// or if we have at least one message and it's a "COMMIT" equivalent in the library.
+		// For now, let's stick to the requested bound check logic.
+		if len(msgs) >= batchSize {
 			select {
 			case out <- msgs:
+				select {
+				case <-ack:
+					// IMPORTANT: Reset length while keeping underlying array for reuse
+					msgs = msgs[:0]
+				case <-ctx.Done():
+					return
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -113,7 +133,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	connector, err := cdc.NewConnector(ctx, cfg, handler)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create connector: %w", err)
+		return nil, nil, fmt.Errorf("failed to create connector: %w", err)
 	}
 	s.connector = connector
 
@@ -122,7 +142,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		s.connector.Start(ctx)
 	}()
 
-	return out, nil
+	return out, ack, nil
 }
 
 func (s *PostgresSource) Stop() error {

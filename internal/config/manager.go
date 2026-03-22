@@ -38,6 +38,18 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 }
 
 func (m *ConfigManager) Watch(ctx context.Context) error {
+	// 1. Prime Global Config (Get latest if it exists)
+	if entry, err := m.kv.Get("global.config"); err == nil {
+		var cfg protocol.GlobalConfig
+		if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+			m.globalConfigMu.Lock()
+			m.globalConfig = cfg
+			m.globalConfigMu.Unlock()
+			log.Printf("Global config primed from KV")
+		}
+	}
+
+	// 2. Start Watchers
 	globalWatcher, err := m.kv.Watch("global.config")
 	if err != nil {
 		return fmt.Errorf("failed to watch global config: %w", err)

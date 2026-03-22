@@ -104,24 +104,26 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				return nil
 			}
 
-			var m protocol.Message
-			if _, err := m.UnmarshalMsg(wmMsg.Payload); err != nil {
-				log.Printf("Error: Failed to unmarshal MessagePack payload: %v", err)
+			var batchFromNats []protocol.Message
+			if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &batchFromNats); err != nil {
+				log.Printf("Error: Failed to unmarshal MessagePack batch payload: %v", err)
 				wmMsg.Nack()
 				continue
 			}
 
-			batch = append(batch, m)
-			wmMsgs = append(wmMsgs, wmMsg)
-
-			if len(batch) >= c.batchSize {
-				if err := flush(); err != nil {
-					return err
-				}
-				if c.checkDrained(m.LSN) {
-					return nil
+			for _, m := range batchFromNats {
+				batch = append(batch, m)
+				if len(batch) >= c.batchSize {
+					if err := flush(); err != nil {
+						return err
+					}
+					if c.checkDrained(m.LSN) {
+						wmMsg.Ack()
+						return nil
+					}
 				}
 			}
+			wmMsgs = append(wmMsgs, wmMsg)
 		}
 	}
 }
