@@ -68,32 +68,65 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 }
 
 func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
-	log.Printf("Applying schema change for table %s in Databend", schema.Table)
+	log.Printf("Syncing schema for table %s in Databend", schema.Table)
 
-	// 1. Map columns to Databend types
-	var colDefs []string
-	for name, pgType := range schema.Columns {
-		dbType := mapPgTypeToDatabend(pgType)
-		colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", name, dbType))
+	// 1. Check if table exists and get current columns
+	existingCols, err := s.getCurrentColumns(ctx, schema.Table)
+	if err != nil {
+		return fmt.Errorf("failed to check existing columns: %w", err)
 	}
 
-	// 2. Build CREATE TABLE OR REPLACE logic
-	// In Databend, we can use CREATE TABLE IF NOT EXISTS or REPLACE TABLE
-	// For simplicity and to handle evolution (e.g. adding columns), 
-	// we'll use a sequence of:
-	//   CREATE TABLE IF NOT EXISTS ...
-	//   Then for existing, we'd need to detect missing columns and ALTER.
-	// For now, let's implement CREATE TABLE IF NOT EXISTS.
-	
-	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)", 
-		schema.Table, strings.Join(colDefs, ", "))
-	
-	_, err := s.db.ExecContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to apply schema in databend: %w", err)
+	if len(existingCols) == 0 {
+		// 2. Create Table
+		var colDefs []string
+		for name, pgType := range schema.Columns {
+			dbType := mapPgTypeToDatabend(pgType)
+			colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", name, dbType))
+		}
+		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)", 
+			schema.Table, strings.Join(colDefs, ", "))
+		
+		log.Printf("Executing DDL: %s", query)
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+		return nil
+	}
+
+	// 3. Table exists, check for new columns (Schema Evolution)
+	for name, pgType := range schema.Columns {
+		if !existingCols[strings.ToLower(name)] {
+			dbType := mapPgTypeToDatabend(pgType)
+			query := fmt.Sprintf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s", 
+				schema.Table, name, dbType)
+			
+			log.Printf("Executing Evolution DDL: %s", query)
+			if _, err := s.db.ExecContext(ctx, query); err != nil {
+				// We log and continue, as concurrent workers might have added it already
+				log.Printf("Warning: Failed to add column %s to %s: %v", name, schema.Table, err)
+			}
+		}
 	}
 
 	return nil
+}
+
+func (s *DatabendSink) getCurrentColumns(ctx context.Context, table string) (map[string]bool, error) {
+	query := "SELECT column_name FROM information_schema.columns WHERE table_name = $1"
+	rows, err := s.db.QueryContext(ctx, query, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			cols[strings.ToLower(name)] = true
+		}
+	}
+	return cols, nil
 }
 
 func mapPgTypeToDatabend(pgType string) string {
