@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
@@ -101,6 +103,9 @@ func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 // @Success      200  {object}  map[string][]protocol.PipelineConfig
 // @Router       /pipelines [get]
 func (h *Handler) ListPipelines(c *gin.Context) {
+	// Cleanup stale worker heartbeats while we're at it
+	go h.cleanupStaleHeartbeats()
+
 	keys, err := h.kv.Keys()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -145,6 +150,20 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 	if err := cfg.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Validate sources/sinks exist
+	for _, sid := range cfg.Sources {
+		if _, err := h.kv.Get(protocol.SourceConfigKey(sid)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("source %s not found", sid)})
+			return
+		}
+	}
+	for _, sid := range cfg.Sinks {
+		if _, err := h.kv.Get(protocol.SinkConfigKey(sid)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("sink %s not found", sid)})
+			return
+		}
 	}
 
 	// Dynamic Rate Limit: Check if pipeline is currently transitioning
@@ -194,6 +213,20 @@ func (h *Handler) UpdatePipeline(c *gin.Context) {
 	if err := cfg.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Validate sources/sinks exist
+	for _, sid := range cfg.Sources {
+		if _, err := h.kv.Get(protocol.SourceConfigKey(sid)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("source %s not found", sid)})
+			return
+		}
+	}
+	for _, sid := range cfg.Sinks {
+		if _, err := h.kv.Get(protocol.SinkConfigKey(sid)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("sink %s not found", sid)})
+			return
+		}
 	}
 
 	tsKey := protocol.TransitionStateKey(id)
@@ -354,7 +387,7 @@ func (h *Handler) ListSources(c *gin.Context) {
 func (h *Handler) CreateSource(c *gin.Context) {
 	var cfg protocol.SourceConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -363,7 +396,7 @@ func (h *Handler) CreateSource(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117 -- credentials being marshaled for NATS KV storage
+	// #nosec G117
 	data, _ := json.Marshal(cfg)
 	key := protocol.SourceConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -389,7 +422,7 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 	id := c.Param("id")
 	var cfg protocol.SourceConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -399,7 +432,7 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117 -- credentials being marshaled for NATS KV storage
+	// #nosec G117
 	data, _ := json.Marshal(cfg)
 	key := protocol.SourceConfigKey(id)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -501,7 +534,7 @@ func (h *Handler) ListSinks(c *gin.Context) {
 func (h *Handler) CreateSink(c *gin.Context) {
 	var cfg protocol.SinkConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -510,7 +543,6 @@ func (h *Handler) CreateSink(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SinkConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -536,7 +568,7 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 	id := c.Param("id")
 	var cfg protocol.SinkConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -546,7 +578,6 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117 -- credentials being marshaled for NATS KV storage
 	data, _ := json.Marshal(cfg)
 	key := protocol.SinkConfigKey(id)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -602,4 +633,91 @@ func (h *Handler) GetWorkerHeartbeat(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, hb)
+}
+
+func (h *Handler) cleanupStaleHeartbeats() {
+	keys, err := h.kv.Keys()
+	if err != nil { return }
+
+	for _, key := range keys {
+		if strings.HasPrefix(key, "daya.worker.") && strings.HasSuffix(key, ".heartbeat") {
+			entry, err := h.kv.Get(key)
+			if err != nil { continue }
+
+			var hb protocol.WorkerHeartbeat
+			if err := json.Unmarshal(entry.Value(), &hb); err == nil {
+				if time.Since(hb.UpdatedAt) > 60*time.Second {
+					log.Printf("Cleaning up stale heartbeat for worker: %s", hb.WorkerID)
+					h.kv.Delete(key)
+				}
+			}
+		}
+	}
+}
+
+// StreamMetrics provides real-time status updates via SSE using NATS Watch.
+// @Summary      Stream pipeline metrics
+// @Description  Server-Sent Events stream for pipeline status and stats
+// @Tags         pipelines
+// @Produce      text/event-stream
+// @Security     Bearer
+// @Param        id   path      string  true  "Pipeline ID"
+// @Router       /pipelines/{id}/metrics [get]
+func (h *Handler) StreamMetrics(c *gin.Context) {
+	pipelineID := c.Param("id")
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	pattern := protocol.PipelineStatusPrefix(pipelineID) + "*"
+	watcher, err := h.kv.Watch(pattern)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case entry := <-watcher.Updates():
+			if entry == nil {
+				continue
+			}
+
+			var data any
+			key := entry.Key()
+
+			if strings.HasSuffix(key, "_checkpoint") {
+				var cp protocol.Checkpoint
+				if err := json.Unmarshal(entry.Value(), &cp); err != nil {
+					continue
+				}
+				data = cp
+			} else if strings.HasSuffix(key, ".stats") {
+				var st protocol.TableStats
+				if err := json.Unmarshal(entry.Value(), &st); err != nil {
+					continue
+				}
+				data = st
+			} else if strings.HasSuffix(key, ".transition") {
+				var ts protocol.PipelineTransitionState
+				if err := json.Unmarshal(entry.Value(), &ts); err != nil {
+					continue
+				}
+				data = ts
+			} else {
+				data = string(entry.Value())
+			}
+
+			c.SSEvent("message", map[string]any{
+				"key":  key,
+				"data": data,
+			})
+			c.Writer.Flush()
+		}
+	}
 }

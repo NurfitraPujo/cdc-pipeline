@@ -2,6 +2,8 @@ package nats
 
 import (
 	"context"
+	"time"
+
 	"github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	go_nats "github.com/nats-io/nats.go"
@@ -11,7 +13,7 @@ type NatsSubscriber struct {
 	subscriber *nats.Subscriber
 }
 
-func NewNatsSubscriber(url string, queueGroupPrefix string) (*NatsSubscriber, error) {
+func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int) (*NatsSubscriber, error) {
 	sub, err := nats.NewSubscriber(
 		nats.SubscriberConfig{
 			URL:              url,
@@ -20,6 +22,10 @@ func NewNatsSubscriber(url string, queueGroupPrefix string) (*NatsSubscriber, er
 				Disabled:      false,
 				DurablePrefix: queueGroupPrefix,
 				TrackMsgId:    true,
+				SubscribeOptions: []go_nats.SubOpt{
+					go_nats.MaxAckPending(maxAckPending),
+					go_nats.AckWait(30 * time.Second),
+				},
 			},
 			NatsOptions: []go_nats.Option{
 				go_nats.Name("daya-data-pipeline-subscriber"),

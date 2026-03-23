@@ -172,7 +172,7 @@ func (e *Environment) StartWorker() {
 
 		snk, _ := databend.NewDatabendSink(sinkID, snkCfg.DSN)
 		pub, _ := nats.NewNatsPublisher(e.NatsURL)
-		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id))
+		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id), 1000)
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
 		cons := engine.NewConsumer(id, sub, snk, e.KV, cfg.BatchSize, cfg.BatchWait)
@@ -234,19 +234,22 @@ func (e *Environment) EventuallyMatchDatabend(table string, id int, expected map
 			return false
 		}
 
+		actual := make(map[string]any)
+		for i, col := range cols {
+			actual[col] = values[i]
+		}
+
+		match := true
 		for k, v := range expected {
-			found := false
-			for i, col := range cols {
-				if col == k {
-					if fmt.Sprintf("%v", values[i]) == fmt.Sprintf("%v", v) {
-						found = true
-					}
-					break
-				}
+			if fmt.Sprintf("%v", actual[k]) != fmt.Sprintf("%v", v) {
+				match = false
+				break
 			}
-			if !found {
-				return false
-			}
+		}
+
+		if !match {
+			log.Printf("Match failed for table %s. Expected: %+v, Actual: %+v", table, expected, actual)
+			return false
 		}
 		return true
 	}, timeout, 1*time.Second)

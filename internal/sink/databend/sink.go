@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +96,12 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 
 	if len(existingCols) == 0 {
 		var colDefs []string
-		for name, pgType := range schema.Columns {
+		var colNames []string
+		for name := range schema.Columns { colNames = append(colNames, name) }
+		sort.Strings(colNames)
+
+		for _, name := range colNames {
+			pgType := schema.Columns[name]
 			dbType := mapPgTypeToDatabend(pgType)
 			colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", name, dbType))
 		}
@@ -169,58 +175,72 @@ func mapPgTypeToDatabend(pgType string) string {
 func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
 	if len(messages) == 0 { return nil }
 
-	var firstData map[string]any
-	if err := json.Unmarshal(messages[0].Payload, &firstData); err != nil {
-		return fmt.Errorf("failed to unmarshal first message: %w", err)
-	}
+	// GROUP BY COLUMN SET
+	// CDC batches might contain records with different column sets (evolution or different sources)
+	groups := make(map[string][]map[string]any)
+	groupCols := make(map[string][]string)
 
-	columns := make([]string, 0, len(firstData))
-	for k := range firstData { columns = append(columns, k) }
+	for _, m := range messages {
+		var data map[string]any
+		if err := json.Unmarshal(m.Payload, &data); err != nil { continue }
+		
+		cols := make([]string, 0, len(data))
+		for k := range data { cols = append(cols, k) }
+		sort.Strings(cols)
+		
+		key := strings.Join(cols, ",")
+		groups[key] = append(groups[key], data)
+		groupCols[key] = cols
+	}
 
 	s.pkMu.RLock()
 	pks := s.pkCache[table]
 	s.pkMu.RUnlock()
 	if len(pks) == 0 { pks = []string{"id"} }
 
-	quotedColumns := make([]string, len(columns))
-	for i, col := range columns { quotedColumns[i] = "\"" + col + "\"" }
-	colList := strings.Join(quotedColumns, ", ")
-	
 	quotedPks := make([]string, len(pks))
 	for i, pk := range pks { quotedPks[i] = "\"" + pk + "\"" }
 	pkList := strings.Join(quotedPks, ", ")
-	
-	query := fmt.Sprintf("REPLACE INTO \"%s\" (%s) ON (%s) VALUES ", table, colList, pkList)
-	
-	valueStrings := make([]string, 0, len(messages))
-	valueArgs := make([]any, 0, len(messages)*len(columns))
 
-	for _, m := range messages {
-		var data map[string]any
-		json.Unmarshal(m.Payload, &data)
+	for key, records := range groups {
+		columns := groupCols[key]
+		quotedColumns := make([]string, len(columns))
+		for i, col := range columns { quotedColumns[i] = "\"" + col + "\"" }
+		colList := strings.Join(quotedColumns, ", ")
 
-		placeholders := make([]string, len(columns))
-		for j, col := range columns {
-			placeholders[j] = "?"
-			val := data[col]
-			if val != nil {
-				switch v := val.(type) {
-				case string, int, int64, float64, bool, time.Time:
-				default:
-					b, _ := json.Marshal(v)
-					val = string(b)
+		// #nosec G201 -- table, columns, and pks are from Postgres schema (trusted)
+		query := fmt.Sprintf("REPLACE INTO \"%s\" (%s) ON (%s) VALUES ", table, colList, pkList)
+		
+		valueStrings := make([]string, 0, len(records))
+		valueArgs := make([]any, 0, len(records)*len(columns))
+
+		for _, data := range records {
+			placeholders := make([]string, len(columns))
+			for j, col := range columns {
+				placeholders[j] = "?"
+				val := data[col]
+				if val != nil {
+					switch v := val.(type) {
+					case string, int, int64, float64, bool, time.Time:
+					default:
+						b, _ := json.Marshal(v)
+						val = string(b)
+					}
 				}
+				valueArgs = append(valueArgs, val)
 			}
-			valueArgs = append(valueArgs, val)
+			valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
 		}
-		valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
+
+		query += strings.Join(valueStrings, ", ")
+
+		// #nosec G201
+		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
+			return fmt.Errorf("uploadTableBatch for group %s failed: %w", key, err)
+		}
 	}
 
-	query += strings.Join(valueStrings, ", ")
-
-	// #nosec G201
-	_, err := s.db.ExecContext(ctx, query, valueArgs...)
-	return err
+	return nil
 }
 
 func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
@@ -233,19 +253,22 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 
 	for _, m := range messages {
 		var data map[string]any
-		json.Unmarshal(m.Payload, &data)
+		if err := json.Unmarshal(m.Payload, &data); err != nil { continue }
 
 		var whereClauses []string
 		var args []any
 		for _, pk := range pks {
+			val, ok := data[pk]
+			if !ok { continue }
 			whereClauses = append(whereClauses, fmt.Sprintf("\"%s\" = ?", pk))
-			args = append(args, data[pk])
+			args = append(args, val)
 		}
 
+		if len(whereClauses) == 0 { continue }
+
+		// #nosec G201 -- table and pks are from Postgres schema (trusted)
 		query := fmt.Sprintf("DELETE FROM \"%s\" WHERE %s", table, strings.Join(whereClauses, " AND "))
-		// #nosec G201
-		_, err := s.db.ExecContext(ctx, query, args...)
-		if err != nil { return err }
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil { return err }
 	}
 	return nil
 }

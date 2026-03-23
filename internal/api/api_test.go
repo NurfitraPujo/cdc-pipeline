@@ -4,22 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api/mocks"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
+	"go.uber.org/mock/gomock"
 )
 
-// Helper functions
 func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	r := gin.New()
+	r := gin.Default()
 	h := NewHandler(kv)
 
 	v1 := r.Group("/api/v1")
@@ -28,22 +29,29 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 		authorized := v1.Group("/")
 		authorized.Use(AuthMiddleware())
 		{
+			authorized.GET("/global", h.GetGlobalConfig)
+			authorized.PUT("/global", h.UpdateGlobalConfig)
+			
 			pipelines := authorized.Group("/pipelines")
 			{
 				pipelines.GET("", h.ListPipelines)
 				pipelines.POST("", h.CreatePipeline)
 				pipelines.GET("/:id", h.GetPipeline)
+				pipelines.PUT("/:id", h.UpdatePipeline)
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
+
 			sources := authorized.Group("/sources")
 			{
 				sources.GET("", h.ListSources)
 				sources.POST("", h.CreateSource)
+				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/tables", h.ListTables)
 			}
+
 			sinks := authorized.Group("/sinks")
 			{
 				sinks.GET("", h.ListSinks)
@@ -51,218 +59,175 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				sinks.PUT("/:id", h.UpdateSink)
 				sinks.DELETE("/:id", h.DeleteSink)
 			}
+
+			workers := authorized.Group("/workers")
+			{
+				workers.GET("/:id/heartbeat", h.GetWorkerHeartbeat)
+			}
 		}
 	}
 	return r
 }
 
-func getTestToken(t *testing.T, r *gin.Engine, mockKV *MockKV) string {
-	// Mock auth config for Login
-	authCfg := protocol.UserConfig{Username: "admin", Password: "admin"}
-	authData, _ := json.Marshal(authCfg)
-	mockKV.On("Get", protocol.KeyAuthConfig).Return(&mockKeyValueEntry{key: protocol.KeyAuthConfig, value: authData}, nil).Once()
+func getTestToken(t *testing.T, router *gin.Engine, mockKV *mocks.MockKeyValue) string {
+	user := protocol.UserConfig{Username: "admin", Password: "password"}
+	data, _ := json.Marshal(user)
+	
+	mockKV.EXPECT().Get(protocol.KeyAuthConfig).Return(mockEntry{value: data}, nil)
 
-	loginData := map[string]string{
+	loginBody, _ := json.Marshal(map[string]string{
 		"username": "admin",
-		"password": "admin",
-	}
-	body, _ := json.Marshal(loginData)
-	req, _ := http.NewRequest("POST", "/api/v1/login", bytes.NewBuffer(body))
+		"password": "password",
+	})
+	req, _ := http.NewRequest("POST", "/api/v1/login", bytes.NewBuffer(loginBody))
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
+	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]string
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	return resp["token"]
 }
 
-// Manual Mock for KeyValueEntry
-type mockKeyValueEntry struct {
+type mockEntry struct {
 	key   string
 	value []byte
 }
+func (m mockEntry) Key() string { return m.key }
+func (m mockEntry) Value() []byte { return m.value }
+func (m mockEntry) Revision() uint64 { return 0 }
+func (m mockEntry) Created() time.Time { return time.Now() }
+func (m mockEntry) Delta() uint64 { return 0 }
+func (m mockEntry) Operation() nats.KeyValueOp { return 0 }
+func (m mockEntry) Bucket() string { return "test" }
 
-func (m *mockKeyValueEntry) Bucket() string          { return "test" }
-func (m *mockKeyValueEntry) Key() string             { return m.key }
-func (m *mockKeyValueEntry) Value() []byte           { return m.value }
-func (m *mockKeyValueEntry) Revision() uint64        { return 1 }
-func (m *mockKeyValueEntry) Created() time.Time      { return time.Now() }
-func (m *mockKeyValueEntry) Delta() uint64           { return 0 }
-func (m *mockKeyValueEntry) Operation() nats.KeyValueOp { return nats.KeyValuePut }
+var _ nats.KeyValueEntry = mockEntry{}
 
-// Mock for KeyWatcher
 type MockWatcher struct {
-	mock.Mock
+	updates chan nats.KeyValueEntry
 }
-
-func (m *MockWatcher) Context() context.Context { return context.Background() }
-func (m *MockWatcher) Updates() <-chan nats.KeyValueEntry {
-	return make(chan nats.KeyValueEntry)
-}
+func (m *MockWatcher) Updates() <-chan nats.KeyValueEntry { return m.updates }
 func (m *MockWatcher) Stop() error { return nil }
-
-// Mock for KeyValue using testify/mock
-type MockKV struct {
-	mock.Mock
-}
-
-func (m *MockKV) Get(key string) (nats.KeyValueEntry, error) {
-	args := m.Called(key)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(nats.KeyValueEntry), args.Error(1)
-}
-
-func (m *MockKV) Put(key string, value []byte) (uint64, error) {
-	args := m.Called(key, value)
-	return args.Get(0).(uint64), args.Error(1)
-}
-
-func (m *MockKV) Keys(opts ...nats.WatchOpt) ([]string, error) {
-	args := m.Called()
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]string), args.Error(1)
-}
-
-func (m *MockKV) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
-	args := m.Called(keys)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(nats.KeyWatcher), args.Error(1)
-}
-
-func (m *MockKV) Delete(key string, opts ...nats.DeleteOpt) error {
-	args := m.Called(key)
-	return args.Error(0)
-}
-
-// Implement remaining nats.KeyValue interface methods as stubs
-func (m *MockKV) GetRevision(key string, revision uint64) (nats.KeyValueEntry, error) { return nil, nil }
-func (m *MockKV) PutString(key string, value string) (uint64, error)                   { return 0, nil }
-func (m *MockKV) Create(key string, value []byte) (uint64, error)                      { return 0, nil }
-func (m *MockKV) Update(key string, value []byte, last uint64) (uint64, error)         { return 0, nil }
-func (m *MockKV) Purge(key string, opts ...nats.DeleteOpt) error                       { return nil }
-func (m *MockKV) WatchAll(opts ...nats.WatchOpt) (nats.KeyWatcher, error)              { return nil, nil }
-func (m *MockKV) ListKeys(opts ...nats.WatchOpt) (nats.KeyLister, error)               { return nil, nil }
-func (m *MockKV) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEntry, error) { return nil, nil }
-func (m *MockKV) Bucket() string                                                       { return "test" }
-func (m *MockKV) PurgeDeletes(opts ...nats.PurgeOpt) error                             { return nil }
-func (m *MockKV) Status() (nats.KeyValueStatus, error)                                 { return nil, nil }
+func (m *MockWatcher) Context() context.Context { return context.Background() }
 
 func TestAPI_Full(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	
-	t.Run("Get Specific Pipeline Success", func(t *testing.T) {
-		mockKV := new(MockKV)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	t.Run("Global Config", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
 		router := setupTestRouter(mockKV)
 		token := getTestToken(t, router, mockKV)
 		authHeader := "Bearer " + token
 
-		pipeline := protocol.PipelineConfig{ID: "p1", Name: "Test"}
-		data, _ := json.Marshal(pipeline)
-		key := protocol.PipelineConfigKey("p1")
-		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
+		// GET
+		gCfg := protocol.GlobalConfig{BatchSize: 100, BatchWait: time.Second}
+		gData, _ := json.Marshal(gCfg)
+		mockKV.EXPECT().Get(protocol.KeyGlobalConfig).Return(mockEntry{value: gData}, nil)
 
-		req, _ := http.NewRequest("GET", "/api/v1/pipelines/p1", nil)
+		req, _ := http.NewRequest("GET", "/api/v1/global", nil)
 		req.Header.Set("Authorization", authHeader)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
-
 		assert.Equal(t, http.StatusOK, w.Code)
-		var resp protocol.PipelineConfig
-		json.Unmarshal(w.Body.Bytes(), &resp)
-		assert.Equal(t, "p1", resp.ID)
-		mockKV.AssertExpectations(t)
-	})
 
-	t.Run("List Sources Success", func(t *testing.T) {
-		mockKV := new(MockKV)
-		router := setupTestRouter(mockKV)
-		token := getTestToken(t, router, mockKV)
-		authHeader := "Bearer " + token
-
-		key := protocol.SourceConfigKey("s1")
-		mockKV.On("Keys").Return([]string{key}, nil)
-		source := protocol.SourceConfig{ID: "s1", Type: "postgres", Host: "localhost", Port: 5432, Database: "db"}
-		data, _ := json.Marshal(source)
-		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
-
-		req, _ := http.NewRequest("GET", "/api/v1/sources", nil)
-		req.Header.Set("Authorization", authHeader)
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		var resp map[string][]protocol.SourceConfig
-		json.Unmarshal(w.Body.Bytes(), &resp)
-		assert.Len(t, resp["sources"], 1)
-		assert.Equal(t, "s1", resp["sources"][0].ID)
-		mockKV.AssertExpectations(t)
-	})
-
-	t.Run("Create and Get Sink Success", func(t *testing.T) {
-		mockKV := new(MockKV)
-		router := setupTestRouter(mockKV)
-		token := getTestToken(t, router, mockKV)
-		authHeader := "Bearer " + token
-
-		sink := protocol.SinkConfig{ID: "snk1", Type: "databend", DSN: "http://root:@localhost:8000"}
-		data, _ := json.Marshal(sink)
-		key := protocol.SinkConfigKey("snk1")
+		// PUT (Success)
+		mockKV.EXPECT().Keys().Return([]string{"other.key"}, nil)
+		mockKV.EXPECT().Put(protocol.KeyGlobalConfig, gomock.Any()).Return(uint64(1), nil)
 		
-		mockKV.On("Put", key, data).Return(uint64(1), nil)
-		mockKV.On("Get", key).Return(&mockKeyValueEntry{key: key, value: data}, nil)
+		putBody, _ := json.Marshal(gCfg)
+		req, _ = http.NewRequest("PUT", "/api/v1/global", bytes.NewBuffer(putBody))
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
 
-		// Create
-		body, _ := json.Marshal(sink)
-		req, _ := http.NewRequest("POST", "/api/v1/sinks", bytes.NewBuffer(body))
+	t.Run("Pipeline Lifecycle", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
+		router := setupTestRouter(mockKV)
+		token := getTestToken(t, router, mockKV)
+		authHeader := "Bearer " + token
+
+		p1 := protocol.PipelineConfig{ID: "p1", Name: "Pipe 1", Sources: []string{"s1"}, Sinks: []string{"snk1"}, Tables: []string{"t1"}}
+		pData, _ := json.Marshal(p1)
+
+		// CREATE
+		mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound)
+		mockKV.EXPECT().Get(protocol.SourceConfigKey("s1")).Return(mockEntry{value: []byte("{}")}, nil)
+		mockKV.EXPECT().Get(protocol.SinkConfigKey("snk1")).Return(mockEntry{value: []byte("{}")}, nil)
+		mockKV.EXPECT().Put(protocol.PipelineConfigKey("p1"), gomock.Any()).Return(uint64(1), nil)
+
+		req, _ := http.NewRequest("POST", "/api/v1/pipelines", bytes.NewBuffer(pData))
 		req.Header.Set("Authorization", authHeader)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusCreated, w.Code)
 
-		// Get List
-		mockKV.On("Keys").Return([]string{key}, nil)
-		req, _ = http.NewRequest("GET", "/api/v1/sinks", nil)
+		// LIST
+		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineConfigKey("p1")}, nil).AnyTimes()
+		mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
+		
+		req, _ = http.NewRequest("GET", "/api/v1/pipelines", nil)
 		req.Header.Set("Authorization", authHeader)
 		w = httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		mockKV.AssertExpectations(t)
+		// GET STATUS
+		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineStatusPrefix("p1") + "table1.stats"}, nil).AnyTimes()
+		mockKV.EXPECT().Get(protocol.PipelineStatusPrefix("p1") + "table1.stats").Return(mockEntry{value: []byte("{}")}, nil).AnyTimes()
+
+		req, _ = http.NewRequest("GET", "/api/v1/pipelines/p1/status", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("Delete Pipeline Success", func(t *testing.T) {
-		mockKV := new(MockKV)
+	t.Run("Source and Table Discovery", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
 		router := setupTestRouter(mockKV)
 		token := getTestToken(t, router, mockKV)
 		authHeader := "Bearer " + token
 
-		key := protocol.PipelineConfigKey("p1")
-		mockKV.On("Delete", key).Return(nil)
+		s1 := protocol.SourceConfig{ID: "s1", Type: "postgres", Host: "h", Port: 5432, User: "u", Database: "d"}
+		sData, _ := json.Marshal(s1)
 
-		req, _ := http.NewRequest("DELETE", "/api/v1/pipelines/p1", nil)
+		// CREATE
+		mockKV.EXPECT().Put(protocol.SourceConfigKey("s1"), gomock.Any()).Return(uint64(1), nil)
+		req, _ := http.NewRequest("POST", "/api/v1/sources", bytes.NewBuffer(sData))
 		req.Header.Set("Authorization", authHeader)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusCreated, w.Code)
 
-		assert.Equal(t, http.StatusNoContent, w.Code)
-		mockKV.AssertExpectations(t)
+		// LIST TABLES
+		metaKey := fmt.Sprintf("daya.pipeline.p1.sources.s1.tables.users.metadata")
+		mockKV.EXPECT().Keys().Return([]string{metaKey}, nil).AnyTimes()
+		mockKV.EXPECT().Get(metaKey).Return(mockEntry{value: []byte(`{"table":"users"}`)}, nil).AnyTimes()
+
+		req, _ = http.NewRequest("GET", "/api/v1/sources/s1/tables", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("Stream Metrics Call Verification", func(t *testing.T) {
-		mockKV := new(MockKV)
-		pattern := protocol.PipelineStatusPrefix("p1") + "*"
-		mockKV.On("Watch", pattern).Return(new(MockWatcher), nil)
+	t.Run("Worker Heartbeat", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
+		router := setupTestRouter(mockKV)
+		token := getTestToken(t, router, mockKV)
+		authHeader := "Bearer " + token
 
-		// Just call the mock directly to verify the pattern used by StreamMetrics
-		_, err := mockKV.Watch(pattern)
-		assert.NoError(t, err)
-		
-		mockKV.AssertExpectations(t)
+		hb := protocol.WorkerHeartbeat{WorkerID: "w1", Status: "online"}
+		hbData, _ := json.Marshal(hb)
+		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("w1")).Return(mockEntry{value: hbData}, nil)
+
+		req, _ := http.NewRequest("GET", "/api/v1/workers/w1/heartbeat", nil)
+		req.Header.Set("Authorization", authHeader)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
 	})
 }

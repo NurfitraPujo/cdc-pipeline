@@ -1,44 +1,42 @@
 # Daya Data Pipeline
 
-A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for reliability, zero-allocation efficiency, and reactive scalability.
+A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for production-grade reliability, zero-allocation efficiency, and autonomous self-healing.
 
-## Core Features
-- **🚀 High-Performance Ingest**: Zero-allocation batching logic with MessagePack serialization.
-- **🛡️ Reliable Delivery**: Strict at-least-once guarantees via a two-phase ingress feedback loop (Postgres WAL only advances after NATS confirmation).
-- **⚙️ Dynamic Configuration**: Centralized, hierarchical configuration in NATS KV (Global Defaults > Pipeline Overrides).
-- **🔄 Graceful Transitions**: Automatic two-phase reload protocol (Drain -> Resume) for zero data loss during config updates.
-- **🚦 Dynamic Rate Limiting**: API-level protection to prevent concurrent pipeline restarts.
-- **📊 Real-time Monitoring**: Aggregated multi-table status tracking and SSE-based metrics.
-- **📚 Interactive Documentation**: Full Swagger/OpenAPI 2.0 integration.
+## 🚀 Core Features
+- **🛡️ Zero-Crash Architecture**: Robust first-principle lifecycle management (Cancel->Sleep->Close) and dual-layer panic recovery.
+- **🤖 Autonomous Supervision**: Recursive worker supervisor that detects unplanned crashes and automatically reboots pipelines with exponential backoff.
+- **🧬 Auto-Schema Evolution**: Automatic DDL application to the sink (`CREATE/ALTER TABLE`) when source schemas change.
+- **📦 Heterogeneous Batching**: Sophisticated grouping of CDC messages by column-set within a single batch, preventing SQL mismatches during live schema changes.
+- **🔄 Graceful Transitions**: Two-phase "Drain -> Shutdown -> Restart" protocol for zero-downtime, LSN-consistent configuration reloads.
+- **📊 Live Observability**: Real-time SSE (Server-Sent Events) metrics stream and full Prometheus integration for the "Four Golden Signals."
+- **⚙️ Dynamic Control Plane**: Centralized, hierarchical configuration in NATS KV with built-in rate limiting for concurrent restarts.
 
 ---
 
-## Architecture Overview
+## 🏗️ Architecture Overview
 
 The pipeline operates as a reactive distributed system:
 
-1.  **Control Plane (API)**: Manage configurations and monitor health.
-2.  **Stateful Worker**: Orchestrates Producers and Consumers. It bootstraps itself from an embedded config and reacts to KV changes.
+1.  **Control Plane (API)**: Hardened REST API for managing configurations, authentication, and live monitoring.
+2.  **Stateful Worker**: Orchestrates Producers and Consumers. It is self-bootstrapping, self-healing, and reacts to configuration triggers in real-time.
 3.  **NATS JetStream**: The high-performance messaging backbone and persistent state store (`daya-dp-config` bucket).
+4.  **LSN Checkpointing**: "At-least-once" delivery guarantee using NATS-persisted checkpoints for both Ingress (Postgres) and Egress (Databend).
 
-### The Reactive Lifecycle
-1.  **Config Update**: User updates config via REST API.
-2.  **KV Trigger**: `ConfigManager` in the worker detects the change.
-3.  **Graceful Reload**: 
-    - **Phase 1**: Ingress (Producer) stops and returns the last processed LSN.
-    - **Phase 2**: Egress (Consumer) catches up to that LSN and commits to the Sink.
-4.  **Resumption**: A new worker instance starts precisely from the last known checkpoint.
+### The Autonomous Self-Healing Loop
+1.  **Panic Recovery**: Any library-level panic in the source handler is caught by a `recover()` block.
+2.  **Termination**: The worker exits its run loop gracefully but signals an "Unexpected Exit" to the supervisor.
+3.  **Reboot**: The supervisor detects the missing `transition` flag, waits 5s, re-fetches the latest config, and restarts the pipeline from the last LSN.
 
 ---
 
-## API Documentation
+## 📚 API Documentation
 
 Once the API server is running, access the interactive Swagger UI:
 👉 **[http://localhost:8080/swagger/index.html](http://localhost:8080/swagger/index.html)**
 
 ---
 
-## API Quickstart
+## ⚡ API Quickstart
 
 ### 1. Authenticate
 ```bash
@@ -48,82 +46,46 @@ curl -X POST http://localhost:8080/api/v1/login \
 ```
 *Returns a JWT token.*
 
-### 2. Define a Source
+### 2. Stream Live Metrics (SSE)
+Receive a real-time stream of LSN progress and table stats:
 ```bash
-curl -X POST http://localhost:8080/api/v1/sources \
-     -H "Authorization: Bearer <TOKEN>" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "id": "pg-primary",
-       "type": "postgres",
-       "host": "localhost",
-       "port": 5432,
-       "user": "cdc_user",
-       "pass": "encrypted-pass",
-       "database": "production_db",
-       "slot_name": "daya_cdc_slot",
-       "publication_name": "daya_cdc_pub",
-       "batch_size": 100
-     }'
+curl -N -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/sync-01/metrics
 ```
 
-### 3. Create a Pipeline
-```bash
-curl -X POST http://localhost:8080/api/v1/pipelines \
-     -H "Authorization: Bearer <TOKEN>" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "id": "sync-01",
-       "name": "Production to Analytics",
-       "sources": ["pg-primary"],
-       "tables": ["users", "orders"],
-       "batch_size": 1000,
-       "batch_wait": "5s"
-     }'
-```
-
----
-
-## Monitoring
-Get real-time status of all tables in a pipeline:
+### 3. Get Pipeline Status
 ```bash
 curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/sync-01/status
 ```
 
 ---
 
-## Development
+## 🛠️ Development & Testing
 
 ### Prerequisites
-- Go 1.26.1
-- NATS Server with JetStream enabled (`nats-server -js`)
-- PostgreSQL (logical replication enabled)
-- Databend
+- **Go**: 1.26+
+- **NATS**: Server with JetStream enabled (`nats-server -js`)
+- **PostgreSQL**: 14+ (logical replication enabled, `wal_level = logical`)
+- **Databend**: Latest
 
-### Running the Worker
-The worker automatically bootstraps NATS KV if empty.
+### Running the Full E2E Suite
+Our E2E tests use **Testcontainers** to spin up isolated Postgres, NATS, and Databend instances. This verifies Initial Snapshots, Live CDC, and Schema Evolution.
 ```bash
+go test -v -timeout 10m ./internal/test/e2e/...
+```
+
+### Running the Components
+```bash
+# Start the Worker (Auto-bootstraps NATS KV)
 export NATS_URL="nats://localhost:4222"
 go run ./cmd/pipeline
-```
-*Note: The worker exposes health checks on `:8081` (`/healthz` and `/readyz`) for Kubernetes.*
 
-#### Kubernetes Probe Example:
-```yaml
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 8081
-readinessProbe:
-  httpGet:
-    path: /readyz
-    port: 8081
-```
-
-### Running the API
-```bash
+# Start the API Control Plane
 export NATS_URL="nats://localhost:4222"
 export PORT="8080"
 go run ./cmd/api
 ```
-*Note: The API also exposes `/healthz` and `/readyz` on `:8080`.*
+
+---
+
+## 🛡️ Stability Note
+This project includes a critical patch for `go-pq-cdc` located in the `vendor/` directory. This patch replaces an aggressive `panic` with an error log during connection EOF on shutdown. Combined with the **Cancel->Sleep->Close** sequence in `internal/source/postgres`, this ensures your production process never crashes during routine reloads.

@@ -69,6 +69,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 	var batch []protocol.Message
 	var wmMsgs []*message.Message
 	timer := time.NewTimer(c.batchWait)
+	defer timer.Stop()
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -89,16 +90,28 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				s.UpdatedAt = time.Now()
 				
 				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
-				statsData, _ := s.MarshalMsg(nil)
-				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
-				c.kv.Put(statsKey, statsData)
+				statsData, err := s.MarshalMsg(nil)
+				if err == nil {
+					statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+					// #nosec G104 -- Best effort update
+					_, _ = c.kv.Put(statsKey, statsData)
+				}
 			}
 			c.statsMu.Unlock()
 
+			// Nack all messages in the batch to trigger NATS JetStream redelivery.
+			// By Nacking, we rely on the NATS Consumer Backoff policy for retries.
+			// We return nil error to keep the worker ALIVE and ready to receive the redelivered messages.
+			log.Printf("Consumer [%s]: Sink upload failed, Nacking batch (%d messages) for JetStream redelivery: %v", c.pipelineID, len(wmMsgs), err)
 			for _, m := range wmMsgs {
 				m.Nack()
 			}
-			return fmt.Errorf("failed to upload batch to sink: %w", err)
+
+			batch = nil
+			wmMsgs = nil
+			// Sleep briefly to avoid tight loops if NATS redelivery is immediate
+			time.Sleep(5 * time.Second)
+			return nil
 		}
 
 		for _, m := range wmMsgs {
@@ -124,10 +137,12 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				Status:    "ACTIVE",
 				UpdatedAt: now,
 			}
-			cpData, _ := checkpoint.MarshalMsg(nil)
-			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
-			if _, err := c.kv.Put(cpKey, cpData); err != nil {
-				return fmt.Errorf("failed to update egress checkpoint: %w", err)
+			cpData, err := checkpoint.MarshalMsg(nil)
+			if err == nil {
+				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
+				if _, err := c.kv.Put(cpKey, cpData); err != nil {
+					log.Printf("Consumer [%s]: Error updating egress checkpoint: %v", c.pipelineID, err)
+				}
 			}
 
 			s, ok := c.stats[key]
@@ -136,6 +151,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				c.stats[key] = s
 			}
 			s.Status = "ACTIVE"
+			// #nosec G115 -- counts are within uint64 range
 			count := uint64(countsByTable[key])
 			if count > 0 {
 				s.TotalSynced += count
@@ -148,10 +164,12 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			
 			metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
 
-			statsData, _ := s.MarshalMsg(nil)
-			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
-			if _, err := c.kv.Put(statsKey, statsData); err != nil {
-				return fmt.Errorf("failed to update table stats: %w", err)
+			statsData, err := s.MarshalMsg(nil)
+			if err == nil {
+				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+				if _, err := c.kv.Put(statsKey, statsData); err != nil {
+					log.Printf("Consumer [%s]: Error updating table stats: %v", c.pipelineID, err)
+				}
 			}
 		}
 
@@ -199,12 +217,22 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 					return nil
 				}
 
+				// If it's a schema change or delete, flush current batch FIRST
+				if m.Op == "schema_change" || m.Op == "delete" {
+					if err := flush(); err != nil {
+						wmMsg.Nack()
+						return err
+					}
+				}
+
 				if m.Op == "schema_change" && m.Schema != nil {
 					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
 						log.Printf("Error applying schema change for %s: %v", m.Table, err)
 						wmMsg.Nack()
 						return fmt.Errorf("failed to apply schema change: %w", err)
 					}
+					// Flush schema change immediately as its own "batch" if needed, 
+					// but here we just append and flush below.
 				}
 
 				batch = append(batch, m)

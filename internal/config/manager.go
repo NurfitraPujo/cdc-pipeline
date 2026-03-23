@@ -87,7 +87,6 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			m.globalConfigMu.Unlock()
 
 			// Trigger reload for all active workers to apply new global defaults
-			// Add a small delay to prevent rapid restart loops if multiple global updates happen
 			time.Sleep(2 * time.Second)
 			m.reloadAllWorkers(ctx)
 		}
@@ -103,7 +102,6 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 	m.workersMu.RUnlock()
 
 	for _, id := range ids {
-		// Re-fetch pipeline config from KV to get latest and apply hierarchy
 		key := protocol.PipelineConfigKey(id)
 		entry, err := m.kv.Get(key)
 		if err != nil {
@@ -118,7 +116,6 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 		}
 
 		m.applyHierarchy(&cfg)
-		// No lock held here, transitionWorker will acquire its own lock
 		m.transitionWorker(ctx, id, cfg)
 	}
 }
@@ -152,9 +149,7 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 				continue
 			}
 
-			// Apply hierarchy: Global Defaults -> Pipeline Overrides
 			m.applyHierarchy(&cfg)
-
 			m.transitionWorker(ctx, pipelineID, cfg)
 		}
 	}
@@ -177,7 +172,7 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 	oldWorker, exists := m.workers[id]
 	m.workersMu.Unlock()
 
-	// 1. Mark as Transitioning in KV
+	// 1. Mark as Transitioning in KV to prevent supervisor from restarting it during intentional reload
 	ts := protocol.PipelineTransitionState{
 		ID:        id,
 		Status:    "Transitioning",
@@ -190,7 +185,15 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 
 	if exists {
 		log.Printf("Initiating two-phase transition for pipeline %s", id)
+		// #nosec G118 -- Intentional background transition
 		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig) {
+			// Ensure cleanup of transition state if this goroutine exits for any reason
+			defer func() {
+				if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
+					log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
+				}
+			}()
+
 			log.Printf("Transition Phase 1: Draining worker %s", id)
 			if err := w.Drain(); err != nil {
 				log.Printf("Error draining worker %s: %v", id, err)
@@ -198,7 +201,7 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			select {
 			case <-w.Finished():
 				log.Printf("Transition Phase 1 Complete: Worker %s drained", id)
-			case <-time.After(10 * time.Second):
+			case <-time.After(30 * time.Second):
 				log.Printf("Warning: Drain timed out for worker %s, forcing shutdown", id)
 			}
 
@@ -210,23 +213,20 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			}
 			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
 
-			// Add a small buffer to ensure external resources (like replication slots) are released
-			time.Sleep(2 * time.Second)
+			// Small stabilization delay
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 
 			m.startNewWorker(ctx, id, newCfg)
-			
-			// 2. Clear Transitioning state
-			if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
-				log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
-			}
 		}(oldWorker, cfg)
 	} else {
 		log.Printf("Starting initial worker for pipeline %s", id)
 		m.startNewWorker(ctx, id, cfg)
-		// 2. Clear Transitioning state
-		if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
-			log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
-		}
+		// Best effort cleanup for initial start
+		_ = m.kv.Delete(protocol.TransitionStateKey(id))
 	}
 }
 
@@ -240,6 +240,37 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	m.workers[id] = newWorker
 	m.workersMu.Unlock()
 	log.Printf("Successfully started new worker for pipeline %s", id)
+
+	// --- SUPERVISOR GOROUTINE ---
+	go func(worker engine.PipelineWorker, pid string) {
+		<-worker.Finished()
+		
+		// When worker finishes, check if it was intentional (Transitioning)
+		_, err := m.kv.Get(protocol.TransitionStateKey(pid))
+		if err == nats.ErrKeyNotFound {
+			// CRASH DETECTED: It finished but we aren't transitioning.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				log.Printf("SUPERVISOR: Pipeline %s crashed unexpectedly! Restarting now...", pid)
+				// Re-fetch latest config and restart. 
+				// Note: startNewWorker will spawn a NEW supervisor for the next instance.
+				entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
+				if err != nil {
+					log.Printf("SUPERVISOR: Failed to re-fetch config for %s: %v", pid, err)
+					return
+				}
+				var latestCfg protocol.PipelineConfig
+				if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
+					log.Printf("SUPERVISOR: Failed to unmarshal config for %s: %v", pid, err)
+					return
+				}
+				m.applyHierarchy(&latestCfg)
+				m.startNewWorker(ctx, pid, latestCfg)
+			}
+		}
+	}(newWorker, id)
 }
 
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
@@ -252,15 +283,28 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 
 	if ok {
 		log.Printf("Stopping pipeline %s", id)
+		// Mark as "Transitioning" so supervisor doesn't restart it
+		ts := protocol.PipelineTransitionState{ID: id, Status: "Stopping", StartedAt: time.Now()}
+		tsData, _ := json.Marshal(ts)
+		if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
+			log.Printf("Warning: Failed to set transition state for stop %s: %v", id, err)
+		}
+
 		if err := w.Drain(); err != nil {
 			log.Printf("Error draining worker %s during stop: %v", id, err)
 		}
-		go func(worker engine.PipelineWorker) {
+		// #nosec G118 -- Intentional background cleanup
+		go func(worker engine.PipelineWorker, pid string) {
 			<-worker.Finished()
-			if err := worker.Shutdown(context.Background()); err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := worker.Shutdown(shutdownCtx); err != nil {
 				log.Printf("Error shutting down worker %s during stop: %v", id, err)
 			}
-		}(w)
+			if err := m.kv.Delete(protocol.TransitionStateKey(pid)); err != nil {
+				log.Printf("Warning: Failed to clear transition state after stop for %s: %v", pid, err)
+			}
+		}(w, id)
 	}
 }
 

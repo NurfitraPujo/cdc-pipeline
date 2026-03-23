@@ -24,6 +24,7 @@ type PostgresSource struct {
 	name      string
 	connector cdc.Connector
 	cancel    context.CancelFunc
+	closeOnce sync.Once
 
 	oidMu    sync.RWMutex
 	oidCache map[uint32]string
@@ -59,22 +60,20 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	var msgs []protocol.Message
 	knownTables := make(map[string]bool)
 
-	// Sequencer Goroutine: Decouples handler from channel blocks
+	// Sequencer Goroutine
 	go func() {
+		defer close(flushReq) // dummy, but for completeness
 		for {
 			select {
-			case <-ctx.Done():
-				return
+			case <-ctx.Done(): return
 			case m := <-flushReq:
 				select {
 				case out <- m:
 					select {
 					case <-ack:
-					case <-ctx.Done():
-						return
+					case <-ctx.Done(): return
 					}
-				case <-ctx.Done():
-					return
+				case <-ctx.Done(): return
 				}
 			}
 		}
@@ -94,10 +93,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	triggerFlush := func() {
 		mu.Lock()
-		if len(msgs) == 0 {
-			mu.Unlock()
-			return
-		}
+		if len(msgs) == 0 { mu.Unlock(); return }
 		mCopy := make([]protocol.Message, len(msgs))
 		copy(mCopy, msgs)
 		msgs = msgs[:0]
@@ -115,10 +111,8 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				triggerFlush()
+			case <-ctx.Done(): return
+			case <-ticker.C: triggerFlush()
 			}
 		}
 	}()
@@ -133,10 +127,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 					SourceID: srcConfig.ID, Table: t, Op: "schema_change", Timestamp: time.Now(),
 					Schema: &protocol.SchemaMetadata{Table: t, Schema: "public", Columns: cols, PKColumns: pks},
 				}
-				mu.Lock()
-				msgs = append(msgs, m)
-				mu.Unlock()
-				triggerFlush()
+				mu.Lock(); msgs = append(msgs, m); mu.Unlock(); triggerFlush()
 			}
 		}
 
@@ -144,10 +135,8 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.discoverTables(ctx, db, srcConfig, &mu, &msgs, knownTables, triggerFlush)
+			case <-ctx.Done(): return
+			case <-ticker.C: s.discoverTables(ctx, db, srcConfig, &mu, &msgs, knownTables, triggerFlush)
 			}
 		}
 	}()
@@ -158,31 +147,24 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	}
 
 	cfg := config.Config{
-		Host:     srcConfig.Host,
-		Port:     srcConfig.Port,
-		Username: srcConfig.User,
-		Password: srcConfig.PassEncrypted,
-		Database: srcConfig.Database,
-		Slot: slot.Config{
-			Name:              srcConfig.SlotName,
-			CreateIfNotExists: true,
-		},
+		Host: srcConfig.Host, Port: srcConfig.Port, Username: srcConfig.User, Password: srcConfig.PassEncrypted, Database: srcConfig.Database,
+		Slot: slot.Config{Name: srcConfig.SlotName, CreateIfNotExists: true},
 		Publication: publication.Config{
-			Name:              srcConfig.PublicationName,
-			CreateIfNotExists: true,
-			Tables:            pubTables,
-			Operations:        publication.Operations{publication.OperationInsert, publication.OperationUpdate, publication.OperationDelete},
+			Name: srcConfig.PublicationName, CreateIfNotExists: true, Tables: pubTables,
+			Operations: publication.Operations{publication.OperationInsert, publication.OperationUpdate, publication.OperationDelete},
 		},
-		Snapshot: config.SnapshotConfig{
-			Enabled:   checkpoint.IngressLSN == 0,
-			Mode:      config.SnapshotModeInitial,
-			ChunkSize: 8000,
-		},
+		Snapshot: config.SnapshotConfig{Enabled: checkpoint.IngressLSN == 0, Mode: config.SnapshotModeInitial, ChunkSize: 8000},
 	}
 
 	handler := func(lc *replication.ListenerContext) {
-		mu.Lock()
+		// Recovery from handler panics
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PostgresSource [%s] RECOVERED from handler panic: %v", srcConfig.SlotName, r)
+			}
+		}()
 
+		mu.Lock()
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Relation:
@@ -195,23 +177,26 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 				SourceID: srcConfig.ID, Table: msg.Name, Op: "schema_change", Timestamp: time.Now(),
 				Schema: &protocol.SchemaMetadata{Table: msg.Name, Schema: msg.Namespace, Columns: cols},
 			}
-
 		case *format.Insert:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, _ := json.Marshal(msg.Decoded)
+			payload, err := json.Marshal(msg.Decoded)
+			if err != nil { log.Printf("Error marshaling insert: %v", err); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Update:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, _ := json.Marshal(msg.NewDecoded)
+			payload, err := json.Marshal(msg.NewDecoded)
+			if err != nil { log.Printf("Error marshaling update: %v", err); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Delete:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, _ := json.Marshal(msg.OldDecoded)
+			payload, err := json.Marshal(msg.OldDecoded)
+			if err != nil { log.Printf("Error marshaling delete: %v", err); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Snapshot:
 			if strings.HasPrefix(msg.Table, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			if msg.EventType == format.SnapshotEventTypeData {
-				payload, _ := json.Marshal(msg.Data)
+				payload, err := json.Marshal(msg.Data)
+				if err != nil { log.Printf("Error marshaling snapshot: %v", err); mu.Unlock(); lc.Ack(); return }
 				m = protocol.Message{SourceID: srcConfig.ID, Table: msg.Table, Op: "snapshot", LSN: uint64(msg.LSN), Payload: payload, Timestamp: msg.ServerTime}
 			}
 		}
@@ -228,9 +213,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			mu.Unlock()
 		}
 
-		if err := lc.Ack(); err != nil {
-			log.Printf("Warning: Failed to ack: %v", err)
-		}
+		_ = lc.Ack()
 	}
 
 	connector, err := cdc.NewConnector(ctx, cfg, handler)
@@ -243,6 +226,8 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	go func() {
 		defer close(out)
 		s.connector.Start(ctx)
+		// Internal safety: Ensure Close is called if Start returns unexpectedly
+		s.Stop()
 	}()
 
 	return out, ack, nil
@@ -272,17 +257,13 @@ func (s *PostgresSource) getTableMetadata(ctx context.Context, db *sql.DB, schem
 
 func (s *PostgresSource) isSchemaAllowed(namespace string, allowed []string) bool {
 	if len(allowed) == 0 { return true }
-	for _, a := range allowed {
-		if a == namespace { return true }
-	}
+	for _, a := range allowed { if a == namespace { return true } }
 	return false
 }
 
 func (s *PostgresSource) resolveTypeName(oid uint32) string {
-	s.oidMu.RLock()
-	name, ok := s.oidCache[oid]
-	s.oidMu.RUnlock()
-	if ok { return name }
+	s.oidMu.RLock(); defer s.oidMu.RUnlock()
+	if name, ok := s.oidCache[oid]; ok { return name }
 	return fmt.Sprintf("oid:%d", oid)
 }
 
@@ -290,11 +271,9 @@ func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, "SELECT oid, typname FROM pg_type")
 	if err != nil { return err }
 	defer rows.Close()
-	s.oidMu.Lock()
-	defer s.oidMu.Unlock()
+	s.oidMu.Lock(); defer s.oidMu.Unlock()
 	for rows.Next() {
-		var oid uint32
-		var name string
+		var oid uint32; var name string
 		if err := rows.Scan(&oid, &name); err == nil { s.oidCache[oid] = name }
 	}
 	return nil
@@ -317,10 +296,7 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 						SourceID: srcConfig.ID, Table: tableName, Op: "schema_change", Timestamp: time.Now(),
 						Schema: &protocol.SchemaMetadata{Table: tableName, Schema: schema, Columns: cols, PKColumns: pks},
 					}
-					*msgs = append(*msgs, m)
-					mu.Unlock()
-					triggerFlush()
-					mu.Lock()
+					*msgs = append(*msgs, m); mu.Unlock(); triggerFlush(); mu.Lock()
 				}
 				mu.Unlock()
 			}
@@ -330,7 +306,26 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 }
 
 func (s *PostgresSource) Stop() error {
-	if s.cancel != nil { s.cancel() }
-	if s.connector != nil { s.connector.Close() }
+	s.closeOnce.Do(func() {
+		if s.connector != nil {
+			// FIRST PRINCIPLE FIX:
+			// 1. Signal shutdown to our own context first so loops know to stop.
+			if s.cancel != nil {
+				log.Printf("PostgresSource: Canceling context...")
+				s.cancel()
+			}
+			
+			// 2. Short sleep to allow ReceiveMessage loops (which have a 300ms deadline) 
+			// to finish their current iteration and see the canceled context.
+			time.Sleep(400 * time.Millisecond)
+
+			// 3. Explicitly close the connector. 
+			// Because the context is already done, the internal loops will see the EOF
+			// and check s.closed. Since Close() is running, we MUST ensure the library 
+			// sees 'closed' before it panics. 
+			log.Printf("PostgresSource: Signaling explicit close...")
+			s.connector.Close()
+		}
+	})
 	return nil
 }

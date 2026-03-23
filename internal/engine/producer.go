@@ -131,8 +131,12 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						var st protocol.TableStats
 						if err := json.Unmarshal(entry.Value(), &st); err == nil {
 							st.Status = "CIRCUIT_OPEN"
-							stData, _ := st.MarshalMsg(nil)
-							p.kv.Put(stKey, stData)
+							stData, err := st.MarshalMsg(nil)
+							if err == nil {
+								if _, err := p.kv.Put(stKey, stData); err != nil {
+									log.Printf("Error updating circuit breaker status: %v", err)
+								}
+							}
 						}
 					}
 				}
@@ -197,8 +201,12 @@ func (p *Producer) handleDiscovery(m protocol.Message) {
 	}
 
 	metaKey := fmt.Sprintf("daya.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
-	metaData, _ := json.Marshal(m.Schema)
-	p.kv.Put(metaKey, metaData)
+	metaData, err := json.Marshal(m.Schema)
+	if err == nil {
+		if _, err := p.kv.Put(metaKey, metaData); err != nil {
+			log.Printf("Error updating table metadata: %v", err)
+		}
+	}
 }
 
 func (p *Producer) Drain() error {
