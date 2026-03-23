@@ -20,6 +20,7 @@ func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int) (
 			QueueGroupPrefix: queueGroupPrefix,
 			JetStream: nats.JetStreamConfig{
 				Disabled:      false,
+				AutoProvision: true,
 				DurablePrefix: queueGroupPrefix,
 				TrackMsgId:    true,
 				SubscribeOptions: []go_nats.SubOpt{

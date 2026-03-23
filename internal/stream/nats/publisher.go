@@ -15,8 +15,9 @@ func NewNatsPublisher(url string) (*NatsPublisher, error) {
 		nats.PublisherConfig{
 			URL: url,
 			JetStream: nats.JetStreamConfig{
-				Disabled:   false,
-				TrackMsgId: true,
+				Disabled:      false,
+				TrackMsgId:    true,
+				AutoProvision: true,
 			},
 			NatsOptions: []go_nats.Option{
 				go_nats.Name("daya-data-pipeline-publisher"),

@@ -133,7 +133,8 @@ func Setup(t *testing.T) *Environment {
 func (e *Environment) Close() {
 	log.Printf("Cleaning up E2E environment...")
 	if e.Mgr != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+
 		e.Mgr.Stop(ctx)
 		cancel()
 	}
