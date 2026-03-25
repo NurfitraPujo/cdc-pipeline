@@ -36,6 +36,12 @@ func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "retry":
+			err = z.Retry.DecodeMsg(dc)
+			if err != nil {
+				err = msgp.WrapError(err, "Retry")
+				return
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -48,10 +54,10 @@ func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 }
 
 // EncodeMsg implements msgp.Encodable
-func (z GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 2
+func (z *GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 3
 	// write "batch_size"
-	err = en.Append(0x82, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	err = en.Append(0x83, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	if err != nil {
 		return
 	}
@@ -70,19 +76,36 @@ func (z GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "BatchWait")
 		return
 	}
+	// write "retry"
+	err = en.Append(0xa5, 0x72, 0x65, 0x74, 0x72, 0x79)
+	if err != nil {
+		return
+	}
+	err = z.Retry.EncodeMsg(en)
+	if err != nil {
+		err = msgp.WrapError(err, "Retry")
+		return
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
-func (z GlobalConfig) MarshalMsg(b []byte) (o []byte, err error) {
+func (z *GlobalConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 2
+	// map header, size 3
 	// string "batch_size"
-	o = append(o, 0x82, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = append(o, 0x83, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	o = msgp.AppendInt(o, z.BatchSize)
 	// string "batch_wait"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
 	o = msgp.AppendDuration(o, z.BatchWait)
+	// string "retry"
+	o = append(o, 0xa5, 0x72, 0x65, 0x74, 0x72, 0x79)
+	o, err = z.Retry.MarshalMsg(o)
+	if err != nil {
+		err = msgp.WrapError(err, "Retry")
+		return
+	}
 	return
 }
 
@@ -116,6 +139,12 @@ func (z *GlobalConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "retry":
+			bts, err = z.Retry.UnmarshalMsg(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Retry")
+				return
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -129,8 +158,8 @@ func (z *GlobalConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 }
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z GlobalConfig) Msgsize() (s int) {
-	s = 1 + 11 + msgp.IntSize + 11 + msgp.DurationSize
+func (z *GlobalConfig) Msgsize() (s int) {
+	s = 1 + 11 + msgp.IntSize + 11 + msgp.DurationSize + 6 + z.Retry.Msgsize()
 	return
 }
 
@@ -233,6 +262,24 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "retry":
+			if dc.IsNil() {
+				err = dc.ReadNil()
+				if err != nil {
+					err = msgp.WrapError(err, "Retry")
+					return
+				}
+				z.Retry = nil
+			} else {
+				if z.Retry == nil {
+					z.Retry = new(RetryConfig)
+				}
+				err = z.Retry.DecodeMsg(dc)
+				if err != nil {
+					err = msgp.WrapError(err, "Retry")
+					return
+				}
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -246,9 +293,9 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 7
+	// map header, size 8
 	// write "id"
-	err = en.Append(0x87, 0xa2, 0x69, 0x64)
+	err = en.Append(0x88, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -338,15 +385,32 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "BatchWait")
 		return
 	}
+	// write "retry"
+	err = en.Append(0xa5, 0x72, 0x65, 0x74, 0x72, 0x79)
+	if err != nil {
+		return
+	}
+	if z.Retry == nil {
+		err = en.WriteNil()
+		if err != nil {
+			return
+		}
+	} else {
+		err = z.Retry.EncodeMsg(en)
+		if err != nil {
+			err = msgp.WrapError(err, "Retry")
+			return
+		}
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 7
+	// map header, size 8
 	// string "id"
-	o = append(o, 0x87, 0xa2, 0x69, 0x64)
+	o = append(o, 0x88, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "name"
 	o = append(o, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
@@ -375,6 +439,17 @@ func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "batch_wait"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
 	o = msgp.AppendDuration(o, z.BatchWait)
+	// string "retry"
+	o = append(o, 0xa5, 0x72, 0x65, 0x74, 0x72, 0x79)
+	if z.Retry == nil {
+		o = msgp.AppendNil(o)
+	} else {
+		o, err = z.Retry.MarshalMsg(o)
+		if err != nil {
+			err = msgp.WrapError(err, "Retry")
+			return
+		}
+	}
 	return
 }
 
@@ -477,6 +552,23 @@ func (z *PipelineConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "BatchWait")
 				return
 			}
+		case "retry":
+			if msgp.IsNil(bts) {
+				bts, err = msgp.ReadNilBytes(bts)
+				if err != nil {
+					return
+				}
+				z.Retry = nil
+			} else {
+				if z.Retry == nil {
+					z.Retry = new(RetryConfig)
+				}
+				bts, err = z.Retry.UnmarshalMsg(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Retry")
+					return
+				}
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -503,7 +595,190 @@ func (z *PipelineConfig) Msgsize() (s int) {
 	for za0003 := range z.Tables {
 		s += msgp.StringPrefixSize + len(z.Tables[za0003])
 	}
-	s += 11 + msgp.IntSize + 11 + msgp.DurationSize
+	s += 11 + msgp.IntSize + 11 + msgp.DurationSize + 6
+	if z.Retry == nil {
+		s += msgp.NilSize
+	} else {
+		s += z.Retry.Msgsize()
+	}
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
+func (z *RetryConfig) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "max_retries":
+			z.MaxRetries, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "MaxRetries")
+				return
+			}
+		case "init_interval":
+			z.InitialInterval, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "InitialInterval")
+				return
+			}
+		case "max_interval":
+			z.MaxInterval, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "MaxInterval")
+				return
+			}
+		case "enable_dlq":
+			z.EnableDLQ, err = dc.ReadBool()
+			if err != nil {
+				err = msgp.WrapError(err, "EnableDLQ")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *RetryConfig) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 4
+	// write "max_retries"
+	err = en.Append(0x84, 0xab, 0x6d, 0x61, 0x78, 0x5f, 0x72, 0x65, 0x74, 0x72, 0x69, 0x65, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.MaxRetries)
+	if err != nil {
+		err = msgp.WrapError(err, "MaxRetries")
+		return
+	}
+	// write "init_interval"
+	err = en.Append(0xad, 0x69, 0x6e, 0x69, 0x74, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x76, 0x61, 0x6c)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.InitialInterval)
+	if err != nil {
+		err = msgp.WrapError(err, "InitialInterval")
+		return
+	}
+	// write "max_interval"
+	err = en.Append(0xac, 0x6d, 0x61, 0x78, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x76, 0x61, 0x6c)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.MaxInterval)
+	if err != nil {
+		err = msgp.WrapError(err, "MaxInterval")
+		return
+	}
+	// write "enable_dlq"
+	err = en.Append(0xaa, 0x65, 0x6e, 0x61, 0x62, 0x6c, 0x65, 0x5f, 0x64, 0x6c, 0x71)
+	if err != nil {
+		return
+	}
+	err = en.WriteBool(z.EnableDLQ)
+	if err != nil {
+		err = msgp.WrapError(err, "EnableDLQ")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *RetryConfig) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 4
+	// string "max_retries"
+	o = append(o, 0x84, 0xab, 0x6d, 0x61, 0x78, 0x5f, 0x72, 0x65, 0x74, 0x72, 0x69, 0x65, 0x73)
+	o = msgp.AppendInt(o, z.MaxRetries)
+	// string "init_interval"
+	o = append(o, 0xad, 0x69, 0x6e, 0x69, 0x74, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x76, 0x61, 0x6c)
+	o = msgp.AppendDuration(o, z.InitialInterval)
+	// string "max_interval"
+	o = append(o, 0xac, 0x6d, 0x61, 0x78, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x76, 0x61, 0x6c)
+	o = msgp.AppendDuration(o, z.MaxInterval)
+	// string "enable_dlq"
+	o = append(o, 0xaa, 0x65, 0x6e, 0x61, 0x62, 0x6c, 0x65, 0x5f, 0x64, 0x6c, 0x71)
+	o = msgp.AppendBool(o, z.EnableDLQ)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *RetryConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "max_retries":
+			z.MaxRetries, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "MaxRetries")
+				return
+			}
+		case "init_interval":
+			z.InitialInterval, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "InitialInterval")
+				return
+			}
+		case "max_interval":
+			z.MaxInterval, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "MaxInterval")
+				return
+			}
+		case "enable_dlq":
+			z.EnableDLQ, bts, err = msgp.ReadBoolBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "EnableDLQ")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *RetryConfig) Msgsize() (s int) {
+	s = 1 + 12 + msgp.IntSize + 14 + msgp.DurationSize + 13 + msgp.DurationSize + 11 + msgp.BoolSize
 	return
 }
 

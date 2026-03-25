@@ -23,6 +23,6 @@ func TestMetrics(t *testing.T) {
 		err := prometheus.Register(RecordsSynced)
 		// Should error because already registered by init()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "already registered")
+		assert.Contains(t, err.Error(), "duplicate metrics")
 	})
 }

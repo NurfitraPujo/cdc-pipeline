@@ -37,6 +37,10 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 	}
 }
 
+func (m *ConfigManager) GetKV() nats.KeyValue {
+	return m.kv
+}
+
 func (m *ConfigManager) Watch(ctx context.Context) error {
 	// 1. Prime Global Config (Get latest if it exists)
 	if entry, err := m.kv.Get(protocol.KeyGlobalConfig); err == nil {
@@ -164,6 +168,9 @@ func (m *ConfigManager) applyHierarchy(cfg *protocol.PipelineConfig) {
 	}
 	if cfg.BatchWait == 0 {
 		cfg.BatchWait = m.globalConfig.BatchWait
+	}
+	if cfg.Retry == nil {
+		cfg.Retry = &m.globalConfig.Retry
 	}
 }
 

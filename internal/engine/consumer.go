@@ -17,14 +17,18 @@ import (
 )
 
 type Consumer struct {
-	pipelineID string
-	subscriber stream.Subscriber
-	sink       sink.Sink
-	kv         nats.KeyValue
-	batchSize  int
-	batchWait  time.Duration
-	stats      map[string]*protocol.TableStats
-	statsMu    sync.Mutex
+	pipelineID  string
+	subscriber  stream.Subscriber
+	publisher   stream.Publisher // for DLQ
+	sink        sink.Sink
+	kv          nats.KeyValue
+	batchSize   int
+	batchWait   time.Duration
+	retryConfig protocol.RetryConfig
+	retries     map[string]int // UUID -> attempt count
+	retryMu     sync.Mutex
+	stats       map[string]*protocol.TableStats
+	statsMu     sync.Mutex
 
 	// Drain control
 	mu         sync.RWMutex
@@ -32,15 +36,18 @@ type Consumer struct {
 	targetLSN  uint64
 }
 
-func NewConsumer(pipelineID string, sub stream.Subscriber, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration) *Consumer {
+func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
 	return &Consumer{
-		pipelineID: pipelineID,
-		subscriber: sub,
-		sink:       snk,
-		kv:         kv,
-		batchSize:  batchSize,
-		batchWait:  batchWait,
-		stats:      make(map[string]*protocol.TableStats),
+		pipelineID:  pipelineID,
+		subscriber:  sub,
+		publisher:   pub,
+		sink:        snk,
+		kv:          kv,
+		batchSize:   batchSize,
+		batchWait:   batchWait,
+		retryConfig: retry,
+		retries:     make(map[string]int),
+		stats:       make(map[string]*protocol.TableStats),
 	}
 }
 
@@ -99,23 +106,69 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 			c.statsMu.Unlock()
 
+			// Check if any message in this batch should be isolated
+			shouldIsolate := false
+			c.retryMu.Lock()
+			for _, m := range wmMsgs {
+				c.retries[m.UUID]++
+				if c.retries[m.UUID] > c.retryConfig.MaxRetries {
+					shouldIsolate = true
+				}
+			}
+			c.retryMu.Unlock()
+
+			if shouldIsolate {
+				log.Printf("Consumer [%s]: Batch failed repeatedly, switching to Isolation Mode", c.pipelineID)
+				c.isolatePoisonBatch(ctx, wmMsgs)
+				batch = nil
+				wmMsgs = nil
+				return nil
+			}
+
 			// Nack all messages in the batch to trigger NATS JetStream redelivery.
-			// By Nacking, we rely on the NATS Consumer Backoff policy for retries.
-			// We return nil error to keep the worker ALIVE and ready to receive the redelivered messages.
 			log.Printf("Consumer [%s]: Sink upload failed, Nacking batch (%d messages) for JetStream redelivery: %v", c.pipelineID, len(wmMsgs), err)
+			
+			// Exponential backoff sleep
+			backoff := c.retryConfig.InitialInterval
+			maxAttempts := 0
+			c.retryMu.Lock()
+			for _, m := range wmMsgs {
+				if c.retries[m.UUID] > maxAttempts {
+					maxAttempts = c.retries[m.UUID]
+				}
+			}
+			c.retryMu.Unlock()
+			
+			log.Printf("Consumer [%s]: Max attempts for batch so far: %d", c.pipelineID, maxAttempts)
+			
+			for i := 1; i < maxAttempts; i++ {
+				backoff *= 2
+				if backoff > c.retryConfig.MaxInterval {
+					backoff = c.retryConfig.MaxInterval
+					break
+				}
+			}
+			
 			for _, m := range wmMsgs {
 				m.Nack()
 			}
 
 			batch = nil
 			wmMsgs = nil
-			// Sleep briefly to avoid tight loops if NATS redelivery is immediate
-			time.Sleep(5 * time.Second)
+			
+			if backoff > 0 {
+				time.Sleep(backoff)
+			} else {
+				time.Sleep(5 * time.Second)
+			}
 			return nil
 		}
 
 		for _, m := range wmMsgs {
 			m.Ack()
+			c.retryMu.Lock()
+			delete(c.retries, m.UUID)
+			c.retryMu.Unlock()
 		}
 
 		c.statsMu.Lock()
@@ -272,4 +325,54 @@ func (c *Consumer) checkDrained(currentLSN uint64) bool {
 		return true
 	}
 	return false
+}
+
+func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Message) {
+	for _, wmMsg := range wmMsgs {
+		var msgs []protocol.Message
+		if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &msgs); err != nil {
+			log.Printf("Consumer [%s]: Failed to unmarshal message for isolation, routing to DLQ: %v", c.pipelineID, err)
+			c.routeToDLQ(wmMsg)
+			continue
+		}
+
+		// Try uploading this single Watermill message (which might be a sub-batch)
+		if err := c.sink.BatchUpload(ctx, msgs); err != nil {
+			log.Printf("Consumer [%s]: Message %s failed in isolation: %v", c.pipelineID, wmMsg.UUID, err)
+			
+			c.retryMu.Lock()
+			attempts := c.retries[wmMsg.UUID]
+			c.retryMu.Unlock()
+
+			if attempts >= c.retryConfig.MaxRetries && c.retryConfig.EnableDLQ {
+				log.Printf("Consumer [%s]: Message %s exceeded MaxRetries, routing to DLQ", c.pipelineID, wmMsg.UUID)
+				c.routeToDLQ(wmMsg)
+			} else {
+				// Still within retry limits or DLQ disabled, Nack to try again later
+				wmMsg.Nack()
+			}
+		} else {
+			// Success in isolation!
+			wmMsg.Ack()
+			c.retryMu.Lock()
+			delete(c.retries, wmMsg.UUID)
+			c.retryMu.Unlock()
+		}
+	}
+}
+
+func (c *Consumer) routeToDLQ(msg *message.Message) {
+	dlqTopic := protocol.DLQTopic(c.pipelineID)
+	if err := c.publisher.Publish(dlqTopic, msg); err != nil {
+		log.Printf("Consumer [%s]: CRITICAL - Failed to route message to DLQ: %v", c.pipelineID, err)
+		// If we can't even send to DLQ, we MUST Nack to avoid data loss, 
+		// even if it causes Head-of-Line blocking.
+		msg.Nack()
+		return
+	}
+	// Successfully routed to DLQ, so we can Ack the original
+	msg.Ack()
+	c.retryMu.Lock()
+	delete(c.retries, msg.UUID)
+	c.retryMu.Unlock()
 }

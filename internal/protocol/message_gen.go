@@ -54,6 +54,12 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "PK")
 				return
 			}
+		case "uuid":
+			z.UUID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "UUID")
+				return
+			}
 		case "pay":
 			z.Payload, err = dc.ReadBytes(z.Payload)
 			if err != nil {
@@ -98,12 +104,12 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 // EncodeMsg implements msgp.Encodable
 func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 	// check for omitted fields
-	zb0001Len := uint32(8)
-	var zb0001Mask uint8 /* 8 bits */
+	zb0001Len := uint32(9)
+	var zb0001Mask uint16 /* 9 bits */
 	_ = zb0001Mask
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x80
+		zb0001Mask |= 0x100
 	}
 	// variable map header, size zb0001Len
 	err = en.Append(0x80 | uint8(zb0001Len))
@@ -163,6 +169,16 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "PK")
 			return
 		}
+		// write "uuid"
+		err = en.Append(0xa4, 0x75, 0x75, 0x69, 0x64)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.UUID)
+		if err != nil {
+			err = msgp.WrapError(err, "UUID")
+			return
+		}
 		// write "pay"
 		err = en.Append(0xa3, 0x70, 0x61, 0x79)
 		if err != nil {
@@ -183,7 +199,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "Timestamp")
 			return
 		}
-		if (zb0001Mask & 0x80) == 0 { // if not omitted
+		if (zb0001Mask & 0x100) == 0 { // if not omitted
 			// write "meta"
 			err = en.Append(0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if err != nil {
@@ -210,12 +226,12 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// check for omitted fields
-	zb0001Len := uint32(8)
-	var zb0001Mask uint8 /* 8 bits */
+	zb0001Len := uint32(9)
+	var zb0001Mask uint16 /* 9 bits */
 	_ = zb0001Mask
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x80
+		zb0001Mask |= 0x100
 	}
 	// variable map header, size zb0001Len
 	o = append(o, 0x80|uint8(zb0001Len))
@@ -237,13 +253,16 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "pk"
 		o = append(o, 0xa2, 0x70, 0x6b)
 		o = msgp.AppendString(o, z.PK)
+		// string "uuid"
+		o = append(o, 0xa4, 0x75, 0x75, 0x69, 0x64)
+		o = msgp.AppendString(o, z.UUID)
 		// string "pay"
 		o = append(o, 0xa3, 0x70, 0x61, 0x79)
 		o = msgp.AppendBytes(o, z.Payload)
 		// string "ts"
 		o = append(o, 0xa2, 0x74, 0x73)
 		o = msgp.AppendTime(o, z.Timestamp)
-		if (zb0001Mask & 0x80) == 0 { // if not omitted
+		if (zb0001Mask & 0x100) == 0 { // if not omitted
 			// string "meta"
 			o = append(o, 0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if z.Schema == nil {
@@ -308,6 +327,12 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "PK")
 				return
 			}
+		case "uuid":
+			z.UUID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "UUID")
+				return
+			}
 		case "pay":
 			z.Payload, bts, err = msgp.ReadBytesBytes(bts, z.Payload)
 			if err != nil {
@@ -351,7 +376,7 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *Message) Msgsize() (s int) {
-	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(z.Op) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 4 + msgp.BytesPrefixSize + len(z.Payload) + 3 + msgp.TimeSize + 5
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(z.Op) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 5 + msgp.StringPrefixSize + len(z.UUID) + 4 + msgp.BytesPrefixSize + len(z.Payload) + 3 + msgp.TimeSize + 5
 	if z.Schema == nil {
 		s += msgp.NilSize
 	} else {

@@ -13,7 +13,10 @@ type NatsSubscriber struct {
 	subscriber *nats.Subscriber
 }
 
-func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int) (*NatsSubscriber, error) {
+func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int, ackWait time.Duration) (*NatsSubscriber, error) {
+	if ackWait == 0 {
+		ackWait = 30 * time.Second
+	}
 	sub, err := nats.NewSubscriber(
 		nats.SubscriberConfig{
 			URL:              url,
@@ -25,7 +28,7 @@ func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int) (
 				TrackMsgId:    true,
 				SubscribeOptions: []go_nats.SubOpt{
 					go_nats.MaxAckPending(maxAckPending),
-					go_nats.AckWait(30 * time.Second),
+					go_nats.AckWait(ackWait),
 				},
 			},
 			NatsOptions: []go_nats.Option{

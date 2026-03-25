@@ -130,6 +130,10 @@ func Setup(t *testing.T) *Environment {
 	return env
 }
 
+func (e *Environment) GetKV() go_nats.KeyValue {
+	return e.KV
+}
+
 func (e *Environment) Close() {
 	log.Printf("Cleaning up E2E environment...")
 	if e.Mgr != nil {
@@ -173,10 +177,10 @@ func (e *Environment) StartWorker() {
 
 		snk, _ := databend.NewDatabendSink(sinkID, snkCfg.DSN)
 		pub, _ := nats.NewNatsPublisher(e.NatsURL)
-		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id), 1000)
+		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id), 1000, 30*time.Second)
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
-		cons := engine.NewConsumer(id, sub, snk, e.KV, cfg.BatchSize, cfg.BatchWait)
+		cons := engine.NewConsumer(id, sub, pub, snk, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3})
 		
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
 		pipe.Start(workerCtx)

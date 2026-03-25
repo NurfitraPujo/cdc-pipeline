@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"testing"
+	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
@@ -32,7 +33,7 @@ func TestProviderLifecycle(t *testing.T) {
 	})
 
 	t.Run("NATS Subscriber Lifecycle", func(t *testing.T) {
-		sub, _ := nats.NewNatsSubscriber(env.NatsURL, "q1", 100)
+		sub, _ := nats.NewNatsSubscriber(env.NatsURL, "q1", 100, 30*time.Second)
 		assert.Nil(t, sub.Close())
 	})
 }

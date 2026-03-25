@@ -58,6 +58,10 @@ func EgressCheckpointKey(pid, sid, table string) string {
 	return fmt.Sprintf("%s%s.sources.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, table)
 }
 
+func DLQTopic(pid string) string {
+	return fmt.Sprintf("daya_pipeline_%s_dlq", pid)
+}
+
 func PipelineStatusPrefix(pid string) string {
 	return fmt.Sprintf("%s%s.sources.", PrefixPipelineState, pid)
 }
@@ -77,12 +81,29 @@ func (u UserConfig) Validate() error {
 type GlobalConfig struct {
 	BatchSize int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"`
 	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
+	Retry     RetryConfig   `msg:"retry" yaml:"retry" json:"retry"`
 }
 
 func (g GlobalConfig) Validate() error {
 	return validation.ValidateStruct(&g,
 		validation.Field(&g.BatchSize, validation.Required, validation.Min(1)),
 		validation.Field(&g.BatchWait, validation.Required, validation.Min(time.Millisecond*100)),
+		validation.Field(&g.Retry),
+	)
+}
+
+type RetryConfig struct {
+	MaxRetries      int           `msg:"max_retries" yaml:"max_retries" json:"max_retries"`
+	InitialInterval time.Duration `msg:"init_interval" yaml:"initial_interval" json:"initial_interval" swaggertype:"string" example:"1s"`
+	MaxInterval     time.Duration `msg:"max_interval" yaml:"max_interval" json:"max_interval" swaggertype:"string" example:"30s"`
+	EnableDLQ       bool          `msg:"enable_dlq" yaml:"enable_dlq" json:"enable_dlq"`
+}
+
+func (r RetryConfig) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.MaxRetries, validation.Min(0)),
+		validation.Field(&r.InitialInterval, validation.Min(time.Millisecond*100)),
+		validation.Field(&r.MaxInterval, validation.Min(time.Millisecond*100)),
 	)
 }
 
@@ -94,6 +115,7 @@ type PipelineConfig struct {
 	Tables    []string      `msg:"tables" yaml:"tables" json:"tables"`
 	BatchSize int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"` // Override
 	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"10s"` // Override
+	Retry     *RetryConfig  `msg:"retry" yaml:"retry" json:"retry"`
 }
 
 func (p PipelineConfig) Validate() error {
@@ -103,6 +125,7 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.Sources, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Tables, validation.Required, validation.Length(1, 0)),
+		validation.Field(&p.Retry),
 	)
 }
 

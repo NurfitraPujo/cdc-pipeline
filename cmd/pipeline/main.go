@@ -112,7 +112,7 @@ func main() {
 			maxAckPending = 1000
 		}
 
-		sub, err = nats.NewNatsSubscriber(natsURL, fmt.Sprintf("daya-worker-%s", id), maxAckPending)
+		sub, err = nats.NewNatsSubscriber(natsURL, fmt.Sprintf("daya-worker-%s", id), maxAckPending, 30*time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +137,18 @@ func main() {
 		}
 
 		prod := engine.NewProducer(id, cfg, src, pub, kv)
-		cons := engine.NewConsumer(id, sub, snk, kv, cfg.BatchSize, cfg.BatchWait)
+		
+		retry := protocol.RetryConfig{
+			MaxRetries:      3,
+			InitialInterval: 1 * time.Second,
+			MaxInterval:     30 * time.Second,
+			EnableDLQ:       true,
+		}
+		if cfg.Retry != nil {
+			retry = *cfg.Retry
+		}
+		
+		cons := engine.NewConsumer(id, sub, pub, snk, kv, cfg.BatchSize, cfg.BatchWait, retry)
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
 
 		if err := pipe.Start(workerCtx); err != nil {

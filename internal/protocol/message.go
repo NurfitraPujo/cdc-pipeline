@@ -17,6 +17,7 @@ type Message struct {
 	Op        string          `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
 	LSN       uint64          `msg:"lsn"`
 	PK        string          `msg:"pk"`
+	UUID      string          `msg:"uuid"`
 	Payload   []byte          `msg:"pay"`
 	Timestamp time.Time       `msg:"ts"`
 	Schema    *SchemaMetadata `msg:"meta,omitempty" json:"schema,omitempty"`
