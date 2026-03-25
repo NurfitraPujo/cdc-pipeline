@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/rs/zerolog/log"
 )
 
 type PostgresSource struct {
@@ -88,7 +88,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	}
 
 	if err := s.primeOIDCache(ctx, db); err != nil {
-		log.Printf("Warning: Failed to prime OID cache: %v", err)
+		log.Warn().Err(err).Msg("Failed to prime OID cache")
 	}
 
 	triggerFlush := func() {
@@ -160,7 +160,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		// Recovery from handler panics
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("PostgresSource [%s] RECOVERED from handler panic: %v", srcConfig.SlotName, r)
+				log.Error().Str("slot", srcConfig.SlotName).Interface("recover", r).Msg("PostgresSource RECOVERED from handler panic")
 			}
 		}()
 
@@ -180,23 +180,23 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		case *format.Insert:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			payload, err := json.Marshal(msg.Decoded)
-			if err != nil { log.Printf("Error marshaling insert: %v", err); mu.Unlock(); lc.Ack(); return }
+			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling insert"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Update:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			payload, err := json.Marshal(msg.NewDecoded)
-			if err != nil { log.Printf("Error marshaling update: %v", err); mu.Unlock(); lc.Ack(); return }
+			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling update"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Delete:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			payload, err := json.Marshal(msg.OldDecoded)
-			if err != nil { log.Printf("Error marshaling delete: %v", err); mu.Unlock(); lc.Ack(); return }
+			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling delete"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Timestamp: msg.MessageTime}
 		case *format.Snapshot:
 			if strings.HasPrefix(msg.Table, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			if msg.EventType == format.SnapshotEventTypeData {
 				payload, err := json.Marshal(msg.Data)
-				if err != nil { log.Printf("Error marshaling snapshot: %v", err); mu.Unlock(); lc.Ack(); return }
+				if err != nil { log.Error().Err(err).Str("table", msg.Table).Msg("Error marshaling snapshot"); mu.Unlock(); lc.Ack(); return }
 				m = protocol.Message{SourceID: srcConfig.ID, Table: msg.Table, Op: "snapshot", LSN: uint64(msg.LSN), Payload: payload, Timestamp: msg.ServerTime}
 			}
 		}
@@ -311,7 +311,7 @@ func (s *PostgresSource) Stop() error {
 			// FIRST PRINCIPLE FIX:
 			// 1. Signal shutdown to our own context first so loops know to stop.
 			if s.cancel != nil {
-				log.Printf("PostgresSource: Canceling context...")
+				log.Info().Msg("PostgresSource: Canceling context...")
 				s.cancel()
 			}
 			
@@ -323,7 +323,7 @@ func (s *PostgresSource) Stop() error {
 			// Because the context is already done, the internal loops will see the EOF
 			// and check s.closed. Since Close() is running, we MUST ensure the library 
 			// sees 'closed' before it panics. 
-			log.Printf("PostgresSource: Signaling explicit close...")
+			log.Info().Msg("PostgresSource: Signaling explicit close...")
 			s.connector.Close()
 		}
 	})

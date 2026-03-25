@@ -58,7 +58,8 @@ func Setup(t *testing.T) *Environment {
 	
 	_, err = js.AddStream(&go_nats.StreamConfig{
 		Name:     "daya-data-pipeline",
-		Subjects: []string{"daya.pipeline.*.ingest"},
+		Subjects: []string{"daya_pipeline_*_ingest", "daya_pipeline_*_dlq"},
+
 	})
 	require.NoError(t, err)
 

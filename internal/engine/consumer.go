@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 type Consumer struct {
@@ -118,7 +118,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			c.retryMu.Unlock()
 
 			if shouldIsolate {
-				log.Printf("Consumer [%s]: Batch failed repeatedly, switching to Isolation Mode", c.pipelineID)
+				log.Warn().Str("pipeline_id", c.pipelineID).Msg("Batch failed repeatedly, switching to Isolation Mode")
 				c.isolatePoisonBatch(ctx, wmMsgs)
 				batch = nil
 				wmMsgs = nil
@@ -126,7 +126,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 
 			// Nack all messages in the batch to trigger NATS JetStream redelivery.
-			log.Printf("Consumer [%s]: Sink upload failed, Nacking batch (%d messages) for JetStream redelivery: %v", c.pipelineID, len(wmMsgs), err)
+			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
 			
 			// Exponential backoff sleep
 			backoff := c.retryConfig.InitialInterval
@@ -139,7 +139,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 			c.retryMu.Unlock()
 			
-			log.Printf("Consumer [%s]: Max attempts for batch so far: %d", c.pipelineID, maxAttempts)
+			log.Info().Str("pipeline_id", c.pipelineID).Int("max_attempts", maxAttempts).Msg("Max attempts for batch so far")
 			
 			for i := 1; i < maxAttempts; i++ {
 				backoff *= 2
@@ -194,7 +194,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			if err == nil {
 				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
 				if _, err := c.kv.Put(cpKey, cpData); err != nil {
-					log.Printf("Consumer [%s]: Error updating egress checkpoint: %v", c.pipelineID, err)
+					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
 				}
 			}
 
@@ -221,7 +221,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			if err == nil {
 				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
 				if _, err := c.kv.Put(statsKey, statsData); err != nil {
-					log.Printf("Consumer [%s]: Error updating table stats: %v", c.pipelineID, err)
+					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating table stats")
 				}
 			}
 		}
@@ -256,7 +256,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			var batchFromNats []protocol.Message
 			if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &batchFromNats); err != nil {
-				log.Printf("Consumer [%s]: Failed to unmarshal batch: %v", c.pipelineID, err)
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to unmarshal batch")
 				wmMsg.Nack()
 				continue
 			}
@@ -280,7 +280,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 				if m.Op == "schema_change" && m.Schema != nil {
 					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
-						log.Printf("Error applying schema change for %s: %v", m.Table, err)
+						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
 						wmMsg.Nack()
 						return fmt.Errorf("failed to apply schema change: %w", err)
 					}
@@ -331,21 +331,21 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 	for _, wmMsg := range wmMsgs {
 		var msgs []protocol.Message
 		if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &msgs); err != nil {
-			log.Printf("Consumer [%s]: Failed to unmarshal message for isolation, routing to DLQ: %v", c.pipelineID, err)
+			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to unmarshal message for isolation, routing to DLQ")
 			c.routeToDLQ(wmMsg)
 			continue
 		}
 
 		// Try uploading this single Watermill message (which might be a sub-batch)
 		if err := c.sink.BatchUpload(ctx, msgs); err != nil {
-			log.Printf("Consumer [%s]: Message %s failed in isolation: %v", c.pipelineID, wmMsg.UUID, err)
+			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message failed in isolation")
 			
 			c.retryMu.Lock()
 			attempts := c.retries[wmMsg.UUID]
 			c.retryMu.Unlock()
 
 			if attempts >= c.retryConfig.MaxRetries && c.retryConfig.EnableDLQ {
-				log.Printf("Consumer [%s]: Message %s exceeded MaxRetries, routing to DLQ", c.pipelineID, wmMsg.UUID)
+				log.Warn().Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message exceeded MaxRetries, routing to DLQ")
 				c.routeToDLQ(wmMsg)
 			} else {
 				// Still within retry limits or DLQ disabled, Nack to try again later
@@ -364,7 +364,7 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 func (c *Consumer) routeToDLQ(msg *message.Message) {
 	dlqTopic := protocol.DLQTopic(c.pipelineID)
 	if err := c.publisher.Publish(dlqTopic, msg); err != nil {
-		log.Printf("Consumer [%s]: CRITICAL - Failed to route message to DLQ: %v", c.pipelineID, err)
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("CRITICAL - Failed to route message to DLQ")
 		// If we can't even send to DLQ, we MUST Nack to avoid data loss, 
 		// even if it causes Head-of-Line blocking.
 		msg.Nack()

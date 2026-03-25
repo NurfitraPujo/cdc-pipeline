@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,11 +9,13 @@ import (
 	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/logger"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	_ "bitbucket.com/daya-engineering/daya-data-pipeline/docs"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/zerolog/log"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
@@ -31,6 +32,20 @@ import (
 // @description Type "Bearer " followed by your JWT token.
 
 func main() {
+	// 1. Initialize Logger
+	logLvl := os.Getenv("LOG_LEVEL")
+	if logLvl == "" {
+		logLvl = "info"
+	}
+	isDev := os.Getenv("ENV") != "production"
+	logger.Init(logLvl, isDev)
+
+	if !isDev {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	log.Info().Msg("Daya Data Pipeline API starting...")
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -41,13 +56,13 @@ func main() {
 
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to NATS: %v", err)
+		log.Fatal().Err(err).Msg("Failed to connect to NATS")
 	}
 	defer nc.Close()
 
 	js, err := nc.JetStream()
 	if err != nil {
-		log.Fatalf("Failed to get JetStream context: %v", err)
+		log.Fatal().Err(err).Msg("Failed to get JetStream context")
 	}
 
 	kv, err := js.KeyValue(protocol.KVBucketName)
@@ -56,13 +71,15 @@ func main() {
 			Bucket: protocol.KVBucketName,
 		})
 		if err != nil {
-			log.Fatalf("Failed to get or create KV bucket: %v", err)
+			log.Fatal().Err(err).Msg("Failed to get or create KV bucket")
 		}
 	}
 
 	h := api.NewHandler(kv)
 
-	r := gin.Default()
+	// Use custom recovery to log errors with zerolog
+	r := gin.New()
+	r.Use(gin.LoggerWithWriter(os.Stderr), gin.Recovery())
 
 	// Public Health Checks & Metrics (for Kubernetes)
 	r.GET("/healthz", func(c *gin.Context) {
@@ -104,15 +121,17 @@ func main() {
 			{
 				sources.GET("", h.ListSources)
 				sources.POST("", h.CreateSource)
+				sources.GET("/:id", h.GetSource)
 				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
-				sources.GET("/:id/tables", h.ListTables)
+				sources.GET("/:id/tables", h.ListSourceTables)
 			}
 
 			sinks := authorized.Group("/sinks")
 			{
 				sinks.GET("", h.ListSinks)
 				sinks.POST("", h.CreateSink)
+				sinks.GET("/:id", h.GetSink)
 				sinks.PUT("/:id", h.UpdateSink)
 				sinks.DELETE("/:id", h.DeleteSink)
 			}
@@ -136,14 +155,18 @@ func main() {
 	}
 
 	go func() {
+		log.Info().Str("port", port).Msg("API server listening")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			log.Fatal().Err(err).Msg("API server failed")
 		}
 	}()
 
-	// #nosec G706 -- port is from environment
-	log.Printf("API Server started on :%s", port)
-
 	<-ctx.Done()
-	log.Println("Shutting down API server...")
+	log.Info().Msg("Shutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("API server forced shutdown")
+	}
 }

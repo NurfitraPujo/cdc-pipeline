@@ -5,3 +5,6 @@ plans/
 .superpowers/
 
 web/node_modules/
+api
+pipeline
+bin/

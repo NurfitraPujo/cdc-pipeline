@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 type Handler struct {
@@ -461,7 +461,44 @@ func (h *Handler) DeleteSource(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
-func (h *Handler) ListTables(c *gin.Context) {
+// GetSource returns a single source configuration.
+// @Summary      Get source
+// @Description  Retrieve a specific source configuration
+// @Tags         sources
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  protocol.SourceConfig
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /sources/{id} [get]
+func (h *Handler) GetSource(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.SourceConfigKey(id)
+	entry, err := h.kv.Get(key)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		return
+	}
+
+	var cfg protocol.SourceConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
+}
+
+// ListSourceTables returns all discovered tables for a source.
+// @Summary      List source tables
+// @Description  Retrieve all discovered tables and their metadata for a source
+// @Tags         sources
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string][]protocol.TableMetadata
+// @Router       /sources/{id}/tables [get]
+func (h *Handler) ListSourceTables(c *gin.Context) {
 	sourceID := c.Param("id")
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -519,6 +556,34 @@ func (h *Handler) ListSinks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"sinks": sinks})
+}
+
+// GetSink returns a single sink configuration.
+// @Summary      Get sink
+// @Description  Retrieve a specific sink configuration
+// @Tags         sinks
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Sink ID"
+// @Success      200  {object}  protocol.SinkConfig
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /sinks/{id} [get]
+func (h *Handler) GetSink(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.SinkConfigKey(id)
+	entry, err := h.kv.Get(key)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "sink not found"})
+		return
+	}
+
+	var cfg protocol.SinkConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, cfg)
 }
 
 // CreateSink creates a new sink.
@@ -647,7 +712,7 @@ func (h *Handler) cleanupStaleHeartbeats() {
 			var hb protocol.WorkerHeartbeat
 			if err := json.Unmarshal(entry.Value(), &hb); err == nil {
 				if time.Since(hb.UpdatedAt) > 60*time.Second {
-					log.Printf("Cleaning up stale heartbeat for worker: %s", hb.WorkerID)
+					log.Info().Str("worker_id", hb.WorkerID).Msg("Cleaning up stale heartbeat")
 					h.kv.Delete(key)
 				}
 			}

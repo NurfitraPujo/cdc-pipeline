@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 	"github.com/sony/gobreaker"
 )
 
@@ -40,7 +40,7 @@ func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Sour
 			return counts.Requests >= 3 && failureRatio >= 0.6
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
-			log.Printf("Circuit Breaker [%s] changed from %s to %s", name, from, to)
+			log.Info().Str("breaker", name).Str("from", from.String()).Str("to", to.String()).Msg("Circuit Breaker changed state")
 			
 			// Prometheus
 			stateVal := 0.0 // Closed
@@ -87,10 +87,10 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				}
 				batch := protocol.MessageBatch{marker}
 				payload, _ := batch.MarshalMsg(nil)
-				topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.pipelineID)
+				topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.pipelineID)
 				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
 				if err := p.publisher.Publish(topic, wmMsg); err != nil {
-					log.Printf("Error sending drain marker: %v", err)
+					log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error sending drain marker")
 				}
 				return lastLSN, nil
 			}
@@ -114,7 +114,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					return nil, err
 				}
 
-				topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.pipelineID)
+				topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.pipelineID)
 				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
 				
 				if err := p.publisher.Publish(topic, wmMsg); err != nil {
@@ -134,7 +134,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 							stData, err := st.MarshalMsg(nil)
 							if err == nil {
 								if _, err := p.kv.Put(stKey, stData); err != nil {
-									log.Printf("Error updating circuit breaker status: %v", err)
+									log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating circuit breaker status")
 								}
 							}
 						}
@@ -166,7 +166,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					cpData, _ := cp.MarshalMsg(nil)
 					key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
 					if _, err := p.kv.Put(key, cpData); err != nil {
-						log.Printf("Error updating ingress checkpoint: %v", err)
+						log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating ingress checkpoint")
 					}
 				}
 			}
@@ -191,12 +191,12 @@ func (p *Producer) handleDiscovery(m protocol.Message) {
 	}
 
 	if isNew {
-		log.Printf("New table discovered via CDC: %s.%s", m.Schema.Schema, m.Schema.Table)
+		log.Info().Str("pipeline_id", p.pipelineID).Str("schema", m.Schema.Schema).Str("table", m.Schema.Table).Msg("New table discovered via CDC")
 		p.config.Tables = append(p.config.Tables, m.Schema.Table)
 		
 		data, _ := json.Marshal(p.config)
 		if _, err := p.kv.Put(protocol.PipelineConfigKey(p.pipelineID), data); err != nil {
-			log.Printf("Error updating pipeline config for discovery: %v", err)
+			log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating pipeline config for discovery")
 		}
 	}
 
@@ -204,7 +204,7 @@ func (p *Producer) handleDiscovery(m protocol.Message) {
 	metaData, err := json.Marshal(m.Schema)
 	if err == nil {
 		if _, err := p.kv.Put(metaKey, metaData); err != nil {
-			log.Printf("Error updating table metadata: %v", err)
+			log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating table metadata")
 		}
 	}
 }

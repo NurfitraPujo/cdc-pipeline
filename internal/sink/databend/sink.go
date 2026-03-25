@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +12,7 @@ import (
 
 	_ "github.com/datafuselabs/databend-go"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -83,7 +83,7 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 }
 
 func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
-	log.Printf("Syncing schema for table %s in Databend", schema.Table)
+	log.Info().Str("table", schema.Table).Msg("Syncing schema in Databend")
 
 	s.pkMu.Lock()
 	s.pkCache[schema.Table] = schema.PKColumns
@@ -108,7 +108,7 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)", 
 			schema.Table, strings.Join(colDefs, ", "))
 		
-		log.Printf("Executing DDL: %s", query)
+		log.Info().Str("table", schema.Table).Str("query", query).Msg("Executing DDL")
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
@@ -121,9 +121,9 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 			query := fmt.Sprintf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s", 
 				schema.Table, name, dbType)
 			
-			log.Printf("Executing Evolution DDL: %s", query)
+			log.Info().Str("table", schema.Table).Str("column", name).Str("query", query).Msg("Executing Evolution DDL")
 			if _, err := s.db.ExecContext(ctx, query); err != nil {
-				log.Printf("Warning: Failed to add column %s to %s: %v", name, schema.Table, err)
+				log.Warn().Err(err).Str("table", schema.Table).Str("column", name).Msg("Failed to add column")
 			}
 		}
 	}

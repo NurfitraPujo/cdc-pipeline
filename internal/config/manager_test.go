@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +11,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 	"github.com/testcontainers/testcontainers-go"
 	tc_nats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -27,7 +27,7 @@ type MockWorker struct {
 
 func (m *MockWorker) ID() string { return m.id }
 func (m *MockWorker) Drain() error {
-	log.Printf("MockWorker %s Drain called", m.id)
+	log.Info().Str("pipeline_id", m.id).Msg("MockWorker Drain called")
 	m.drained = true
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -39,7 +39,7 @@ func (m *MockWorker) Drain() error {
 }
 func (m *MockWorker) Finished() <-chan struct{} { return m.finished }
 func (m *MockWorker) Shutdown(ctx context.Context) error {
-	log.Printf("MockWorker %s Shutdown called", m.id)
+	log.Info().Str("pipeline_id", m.id).Msg("MockWorker Shutdown called")
 	m.shutdown = true
 	return nil
 }
@@ -81,7 +81,11 @@ func TestConfigManager_Transitions(t *testing.T) {
 
 	var workerCount int32
 	factory := func(ctx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		log.Printf("Mock Factory creating worker %d for %s with BatchSize %d", atomic.LoadInt32(&workerCount)+1, id, cfg.BatchSize)
+		log.Info().
+			Int32("worker_count", atomic.LoadInt32(&workerCount)+1).
+			Str("pipeline_id", id).
+			Int("batch_size", cfg.BatchSize).
+			Msg("Mock Factory creating worker")
 		atomic.AddInt32(&workerCount, 1)
 		return &MockWorker{id: id, finished: make(chan struct{}), cfg: cfg}, nil
 	}
@@ -101,7 +105,7 @@ func TestConfigManager_Transitions(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 2. Trigger initial start (No overrides)
-	log.Println("Test: Sending initial config (no overrides)")
+	log.Info().Msg("Test: Sending initial config (no overrides)")
 	cfg := protocol.PipelineConfig{ID: "p1", Name: "Test Pipeline"}
 	data, _ := json.Marshal(cfg)
 	kv.Put(protocol.PipelineConfigKey("p1"), data)
@@ -126,10 +130,10 @@ func TestConfigManager_Transitions(t *testing.T) {
 
 	// 3. Trigger update (With override)
 	// We sleep long enough to avoid race with handleGlobalUpdates's 2s sleep
-	log.Println("Test: Waiting for potential global reload to settle...")
+	log.Info().Msg("Test: Waiting for potential global reload to settle...")
 	time.Sleep(3000 * time.Millisecond)
 
-	log.Println("Test: Sending updated config (with BatchSize override)")
+	log.Info().Msg("Test: Sending updated config (with BatchSize override)")
 	cfg.BatchSize = 999
 	data, _ = json.Marshal(cfg)
 	kv.Put(protocol.PipelineConfigKey("p1"), data)
@@ -150,7 +154,7 @@ func TestConfigManager_Transitions(t *testing.T) {
 	mgr.workersMu.RUnlock()
 
 	// 4. Test Stop
-	log.Println("Test: Stopping manager")
+	log.Info().Msg("Test: Stopping manager")
 	mgr.Stop(ctx)
 	
 	mgr.workersMu.RLock()

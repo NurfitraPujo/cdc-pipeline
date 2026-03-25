@@ -49,7 +49,7 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				sources.POST("", h.CreateSource)
 				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
-				sources.GET("/:id/tables", h.ListTables)
+				sources.GET("/:id/tables", h.ListSourceTables)
 			}
 
 			sinks := authorized.Group("/sinks")

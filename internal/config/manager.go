@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 type WorkerFactory func(ctx context.Context, pipelineID string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error)
@@ -49,7 +49,7 @@ func (m *ConfigManager) Watch(ctx context.Context) error {
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
-			log.Printf("Global config primed from KV")
+			log.Info().Msg("Global config primed from KV")
 		}
 	}
 
@@ -80,10 +80,10 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 			if entry == nil {
 				continue
 			}
-			log.Printf("Global config updated: %s", entry.Key())
+			log.Info().Str("key", entry.Key()).Msg("Global config updated")
 			var cfg protocol.GlobalConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
-				log.Printf("Error unmarshaling global config: %v", err)
+				log.Error().Err(err).Msg("Error unmarshaling global config")
 				continue
 			}
 			m.globalConfigMu.Lock()
@@ -109,13 +109,13 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 		key := protocol.PipelineConfigKey(id)
 		entry, err := m.kv.Get(key)
 		if err != nil {
-			log.Printf("Failed to re-fetch config for pipeline %s during global reload: %v", id, err)
+			log.Error().Err(err).Str("pipeline_id", id).Msg("Failed to re-fetch config during global reload")
 			continue
 		}
 
 		var cfg protocol.PipelineConfig
 		if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
-			log.Printf("Error unmarshaling config for pipeline %s during global reload: %v", id, err)
+			log.Error().Err(err).Str("pipeline_id", id).Msg("Error unmarshaling config during global reload")
 			continue
 		}
 
@@ -134,22 +134,29 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			if entry == nil {
 				continue
 			}
-			log.Printf("Pipeline update received: %s (Op: %v)", entry.Key(), entry.Operation())
+			log.Info().
+				Str("key", entry.Key()).
+				Str("operation", entry.Operation().String()).
+				Msg("Pipeline update received")
+
 			pipelineID := extractPipelineID(entry.Key())
 			if pipelineID == "" {
-				log.Printf("Failed to extract pipeline ID from key: %s", entry.Key())
+				log.Error().Str("key", entry.Key()).Msg("Failed to extract pipeline ID from key")
 				continue
 			}
 
 			if entry.Operation() == nats.KeyValuePurge || entry.Operation() == nats.KeyValueDelete {
-				log.Printf("Pipeline %s deleted", pipelineID)
+				log.Info().Str("pipeline_id", pipelineID).Msg("Pipeline deleted")
 				m.stopWorker(ctx, pipelineID)
 				continue
 			}
 
 			var cfg protocol.PipelineConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
-				log.Printf("Error unmarshaling pipeline config %s: %v", pipelineID, err)
+				log.Error().
+					Err(err).
+					Str("pipeline_id", pipelineID).
+					Msg("Error unmarshaling pipeline config")
 				continue
 			}
 
@@ -187,38 +194,38 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 	}
 	tsData, _ := json.Marshal(ts)
 	if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
-		log.Printf("Warning: Failed to set transition state for %s: %v", id, err)
+		log.Warn().Err(err).Str("pipeline_id", id).Msg("Failed to set transition state")
 	}
 
 	if exists {
-		log.Printf("Initiating two-phase transition for pipeline %s", id)
+		log.Info().Str("pipeline_id", id).Msg("Initiating two-phase transition")
 		// #nosec G118 -- Intentional background transition
 		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig) {
 			// Ensure cleanup of transition state if this goroutine exits for any reason
 			defer func() {
 				if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
-					log.Printf("Warning: Failed to clear transition state for %s: %v", id, err)
+					log.Warn().Err(err).Str("pipeline_id", id).Msg("Failed to clear transition state")
 				}
 			}()
 
-			log.Printf("Transition Phase 1: Draining worker %s", id)
+			log.Info().Str("pipeline_id", id).Msg("Transition Phase 1: Draining worker")
 			if err := w.Drain(); err != nil {
-				log.Printf("Error draining worker %s: %v", id, err)
+				log.Error().Err(err).Str("pipeline_id", id).Msg("Error draining worker")
 			}
 			select {
 			case <-w.Finished():
-				log.Printf("Transition Phase 1 Complete: Worker %s drained", id)
+				log.Info().Str("pipeline_id", id).Msg("Transition Phase 1 Complete: Worker drained")
 			case <-time.After(30 * time.Second):
-				log.Printf("Warning: Drain timed out for worker %s, forcing shutdown", id)
+				log.Warn().Str("pipeline_id", id).Msg("Drain timed out, forcing shutdown")
 			}
 
-			log.Printf("Transition Phase 2: Shutting down worker %s", id)
+			log.Info().Str("pipeline_id", id).Msg("Transition Phase 2: Shutting down worker")
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := w.Shutdown(shutdownCtx); err != nil {
-				log.Printf("Error shutting down worker %s: %v", id, err)
+				log.Error().Err(err).Str("pipeline_id", id).Msg("Error shutting down worker")
 			}
-			log.Printf("Transition Phase 2 Complete: Worker %s shut down", id)
+			log.Info().Str("pipeline_id", id).Msg("Transition Phase 2 Complete: Worker shut down")
 
 			// Small stabilization delay
 			select {
@@ -230,7 +237,7 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			m.startNewWorker(ctx, id, newCfg)
 		}(oldWorker, cfg)
 	} else {
-		log.Printf("Starting initial worker for pipeline %s", id)
+		log.Info().Str("pipeline_id", id).Msg("Starting initial worker")
 		m.startNewWorker(ctx, id, cfg)
 		// Best effort cleanup for initial start
 		_ = m.kv.Delete(protocol.TransitionStateKey(id))
@@ -240,13 +247,13 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg protocol.PipelineConfig) {
 	newWorker, err := m.factory(ctx, id, cfg)
 	if err != nil {
-		log.Printf("Error creating worker for pipeline %s: %v", id, err)
+		log.Error().Err(err).Str("pipeline_id", id).Msg("Error creating worker")
 		return
 	}
 	m.workersMu.Lock()
 	m.workers[id] = newWorker
 	m.workersMu.Unlock()
-	log.Printf("Successfully started new worker for pipeline %s", id)
+	log.Info().Str("pipeline_id", id).Msg("Successfully started new worker")
 
 	// --- SUPERVISOR GOROUTINE ---
 	go func(worker engine.PipelineWorker, pid string) {
@@ -260,17 +267,17 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 			case <-ctx.Done():
 				return
 			case <-time.After(5 * time.Second):
-				log.Printf("SUPERVISOR: Pipeline %s crashed unexpectedly! Restarting now...", pid)
+				log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
 				// Re-fetch latest config and restart. 
 				// Note: startNewWorker will spawn a NEW supervisor for the next instance.
 				entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
 				if err != nil {
-					log.Printf("SUPERVISOR: Failed to re-fetch config for %s: %v", pid, err)
+					log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config")
 					return
 				}
 				var latestCfg protocol.PipelineConfig
 				if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
-					log.Printf("SUPERVISOR: Failed to unmarshal config for %s: %v", pid, err)
+					log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
 					return
 				}
 				m.applyHierarchy(&latestCfg)
@@ -289,16 +296,16 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	m.workersMu.Unlock()
 
 	if ok {
-		log.Printf("Stopping pipeline %s", id)
+		log.Info().Str("pipeline_id", id).Msg("Stopping pipeline")
 		// Mark as "Transitioning" so supervisor doesn't restart it
 		ts := protocol.PipelineTransitionState{ID: id, Status: "Stopping", StartedAt: time.Now()}
 		tsData, _ := json.Marshal(ts)
 		if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
-			log.Printf("Warning: Failed to set transition state for stop %s: %v", id, err)
+			log.Warn().Err(err).Str("pipeline_id", id).Msg("Failed to set transition state for stop")
 		}
 
 		if err := w.Drain(); err != nil {
-			log.Printf("Error draining worker %s during stop: %v", id, err)
+			log.Error().Err(err).Str("pipeline_id", id).Msg("Error draining worker during stop")
 		}
 		// #nosec G118 -- Intentional background cleanup
 		go func(worker engine.PipelineWorker, pid string) {
@@ -306,10 +313,10 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := worker.Shutdown(shutdownCtx); err != nil {
-				log.Printf("Error shutting down worker %s during stop: %v", id, err)
+				log.Error().Err(err).Str("pipeline_id", pid).Msg("Error shutting down worker during stop")
 			}
 			if err := m.kv.Delete(protocol.TransitionStateKey(pid)); err != nil {
-				log.Printf("Warning: Failed to clear transition state after stop for %s: %v", pid, err)
+				log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to clear transition state after stop")
 			}
 		}(w, id)
 	}
@@ -340,9 +347,9 @@ func (m *ConfigManager) Stop(ctx context.Context) {
 
 	select {
 	case <-ctx.Done():
-		log.Println("Graceful shutdown timed out")
+		log.Warn().Msg("Graceful shutdown timed out")
 	case <-done:
-		log.Println("All pipelines stopped gracefully")
+		log.Info().Msg("All pipelines stopped gracefully")
 	}
 }
 

@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/rs/zerolog/log"
 )
 
 type Pipeline struct {
@@ -40,14 +40,14 @@ func (p *Pipeline) ID() string {
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
-	log.Printf("Starting pipeline %s", p.id)
+	log.Info().Str("pipeline_id", p.id).Msg("Starting pipeline")
 
 	p.wg.Add(2)
 	go func() {
 		defer p.wg.Done()
-		topic := fmt.Sprintf("daya.pipeline.%s.ingest", p.id)
+		topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.id)
 		if err := p.consumer.Run(p.ctx, topic); err != nil && err != context.Canceled {
-			log.Printf("Consumer for pipeline %s failed: %v", p.id, err)
+			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Consumer failed")
 		}
 	}()
 
@@ -56,20 +56,20 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		
 		// 1. Resolve Sources
 		if len(p.config.Sources) == 0 {
-			log.Printf("No sources defined for pipeline %s", p.id)
+			log.Warn().Str("pipeline_id", p.id).Msg("No sources defined")
 			return
 		}
 		sourceID := p.config.Sources[0]
 		srcKey := protocol.SourceConfigKey(sourceID)
 		entry, err := p.producer.kv.Get(srcKey)
 		if err != nil {
-			log.Printf("Failed to get source config for %s: %v", sourceID, err)
+			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to get source config")
 			return
 		}
 		
 		var srcCfg protocol.SourceConfig
 		if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
-			log.Printf("Failed to unmarshal source config %s: %v", sourceID, err)
+			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
 			return
 		}
 
@@ -108,12 +108,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
-			log.Printf("Producer for pipeline %s failed: %v", p.id, err)
+			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed")
 		}
 		
 		// In a drain scenario, the producer finishes.
 		// We should tell the consumer to drain until this LSN.
-		log.Printf("Producer for pipeline %s finished at LSN %d. Signaling consumer drain.", p.id, lsn)
+		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling consumer drain.")
 		p.consumer.Drain(lsn)
 	}()
 
@@ -127,7 +127,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 }
 
 func (p *Pipeline) Drain() error {
-	log.Printf("Draining pipeline %s", p.id)
+	log.Info().Str("pipeline_id", p.id).Msg("Draining pipeline")
 	return p.producer.Drain()
 }
 
