@@ -10,6 +10,7 @@ The `internal/` directory contains the core logic of the Daya Data Pipeline. The
 - **`protocol/`**: Shared data structures and MessagePack serialization logic.
 - **`source/`**: Data ingress abstractions (e.g., PostgreSQL CDC).
 - **`sink/`**: Data egress abstractions (e.g., Databend).
+- **`transformer/`**: Dedicated framework for data pre-processing plugins.
 - **`stream/`**: Messaging wrappers around Watermill and NATS JetStream.
 - **`metrics/` & `logger/`**: Observability using Prometheus and Zerolog.
 - **`test/e2e/`**: End-to-end integration tests using Testcontainers.

@@ -9,6 +9,7 @@ import (
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine/mocks"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/transformer"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -33,7 +34,7 @@ func TestConsumer_LoadStats(t *testing.T) {
 }
 
 func TestUpperCaseTransformer(t *testing.T) {
-	factory, ok := GetTransformer("uppercase")
+	factory, ok := transformer.GetTransformer("uppercase")
 	assert.True(t, ok)
 
 	tf, err := factory(map[string]interface{}{"column": "name"})

@@ -10,6 +10,7 @@ import (
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
+	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/transformer"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
@@ -21,7 +22,7 @@ type Consumer struct {
 	subscriber   stream.Subscriber
 	publisher    stream.Publisher // for DLQ
 	sink         sink.Sink
-	transformers []Transformer
+	transformers []transformer.Transformer
 	kv           nats.KeyValue
 	batchSize   int
 	batchWait   time.Duration
@@ -37,7 +38,7 @@ type Consumer struct {
 	targetLSN  uint64
 }
 
-func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
+func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
 	return &Consumer{
 		pipelineID:   pipelineID,
 		subscriber:   sub,
