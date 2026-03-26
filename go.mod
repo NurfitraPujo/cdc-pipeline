@@ -2,6 +2,8 @@ module github.com/NurfitraPujo/cdc-pipeline
 
 go 1.26.1
 
+replace github.com/Trendyol/go-pq-cdc => ./internal/vendor/go-pq-cdc
+
 require (
 	github.com/ThreeDotsLabs/watermill v1.3.7
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.1.3
