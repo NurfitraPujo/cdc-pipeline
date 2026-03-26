@@ -239,3 +239,8 @@ pnpm dev
 
 ## 🛡️ Stability Note
 This project includes a critical patch for `go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. This patch replaces an aggressive `panic` with an error log during connection EOF on shutdown. This is linked via a `replace` directive in `go.mod`. Combined with the **Cancel->Sleep->Close** sequence in `internal/source/postgres`, this ensures your production process never crashes during routine reloads.
+
+---
+
+## 📄 License
+This project is licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for the full text.
