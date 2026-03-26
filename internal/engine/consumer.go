@@ -17,11 +17,12 @@ import (
 )
 
 type Consumer struct {
-	pipelineID  string
-	subscriber  stream.Subscriber
-	publisher   stream.Publisher // for DLQ
-	sink        sink.Sink
-	kv          nats.KeyValue
+	pipelineID   string
+	subscriber   stream.Subscriber
+	publisher    stream.Publisher // for DLQ
+	sink         sink.Sink
+	transformers []Transformer
+	kv           nats.KeyValue
 	batchSize   int
 	batchWait   time.Duration
 	retryConfig protocol.RetryConfig
@@ -36,18 +37,19 @@ type Consumer struct {
 	targetLSN  uint64
 }
 
-func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
+func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
 	return &Consumer{
-		pipelineID:  pipelineID,
-		subscriber:  sub,
-		publisher:   pub,
-		sink:        snk,
-		kv:          kv,
-		batchSize:   batchSize,
-		batchWait:   batchWait,
-		retryConfig: retry,
-		retries:     make(map[string]int),
-		stats:       make(map[string]*protocol.TableStats),
+		pipelineID:   pipelineID,
+		subscriber:   sub,
+		publisher:    pub,
+		sink:         snk,
+		transformers: transformers,
+		kv:           kv,
+		batchSize:    batchSize,
+		batchWait:    batchWait,
+		retryConfig:  retry,
+		retries:      make(map[string]int),
+		stats:        make(map[string]*protocol.TableStats),
 	}
 }
 
@@ -67,6 +69,34 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 	}
 }
 
+func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message) []protocol.Message {
+	if len(c.transformers) == 0 {
+		return msgs
+	}
+
+	processed := make([]protocol.Message, 0, len(msgs))
+	for _, m := range msgs {
+		current := &m
+		keep := true
+		var err error
+
+		for _, t := range c.transformers {
+			current, keep, err = t.Transform(ctx, current)
+			if err != nil {
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("transformer", t.Name()).Msg("Transformation error")
+			}
+			if !keep {
+				break
+			}
+		}
+
+		if keep && current != nil {
+			processed = append(processed, *current)
+		}
+	}
+	return processed
+}
+
 func (c *Consumer) Run(ctx context.Context, topic string) error {
 	msgChan, err := c.subscriber.Subscribe(ctx, topic)
 	if err != nil {
@@ -83,7 +113,22 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			return nil
 		}
 
-		if err := c.sink.BatchUpload(ctx, batch); err != nil {
+		// Apply transformations
+		toUpload := c.processMessages(ctx, batch)
+		if len(toUpload) == 0 {
+			// All messages were filtered out
+			for _, m := range wmMsgs {
+				m.Ack()
+				c.retryMu.Lock()
+				delete(c.retries, m.UUID)
+				c.retryMu.Unlock()
+			}
+			batch = nil
+			wmMsgs = nil
+			return nil
+		}
+
+		if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
 			c.statsMu.Lock()
 			for _, m := range batch {
 				key := m.SourceID + "." + m.Table
@@ -336,8 +381,18 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 			continue
 		}
 
+		// Apply transformations
+		toUpload := c.processMessages(ctx, msgs)
+		if len(toUpload) == 0 {
+			wmMsg.Ack()
+			c.retryMu.Lock()
+			delete(c.retries, wmMsg.UUID)
+			c.retryMu.Unlock()
+			continue
+		}
+
 		// Try uploading this single Watermill message (which might be a sub-batch)
-		if err := c.sink.BatchUpload(ctx, msgs); err != nil {
+		if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message failed in isolation")
 			
 			c.retryMu.Lock()

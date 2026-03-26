@@ -150,7 +150,22 @@ func main() {
 		}
 
 		prod := engine.NewProducer(id, cfg, src, pub, kv)
-		cons := engine.NewConsumer(id, sub, pub, snk, kv, cfg.BatchSize, cfg.BatchWait, retry)
+		var transformers []engine.Transformer
+		for _, pCfg := range cfg.Processors {
+			f, ok := engine.GetTransformer(pCfg.Type)
+			if !ok {
+				log.Warn().Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Transformer type not registered")
+				continue
+			}
+			t, err := f(pCfg.Options)
+			if err != nil {
+				log.Error().Err(err).Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Failed to create transformer")
+				continue
+			}
+			transformers = append(transformers, t)
+		}
+
+		cons := engine.NewConsumer(id, sub, pub, snk, transformers, kv, cfg.BatchSize, cfg.BatchWait, retry)
 
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
 		pipe.Start(workerCtx)

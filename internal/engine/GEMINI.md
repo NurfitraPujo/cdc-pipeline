@@ -19,6 +19,41 @@ The `internal/engine` package contains the core streaming logic of the Daya Data
 - **`Pipeline`**:
     - The top-level orchestrator that starts and coordinates the Producer and Consumer goroutines.
 
+## PnP Transformer Architecture
+
+The Daya Data Pipeline supports programmatic pre-processing through the `Transformer` interface. This allows developers to define custom logic for data masking, filtering, or enhancement before it reaches the sink.
+
+### The `Transformer` Interface
+
+```go
+type Transformer interface {
+    Name() string
+    Transform(ctx context.Context, m *protocol.Message) (*protocol.Message, bool, error)
+}
+```
+
+- **Programmatic Control**: Use `RegisterTransformer` to add custom logic.
+- **Filtering**: Return `false` for `should_continue` to drop a message.
+- **Chaining**: Multiple transformers can be configured in a single pipeline.
+
+### Built-in Transformers
+
+- **Masking (`mask`)**: Hashes PII fields using SHA256 with an optional salt.
+
+### Configuration Example
+
+Add processors to your pipeline config:
+```yaml
+pipelines:
+  - id: "my-pipeline"
+    processors:
+      - name: "mask-emails"
+        type: "mask"
+        options:
+          fields: ["email"]
+          salt: "secret-salt"
+```
+
 ## Key Files
 
 - **`producer.go`**: Ingress orchestration, circuit breaker logic, and ingress checkpointing.

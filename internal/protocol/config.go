@@ -107,15 +107,29 @@ func (r RetryConfig) Validate() error {
 	)
 }
 
+type ProcessorConfig struct {
+	Name    string                 `msg:"name" yaml:"name" json:"name"`
+	Type    string                 `msg:"type" yaml:"type" json:"type"` // e.g., "mask", "filter", "custom"
+	Options map[string]interface{} `msg:"options" yaml:"options" json:"options"`
+}
+
+func (p ProcessorConfig) Validate() error {
+	return validation.ValidateStruct(&p,
+		validation.Field(&p.Name, validation.Required),
+		validation.Field(&p.Type, validation.Required),
+	)
+}
+
 type PipelineConfig struct {
-	ID        string        `msg:"id" yaml:"id" json:"id"`
-	Name      string        `msg:"name" yaml:"name" json:"name"`
-	Sources   []string      `msg:"sources" yaml:"sources" json:"sources"`
-	Sinks     []string      `msg:"sinks" yaml:"sinks" json:"sinks"`
-	Tables    []string      `msg:"tables" yaml:"tables" json:"tables"`
-	BatchSize int           `msg:"batch_size" yaml:"batch_size" json:"batch_size"` // Override
-	BatchWait time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"10s"` // Override
-	Retry     *RetryConfig  `msg:"retry" yaml:"retry" json:"retry"`
+	ID         string            `msg:"id" yaml:"id" json:"id"`
+	Name       string            `msg:"name" yaml:"name" json:"name"`
+	Sources    []string          `msg:"sources" yaml:"sources" json:"sources"`
+	Sinks      []string          `msg:"sinks" yaml:"sinks" json:"sinks"`
+	Processors []ProcessorConfig `msg:"processors" yaml:"processors" json:"processors"`
+	Tables     []string          `msg:"tables" yaml:"tables" json:"tables"`
+	BatchSize  int               `msg:"batch_size" yaml:"batch_size" json:"batch_size"` // Override
+	BatchWait  time.Duration     `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"10s"` // Override
+	Retry      *RetryConfig      `msg:"retry" yaml:"retry" json:"retry"`
 }
 
 func (p PipelineConfig) Validate() error {
