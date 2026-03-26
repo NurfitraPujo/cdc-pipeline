@@ -827,7 +827,7 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "localhost:8080",
 	BasePath:         "/api/v1",
 	Schemes:          []string{},
-	Title:            "Daya Data Pipeline API",
+	Title:            "CDC Data Pipeline API",
 	Description:      "Control plane API for managing CDC data pipelines.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,

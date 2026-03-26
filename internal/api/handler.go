@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
@@ -705,7 +705,7 @@ func (h *Handler) cleanupStaleHeartbeats() {
 	if err != nil { return }
 
 	for _, key := range keys {
-		if strings.HasPrefix(key, "daya.worker.") && strings.HasSuffix(key, ".heartbeat") {
+		if strings.HasPrefix(key, "cdc.worker.") && strings.HasSuffix(key, ".heartbeat") {
 			entry, err := h.kv.Get(key)
 			if err != nil { continue }
 

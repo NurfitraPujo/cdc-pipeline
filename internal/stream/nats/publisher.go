@@ -20,7 +20,7 @@ func NewNatsPublisher(url string) (*NatsPublisher, error) {
 				AutoProvision: true,
 			},
 			NatsOptions: []go_nats.Option{
-				go_nats.Name("daya-data-pipeline-publisher"),
+				go_nats.Name("cdc-data-pipeline-publisher"),
 			},
 		},
 		nil, // Logger

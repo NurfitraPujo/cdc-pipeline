@@ -1,5 +1,5 @@
 {
-  "projectName": "daya-data-pipeline",
+  "projectName": "cdc-data-pipeline",
   "mode": "file-router",
   "typescript": true,
   "tailwind": true,

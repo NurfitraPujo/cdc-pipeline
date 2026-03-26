@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/stretchr/testify/assert"
 )
 

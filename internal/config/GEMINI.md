@@ -1,11 +1,11 @@
 # Internal Config: Orchestration Hub
 
-The `internal/config` package is the central nervous system of the Daya Data Pipeline's Data Plane. It is responsible for watching configuration changes and orchestrating the lifecycle of worker goroutines.
+The `internal/config` package is the central nervous system of the CDC Data Pipeline's Data Plane. It is responsible for watching configuration changes and orchestrating the lifecycle of worker goroutines.
 
 ## Core Features
 
 - **`ConfigManager`**:
-    - Watches **NATS KV** (`daya-dp-config` bucket) for updates to global settings and individual pipeline configurations.
+    - Watches **NATS KV** (`cdc-dp-config` bucket) for updates to global settings and individual pipeline configurations.
     - Implements **Hierarchical Configuration**: Merges global defaults with pipeline-specific overrides.
 - **Two-Phase Transition Protocol**:
     - Handles zero-downtime, LSN-consistent reloads.

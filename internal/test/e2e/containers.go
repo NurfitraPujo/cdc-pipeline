@@ -14,7 +14,7 @@ import (
 func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 	return postgres.Run(ctx,
 		"postgres:16-alpine",
-		postgres.WithDatabase("daya_src"),
+		postgres.WithDatabase("cdc_src"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
 		testcontainers.WithWaitStrategy(

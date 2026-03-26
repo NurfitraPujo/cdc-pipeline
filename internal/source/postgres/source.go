@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
 	"github.com/Trendyol/go-pq-cdc/pq/message/format"

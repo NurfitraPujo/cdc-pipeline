@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine/mocks"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/engine/mocks"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
@@ -72,12 +72,12 @@ func TestConsumer_DLQ(t *testing.T) {
 			// Isolation Mode for {wmMsg1, wmMsg2}:
 			// 1. wmMsg1: attempts=3 >= 2. route to DLQ.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			mockPub.EXPECT().Publish("daya_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
+			mockPub.EXPECT().Publish("cdc_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
 			
 			// 2. wmMsg2: attempts=2 >= 2 is TRUE.
 			// So wmMsg2 also to DLQ.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			mockPub.EXPECT().Publish("daya_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
+			mockPub.EXPECT().Publish("cdc_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
 		)
 
 		err := c.Run(ctx, "topic1")

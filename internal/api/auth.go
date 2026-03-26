@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gin-gonic/gin"
 )
@@ -15,7 +15,7 @@ import (
 func getJWTSecret() []byte {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		return []byte("daya-secret-key-change-me-in-production")
+		return []byte("cdc-secret-key-change-me-in-production")
 	}
 	return []byte(secret)
 }

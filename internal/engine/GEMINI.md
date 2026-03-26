@@ -1,6 +1,6 @@
 # Internal Engine: Pipeline Logic
 
-The `internal/engine` package contains the core streaming logic of the Daya Data Pipeline. It orchestrates the movement of data between sources and sinks using an asynchronous, batch-oriented approach.
+The `internal/engine` package contains the core streaming logic of the CDC Data Pipeline. It orchestrates the movement of data between sources and sinks using an asynchronous, batch-oriented approach.
 
 ## Core Features
 
@@ -21,7 +21,7 @@ The `internal/engine` package contains the core streaming logic of the Daya Data
 
 ## PnP Transformer Architecture
 
-The Daya Data Pipeline supports programmatic pre-processing through the `Transformer` interface. This allows developers to define custom logic for data masking, filtering, or enhancement before it reaches the sink.
+The CDC Data Pipeline supports programmatic pre-processing through the `Transformer` interface. This allows developers to define custom logic for data masking, filtering, or enhancement before it reaches the sink.
 
 ### The `Transformer` Interface
 

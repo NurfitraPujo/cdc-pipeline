@@ -4,7 +4,7 @@
 **Authors:** Gemini CLI
 
 ## Overview
-Daya Data Pipeline must support dynamic custom tables built by platform users and automatic schema evolution (DDL propagation). This is achieved by utilizing the PostgreSQL logical replication stream's `Relation` messages as the primary trigger for discovery and structural updates, ensuring high availability and zero-ops management.
+CDC Data Pipeline must support dynamic custom tables built by platform users and automatic schema evolution (DDL propagation). This is achieved by utilizing the PostgreSQL logical replication stream's `Relation` messages as the primary trigger for discovery and structural updates, ensuring high availability and zero-ops management.
 
 ## Architecture
 

@@ -2,7 +2,7 @@ package source
 
 import (
 	"context"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 )
 
 type Source interface {

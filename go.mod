@@ -1,4 +1,4 @@
-module bitbucket.com/daya-engineering/daya-data-pipeline
+module github.com/NurfitraPujo/cdc-pipeline
 
 go 1.26.1
 

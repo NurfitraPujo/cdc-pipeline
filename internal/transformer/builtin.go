@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 )
 
 // MaskTransformer hashes specific fields in the message data.

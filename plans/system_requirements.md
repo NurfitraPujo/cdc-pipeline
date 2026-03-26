@@ -1,4 +1,4 @@
-# Daya Core Data Pipeline - Comprehensive Requirements & Design
+# CDC Core Data Pipeline - Comprehensive Requirements & Design
 
 The purpose of this repository is to consume database changes in realtime manner using CDC and forward them to preconfigured sinks. It is a modular, pluggable system designed for moderate-volume (millions of events per day) data processing with high observability and reliability.
 

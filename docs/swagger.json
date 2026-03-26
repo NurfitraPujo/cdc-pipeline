@@ -2,7 +2,7 @@
     "swagger": "2.0",
     "info": {
         "description": "Control plane API for managing CDC data pipelines.",
-        "title": "Daya Data Pipeline API",
+        "title": "CDC Data Pipeline API",
         "contact": {},
         "version": "1.0"
     },

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine/mocks"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/transformer"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/engine/mocks"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"

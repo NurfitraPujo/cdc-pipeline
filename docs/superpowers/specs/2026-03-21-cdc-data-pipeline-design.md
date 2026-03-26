@@ -1,10 +1,10 @@
-# Daya Data Pipeline - Detailed Design Specification
+# CDC Data Pipeline - Detailed Design Specification
 
 **Status:** Approved (2026-03-21)
 **Authors:** Gemini CLI
 
 ## Overview
-Daya Data Pipeline is a high-performance, modular system for CDC (Change Data Capture) and data ingestion. It leverages PostgreSQL logical replication for real-time updates and efficient batch processing for historical data snapshots. The system is designed to be pluggable, allowing for easy addition of new data sources and analytical sinks.
+CDC Data Pipeline is a high-performance, modular system for CDC (Change Data Capture) and data ingestion. It leverages PostgreSQL logical replication for real-time updates and efficient batch processing for historical data snapshots. The system is designed to be pluggable, allowing for easy addition of new data sources and analytical sinks.
 
 ## Architecture
 The system follows a Producer-Consumer architecture decoupled by a NATS JetStream message broker.

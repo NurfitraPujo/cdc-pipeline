@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +47,7 @@ func TestE2E_DLQ(t *testing.T) {
 	defer env.Close()
 
 	pipelineID := "p_dlq"
-	topic := "daya_pipeline_p_dlq_main"
+	topic := "cdc_pipeline_p_dlq_main"
 	dlqTopic := protocol.DLQTopic(pipelineID)
 
 	// 2. Setup Subscriber for DLQ to verify arrival

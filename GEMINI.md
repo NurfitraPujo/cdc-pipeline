@@ -1,4 +1,4 @@
-# Daya Data Pipeline
+# CDC Data Pipeline
 
 A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for production-grade reliability, zero-allocation efficiency, and autonomous self-healing.
 

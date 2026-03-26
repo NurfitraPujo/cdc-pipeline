@@ -1,6 +1,6 @@
-# Daya Data Pipeline - Roadmap & Next Steps
+# CDC Data Pipeline - Roadmap & Next Steps
 
-This document outlines the strategic directions to take the Daya Data Pipeline from a high-performance prototype to a production-ready platform.
+This document outlines the strategic directions to take the CDC Data Pipeline from a high-performance prototype to a production-ready platform.
 
 ## 1. Schema Evolution & Auto-DDL (Feature)
 **Goal:** Automate the mapping of source schema changes to the analytical sink.
@@ -11,7 +11,7 @@ This document outlines the strategic directions to take the Daya Data Pipeline f
 ## 2. Dead Letter Queue (DLQ) & Error Isolation (Reliability)
 **Goal:** Prevent "Poison Pill" messages from blocking the entire pipeline.
 - **Error Handling:** If a batch fails repeatedly, isolate the individual failed messages.
-- **NATS DLQ:** Route failed messages to a dedicated `daya.pipeline.{id}.dlq` NATS topic.
+- **NATS DLQ:** Route failed messages to a dedicated `cdc.pipeline.{id}.dlq` NATS topic.
 - **Retry Logic:** Implement an exponential backoff for transient sink errors before routing to the DLQ.
 - **Value:** Prevents Head-of-Line blocking and ensures continuous data flow.
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api/mocks"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/api/mocks"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -203,7 +203,7 @@ func TestAPI_Full(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, w.Code)
 
 		// LIST TABLES
-		metaKey := fmt.Sprintf("daya.pipeline.p1.sources.s1.tables.users.metadata")
+		metaKey := fmt.Sprintf("cdc.pipeline.p1.sources.s1.tables.users.metadata")
 		mockKV.EXPECT().Keys().Return([]string{metaKey}, nil).AnyTimes()
 		mockKV.EXPECT().Get(metaKey).Return(mockEntry{value: []byte(`{"table":"users"}`)}, nil).AnyTimes()
 

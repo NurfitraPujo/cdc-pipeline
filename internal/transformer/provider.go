@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"plugin"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 )
 
 // Transformer defines a programmatic interface for data pre-processing.

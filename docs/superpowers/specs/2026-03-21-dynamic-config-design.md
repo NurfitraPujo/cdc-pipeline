@@ -4,7 +4,7 @@
 **Authors:** Gemini CLI
 
 ## Overview
-Daya Data Pipeline requires a dynamic configuration system that allows updates to pipeline and global settings without restarting the entire process. This is achieved by using NATS KV as the single source of truth and a centralized `ConfigManager` that orchestrates a two-phase graceful transition for affected worker segments.
+CDC Data Pipeline requires a dynamic configuration system that allows updates to pipeline and global settings without restarting the entire process. This is achieved by using NATS KV as the single source of truth and a centralized `ConfigManager` that orchestrates a two-phase graceful transition for affected worker segments.
 
 ## Architecture
 

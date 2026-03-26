@@ -1,6 +1,6 @@
 # Internal Architecture Overview
 
-The `internal/` directory contains the core logic of the Daya Data Pipeline. The system follows a "Control Plane vs. Data Plane" separation of concerns, coordinated through NATS JetStream.
+The `internal/` directory contains the core logic of the CDC Data Pipeline. The system follows a "Control Plane vs. Data Plane" separation of concerns, coordinated through NATS JetStream.
 
 ## Directory Structure
 

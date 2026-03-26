@@ -4,7 +4,7 @@
 **Authors:** Gemini CLI
 
 ## Overview
-Daya Data Pipeline requires a comprehensive end-to-end integration test suite to verify the entire data flow from PostgreSQL through the Producer, NATS JetStream, and finally to the Databend sink. The suite will use **Testcontainers-go** to orchestrate ephemeral, isolated instances of all external dependencies.
+CDC Data Pipeline requires a comprehensive end-to-end integration test suite to verify the entire data flow from PostgreSQL through the Producer, NATS JetStream, and finally to the Databend sink. The suite will use **Testcontainers-go** to orchestrate ephemeral, isolated instances of all external dependencies.
 
 ## Architecture
 

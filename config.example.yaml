@@ -1,17 +1,17 @@
-# Daya Data Pipeline - Configuration Template
+# CDC Data Pipeline - Configuration Template
 # This file serves as a reference for the settings stored in NATS KV.
 
-# Authentication (Stored in NATS KV as 'daya.config.auth')
+# Authentication (Stored in NATS KV as 'cdc.config.auth')
 auth:
   username: "admin"
   password: "admin"
 
-# Global Defaults (Stored in NATS KV as 'daya.config.global')
+# Global Defaults (Stored in NATS KV as 'cdc.config.global')
 global:
   batch_size: 1000
   batch_wait: 5s
 
-# Source Configurations (Stored in NATS KV as 'daya.config.sources.{id}')
+# Source Configurations (Stored in NATS KV as 'cdc.config.sources.{id}')
 sources:
   - id: "postgres-primary"
     type: "postgres"
@@ -20,17 +20,17 @@ sources:
     user: "cdc_user"
     pass: "your-encrypted-password"
     database: "production_db"
-    slot_name: "daya_cdc_slot"
-    publication_name: "daya_cdc_pub"
+    slot_name: "cdc_slot"
+    publication_name: "cdc_pub"
     batch_size: 100
 
-# Sink Configurations (Stored in NATS KV as 'daya.config.sinks.{id}')
+# Sink Configurations (Stored in NATS KV as 'cdc.config.sinks.{id}')
 sinks:
   - id: "databend-analytics"
     type: "databend"
     dsn: "http://root:@localhost:8000"
 
-# Pipeline Configurations (Stored in NATS KV as 'daya.config.pipelines.{id}')
+# Pipeline Configurations (Stored in NATS KV as 'cdc.config.pipelines.{id}')
 pipelines:
   - id: "pipe-01"
     name: "Main Data Sync"

@@ -8,10 +8,10 @@ import (
 	"syscall"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/api"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/logger"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	_ "bitbucket.com/daya-engineering/daya-data-pipeline/docs"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/api"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	_ "github.com/NurfitraPujo/cdc-pipeline/docs"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -20,7 +20,7 @@ import (
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
-// @title           Daya Data Pipeline API
+// @title           CDC Data Pipeline API
 // @version         1.0
 // @description     Control plane API for managing CDC data pipelines.
 // @host            localhost:8080
@@ -44,7 +44,7 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	log.Info().Msg("Daya Data Pipeline API starting...")
+	log.Info().Msg("CDC Data Pipeline API starting...")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

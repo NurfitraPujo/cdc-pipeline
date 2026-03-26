@@ -1,11 +1,11 @@
 # Internal API: Control Plane
 
-The `internal/api` package implements the RESTful Control Plane for the Daya Data Pipeline. It provides endpoints for managing the lifecycle of sources, sinks, and pipelines.
+The `internal/api` package implements the RESTful Control Plane for the CDC Data Pipeline. It provides endpoints for managing the lifecycle of sources, sinks, and pipelines.
 
 ## Core Features
 
 - **Framework**: Uses **Gin** for high-performance HTTP routing.
-- **Dynamic Configuration**: All configurations are stored in and retrieved from **NATS Key-Value (KV)** store (`daya-dp-config` bucket).
+- **Dynamic Configuration**: All configurations are stored in and retrieved from **NATS Key-Value (KV)** store (`cdc-dp-config` bucket).
 - **Authentication**: Secured via **JWT (JSON Web Tokens)**. See `auth.go` for the middleware and token handling logic.
 - **Dynamic Rate Limiting**: Implements logic in `handler.go` to prevent configuration updates if a pipeline is currently in a `Transitioning` state.
 - **Observability**:

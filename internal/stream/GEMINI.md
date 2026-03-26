@@ -1,6 +1,6 @@
 # Internal Stream: PnP Messaging
 
-The `internal/stream` package provides a **Plug-and-Play (PnP)** messaging infrastructure. By abstracting message publishing and subscription, the Daya Data Pipeline can adapt to various message brokers without changing the data processing logic.
+The `internal/stream` package provides a **Plug-and-Play (PnP)** messaging infrastructure. By abstracting message publishing and subscription, the CDC Data Pipeline can adapt to various message brokers without changing the data processing logic.
 
 ## The Messaging Interfaces
 

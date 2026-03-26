@@ -12,7 +12,7 @@ import (
 
 	_ "github.com/datafuselabs/databend-go"
 	"github.com/vmihailenco/msgpack/v5"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )

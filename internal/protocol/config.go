@@ -12,18 +12,18 @@ import (
 
 // NATS KV Constants
 const (
-	KVBucketName = "daya-dp-config"
+	KVBucketName = "cdc-dp-config"
 
 	// Configuration Keys
-	KeyGlobalConfig      = "daya.config.global"
-	KeyAuthConfig        = "daya.config.auth"
-	PrefixPipelineConfig = "daya.config.pipelines."
-	PrefixSourceConfig   = "daya.config.sources."
-	PrefixSinkConfig     = "daya.config.sinks."
+	KeyGlobalConfig      = "cdc.config.global"
+	KeyAuthConfig        = "cdc.config.auth"
+	PrefixPipelineConfig = "cdc.config.pipelines."
+	PrefixSourceConfig   = "cdc.config.sources."
+	PrefixSinkConfig     = "cdc.config.sinks."
 
 	// Operational/State Keys
-	PrefixPipelineState = "daya.pipeline."
-	PrefixWorkerState   = "daya.worker."
+	PrefixPipelineState = "cdc.pipeline."
+	PrefixWorkerState   = "cdc.worker."
 )
 
 // Helper functions for key construction
@@ -59,7 +59,7 @@ func EgressCheckpointKey(pid, sid, table string) string {
 }
 
 func DLQTopic(pid string) string {
-	return fmt.Sprintf("daya_pipeline_%s_dlq", pid)
+	return fmt.Sprintf("cdc_pipeline_%s_dlq", pid)
 }
 
 func PipelineStatusPrefix(pid string) string {

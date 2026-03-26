@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
@@ -87,7 +87,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				}
 				batch := protocol.MessageBatch{marker}
 				payload, _ := batch.MarshalMsg(nil)
-				topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.pipelineID)
+				topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
 				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
 				if err := p.publisher.Publish(topic, wmMsg); err != nil {
 					log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error sending drain marker")
@@ -114,7 +114,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					return nil, err
 				}
 
-				topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.pipelineID)
+				topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
 				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
 				
 				if err := p.publisher.Publish(topic, wmMsg); err != nil {
@@ -200,7 +200,7 @@ func (p *Producer) handleDiscovery(m protocol.Message) {
 		}
 	}
 
-	metaKey := fmt.Sprintf("daya.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
+	metaKey := fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
 	metaData, err := json.Marshal(m.Schema)
 	if err == nil {
 		if _, err := p.kv.Put(metaKey, metaData); err != nil {

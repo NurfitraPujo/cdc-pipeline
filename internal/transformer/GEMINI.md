@@ -28,8 +28,8 @@ package main
 
 import (
 	"context"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/transformer"
+	"bitbucket.com/cdc-engineering/cdc-data-pipeline/internal/protocol"
+	"bitbucket.com/cdc-engineering/cdc-data-pipeline/internal/transformer"
 )
 
 type MyTransformer struct{}

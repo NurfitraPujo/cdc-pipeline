@@ -11,15 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/config"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/logger"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/metrics"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-        "bitbucket.com/daya-engineering/daya-data-pipeline/internal/transformer"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+        "github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
@@ -38,7 +38,7 @@ func main() {
 	isDev := os.Getenv("ENV") != "production"
 	logger.Init(logLvl, isDev)
 
-	log.Info().Msg("Daya Data Pipeline starting...")
+	log.Info().Msg("CDC Data Pipeline starting...")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -140,7 +140,7 @@ func main() {
 			maxAckPending = 1000
 		}
 
-		sub, err = nats.NewNatsSubscriber(natsURL, fmt.Sprintf("daya-worker-%s", id), maxAckPending, 30*time.Second)
+		sub, err = nats.NewNatsSubscriber(natsURL, fmt.Sprintf("cdc-worker-%s", id), maxAckPending, 30*time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -239,7 +239,7 @@ func main() {
 		}
 	}()
 
-	log.Info().Str("worker_id", workerID).Msg("Daya Data Pipeline Worker started. Waiting for configuration...")
+	log.Info().Str("worker_id", workerID).Msg("CDC Data Pipeline Worker started. Waiting for configuration...")
 	<-ctx.Done()
 	log.Info().Msg("Shutting down...")
 

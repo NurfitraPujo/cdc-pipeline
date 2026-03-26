@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/rs/zerolog/log"
 )
 
@@ -45,7 +45,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.wg.Add(2)
 	go func() {
 		defer p.wg.Done()
-		topic := fmt.Sprintf("daya_pipeline_%s_ingest", p.id)
+		topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.id)
 		if err := p.consumer.Run(p.ctx, topic); err != nil && err != context.Canceled {
 			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Consumer failed")
 		}

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )

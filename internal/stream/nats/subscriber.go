@@ -32,7 +32,7 @@ func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int, a
 				},
 			},
 			NatsOptions: []go_nats.Option{
-				go_nats.Name("daya-data-pipeline-subscriber"),
+				go_nats.Name("cdc-data-pipeline-subscriber"),
 			},
 		},
 		nil, // Logger

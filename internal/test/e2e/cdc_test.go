@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 )
 
 func TestE2E_LiveCDC(t *testing.T) {

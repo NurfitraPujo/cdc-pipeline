@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/config"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/engine"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/sink/databend"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/source/postgres"
-	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -57,8 +57,8 @@ func Setup(t *testing.T) *Environment {
 	js, _ := nc.JetStream()
 	
 	_, err = js.AddStream(&go_nats.StreamConfig{
-		Name:     "daya-data-pipeline",
-		Subjects: []string{"daya_pipeline_*_ingest", "daya_pipeline_*_dlq"},
+		Name:     "cdc-data-pipeline",
+		Subjects: []string{"cdc_pipeline_*_ingest", "cdc_pipeline_*_dlq"},
 
 	})
 	require.NoError(t, err)
@@ -70,11 +70,11 @@ func Setup(t *testing.T) *Environment {
 	require.NoError(t, err)
 	pgHost, _ := pgC.Host(ctx)
 	pgPort, _ := pgC.MappedPort(ctx, "5432")
-	pgDSN := fmt.Sprintf("postgres://postgres:postgres@%s:%s/daya_src?sslmode=disable", pgHost, pgPort.Port())
+	pgDSN := fmt.Sprintf("postgres://postgres:postgres@%s:%s/cdc_src?sslmode=disable", pgHost, pgPort.Port())
 	pgDB, err := sql.Open("pgx", pgDSN)
 	require.NoError(t, err)
 
-	_, err = pgDB.Exec("CREATE PUBLICATION daya_pub FOR ALL TABLES")
+	_, err = pgDB.Exec("CREATE PUBLICATION cdc_pub FOR ALL TABLES")
 	require.NoError(t, err)
 
 	srcCfg := protocol.SourceConfig{
@@ -84,9 +84,9 @@ func Setup(t *testing.T) *Environment {
 		Port:            pgPort.Int(),
 		User:            "postgres",
 		PassEncrypted:   "postgres",
-		Database:        "daya_src",
-		SlotName:        fmt.Sprintf("daya_slot_%d", time.Now().UnixNano()),
-		PublicationName: "daya_pub",
+		Database:        "cdc_src",
+		SlotName:        fmt.Sprintf("cdc_slot_%d", time.Now().UnixNano()),
+		PublicationName: "cdc_pub",
 		Schemas:         []string{"public"},
 	}
 
@@ -178,7 +178,7 @@ func (e *Environment) StartWorker() {
 
 		snk, _ := databend.NewDatabendSink(sinkID, snkCfg.DSN)
 		pub, _ := nats.NewNatsPublisher(e.NatsURL)
-		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id), 1000, 30*time.Second)
+		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("cdc-worker-%s", id), 1000, 30*time.Second)
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
 		cons := engine.NewConsumer(id, sub, pub, snk, nil, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3})

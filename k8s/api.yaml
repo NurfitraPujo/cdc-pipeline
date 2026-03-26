@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: daya-data-pipeline:latest
+          image: cdc-data-pipeline:latest
           command: ["/app/api"]
           env:
             - name: NATS_URL

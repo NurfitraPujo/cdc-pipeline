@@ -1,4 +1,4 @@
-# Daya Data Pipeline
+# CDC Data Pipeline
 
 A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for production-grade reliability, zero-allocation efficiency, and autonomous self-healing.
 
@@ -19,7 +19,7 @@ The pipeline operates as a reactive distributed system:
 
 1.  **Control Plane (API)**: Hardened REST API for managing configurations, authentication, and live monitoring.
 2.  **Stateful Worker**: Orchestrates Producers and Consumers. It is self-bootstrapping, self-healing, and reacts to configuration triggers in real-time.
-3.  **NATS JetStream**: The high-performance messaging backbone and persistent state store (`daya-dp-config` bucket).
+3.  **NATS JetStream**: The high-performance messaging backbone and persistent state store (`cdc-dp-config` bucket).
 4.  **LSN Checkpointing**: "At-least-once" delivery guarantee using NATS-persisted checkpoints for both Ingress (Postgres) and Egress (Databend).
 
 ### The Autonomous Self-Healing Loop

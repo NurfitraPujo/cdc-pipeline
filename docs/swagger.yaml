@@ -84,7 +84,7 @@ host: localhost:8080
 info:
   contact: {}
   description: Control plane API for managing CDC data pipelines.
-  title: Daya Data Pipeline API
+  title: CDC Data Pipeline API
   version: "1.0"
 paths:
   /global:
