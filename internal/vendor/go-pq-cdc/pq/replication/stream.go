@@ -208,14 +208,14 @@ func (s *stream) sink(ctx context.Context) {
 	if !s.closed.Load() {
 		s.Close(ctx)
 		if corrupted {
-			panic("corrupted connection")
+			logger.Error("corrupted connection")
 		}
 	}
 }
 
 // sinkLoop reads raw replication messages and dispatches them until the
 // connection is closed or a fatal error occurs. It returns true when the
-// connection is in a corrupted state and the caller should panic.
+// connection is in a corrupted state and the caller should log an error.
 func (s *stream) sinkLoop(ctx context.Context, buf *messageBuffer) (corrupted bool) {
 	for {
 		msgCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(300*time.Millisecond))
