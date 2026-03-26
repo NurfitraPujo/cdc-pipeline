@@ -18,8 +18,6 @@ github.com/ThreeDotsLabs/watermill v1.3.7 h1:NV0PSTmuACVEOV4dMxRnmGXrmbz8U83LENO
 github.com/ThreeDotsLabs/watermill v1.3.7/go.mod h1:lBnrLbxOjeMRgcJbv+UiZr8Ylz8RkJ4m6i/VN/Nk+to=
 github.com/ThreeDotsLabs/watermill-nats/v2 v2.1.3 h1:/5IfNugBb9H+BvEHHNRnICmF3jaI9P7wVRzA12kDDDs=
 github.com/ThreeDotsLabs/watermill-nats/v2 v2.1.3/go.mod h1:stjbT+s4u/s5ime5jdIyvPyjBGwGeJewIN7jxH8gp4k=
-github.com/Trendyol/go-pq-cdc v1.6.8 h1:mj+OhUl8KJSBZ8NyQNUVzNeaZQnS7w/kokdqSxiV+kU=
-github.com/Trendyol/go-pq-cdc v1.6.8/go.mod h1:RIooS3DPOWkXxq7nhrOuGgkD4x3ondWEYOrOEHAHnxc=
 github.com/asaskevich/govalidator v0.0.0-20200108200545-475eaeb16496/go.mod h1:oGkLhpf+kjZl6xBf758TQhh5XrAeiJv/7FRz/2spLIg=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2/go.mod h1:WaHUgvxTVq04UNunO+XhnAqY/wQc+bxr74GqbsZ/Jqw=
