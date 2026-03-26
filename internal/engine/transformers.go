@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 )
@@ -64,4 +65,40 @@ func (t *MaskTransformer) Transform(ctx context.Context, m *protocol.Message) (*
 
 func init() {
 	RegisterTransformer("mask", NewMaskTransformer)
+	RegisterTransformer("uppercase", NewUpperCaseTransformer)
+}
+
+// UpperCaseTransformer converts a specific column to uppercase.
+type UpperCaseTransformer struct {
+	columnName string
+}
+
+func NewUpperCaseTransformer(options map[string]interface{}) (Transformer, error) {
+	colRaw, ok := options["column"]
+	if !ok {
+		return nil, fmt.Errorf("uppercase transformer requires 'column' option")
+	}
+	col, ok := colRaw.(string)
+	if !ok {
+		return nil, fmt.Errorf("'column' option must be a string")
+	}
+	return &UpperCaseTransformer{columnName: col}, nil
+}
+
+func (t *UpperCaseTransformer) Name() string {
+	return "uppercase"
+}
+
+func (t *UpperCaseTransformer) Transform(ctx context.Context, m *protocol.Message) (*protocol.Message, bool, error) {
+	if m.Data == nil {
+		return m, true, nil
+	}
+
+	if val, ok := m.Data[t.columnName]; ok {
+		if str, ok := val.(string); ok {
+			m.Data[t.columnName] = strings.ToUpper(str)
+		}
+	}
+
+	return m, true, nil
 }

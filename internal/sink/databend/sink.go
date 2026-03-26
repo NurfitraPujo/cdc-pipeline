@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/datafuselabs/databend-go"
+	"github.com/vmihailenco/msgpack/v5"
 	"bitbucket.com/daya-engineering/daya-data-pipeline/internal/protocol"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
@@ -183,8 +184,11 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	for _, m := range messages {
 		data := m.Data
 		if data == nil {
-			if err := json.Unmarshal(m.Payload, &data); err != nil {
-				continue
+			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+				// Fallback to JSON if msgpack fails
+				if err := json.Unmarshal(m.Payload, &data); err != nil {
+					continue
+				}
 			}
 		}
 		
@@ -258,8 +262,11 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 	for _, m := range messages {
 		data := m.Data
 		if data == nil {
-			if err := json.Unmarshal(m.Payload, &data); err != nil {
-				continue
+			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+				// Fallback to JSON if msgpack fails
+				if err := json.Unmarshal(m.Payload, &data); err != nil {
+					continue
+				}
 			}
 		}
 

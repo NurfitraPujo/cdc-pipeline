@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
+	"github.com/vmihailenco/msgpack/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog/log"
 )
@@ -179,23 +179,23 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			}
 		case *format.Insert:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, err := json.Marshal(msg.Decoded)
+			payload, err := msgpack.Marshal(msg.Decoded)
 			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling insert"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Data: msg.Decoded, Timestamp: msg.MessageTime}
 		case *format.Update:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, err := json.Marshal(msg.NewDecoded)
+			payload, err := msgpack.Marshal(msg.NewDecoded)
 			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling update"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Data: msg.NewDecoded, Timestamp: msg.MessageTime}
 		case *format.Delete:
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			payload, err := json.Marshal(msg.OldDecoded)
+			payload, err := msgpack.Marshal(msg.OldDecoded)
 			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling delete"); mu.Unlock(); lc.Ack(); return }
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Data: msg.OldDecoded, Timestamp: msg.MessageTime}
 		case *format.Snapshot:
 			if strings.HasPrefix(msg.Table, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
 			if msg.EventType == format.SnapshotEventTypeData {
-				payload, err := json.Marshal(msg.Data)
+				payload, err := msgpack.Marshal(msg.Data)
 				if err != nil { log.Error().Err(err).Str("table", msg.Table).Msg("Error marshaling snapshot"); mu.Unlock(); lc.Ack(); return }
 				m = protocol.Message{SourceID: srcConfig.ID, Table: msg.Table, Op: "snapshot", LSN: uint64(msg.LSN), Payload: payload, Data: msg.Data, Timestamp: msg.ServerTime}
 			}

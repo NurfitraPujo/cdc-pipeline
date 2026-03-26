@@ -32,6 +32,27 @@ func TestConsumer_LoadStats(t *testing.T) {
 	assert.Equal(t, uint64(100), c.stats["s1.t1"].TotalSynced)
 }
 
+func TestUpperCaseTransformer(t *testing.T) {
+	factory, ok := GetTransformer("uppercase")
+	assert.True(t, ok)
+
+	tf, err := factory(map[string]interface{}{"column": "name"})
+	assert.NoError(t, err)
+
+	msg := &protocol.Message{
+		Data: map[string]interface{}{
+			"name": "john doe",
+			"age":  30,
+		},
+	}
+
+	result, keep, err := tf.Transform(context.Background(), msg)
+	assert.NoError(t, err)
+	assert.True(t, keep)
+	assert.Equal(t, "JOHN DOE", result.Data["name"])
+	assert.Equal(t, 30, result.Data["age"])
+}
+
 func TestProducer_Drain(t *testing.T) {
 	p := &Producer{}
 	// Test safe drain when cancel is nil
