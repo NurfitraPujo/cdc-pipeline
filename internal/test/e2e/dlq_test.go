@@ -75,7 +75,7 @@ func TestE2E_DLQ(t *testing.T) {
 	defer sub.Close()
 
 	sink := &ChaosSink{}
-	cons := engine.NewConsumer(pipelineID, sub, pub, sink, env.GetKV(), 10, 100*time.Millisecond, retryCfg)
+	cons := engine.NewConsumer(pipelineID, sub, pub, sink, nil, env.GetKV(), 10, 100*time.Millisecond, retryCfg)
 
 	go func() {
 		_ = cons.Run(ctx, topic)

@@ -21,7 +21,7 @@ func TestConsumer_LoadStats(t *testing.T) {
 
 	mockSub := mocks.NewMockSubscriber(ctrl)
 	mockKV := mocks.NewMockKeyValue(ctrl)
-	c := NewConsumer("p1", mockSub, nil, nil, mockKV, 10, time.Second, protocol.RetryConfig{MaxRetries: 3})
+	c := NewConsumer("p1", mockSub, nil, nil, nil, mockKV, 10, time.Second, protocol.RetryConfig{MaxRetries: 3})
 
 	st := protocol.TableStats{Status: "ACTIVE", TotalSynced: 100}
 	data, _ := json.Marshal(st)
@@ -51,7 +51,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 	mockSink := mocks.NewMockSink(ctrl)
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
-	c := NewConsumer("p1", mockSub, nil, mockSink, mockKV, 10, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3})
+	c := NewConsumer("p1", mockSub, nil, mockSink, nil, mockKV, 10, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3})
 
 	t.Run("Sink BatchUpload Failure", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

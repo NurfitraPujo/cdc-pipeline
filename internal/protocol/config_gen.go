@@ -231,22 +231,41 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 					return
 				}
 			}
-		case "tables":
+		case "processors":
 			var zb0004 uint32
 			zb0004, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Processors")
+				return
+			}
+			if cap(z.Processors) >= int(zb0004) {
+				z.Processors = (z.Processors)[:zb0004]
+			} else {
+				z.Processors = make([]ProcessorConfig, zb0004)
+			}
+			for za0003 := range z.Processors {
+				err = z.Processors[za0003].DecodeMsg(dc)
+				if err != nil {
+					err = msgp.WrapError(err, "Processors", za0003)
+					return
+				}
+			}
+		case "tables":
+			var zb0005 uint32
+			zb0005, err = dc.ReadArrayHeader()
 			if err != nil {
 				err = msgp.WrapError(err, "Tables")
 				return
 			}
-			if cap(z.Tables) >= int(zb0004) {
-				z.Tables = (z.Tables)[:zb0004]
+			if cap(z.Tables) >= int(zb0005) {
+				z.Tables = (z.Tables)[:zb0005]
 			} else {
-				z.Tables = make([]string, zb0004)
+				z.Tables = make([]string, zb0005)
 			}
-			for za0003 := range z.Tables {
-				z.Tables[za0003], err = dc.ReadString()
+			for za0004 := range z.Tables {
+				z.Tables[za0004], err = dc.ReadString()
 				if err != nil {
-					err = msgp.WrapError(err, "Tables", za0003)
+					err = msgp.WrapError(err, "Tables", za0004)
 					return
 				}
 			}
@@ -293,9 +312,9 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 8
+	// map header, size 9
 	// write "id"
-	err = en.Append(0x88, 0xa2, 0x69, 0x64)
+	err = en.Append(0x89, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -348,6 +367,23 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
+	// write "processors"
+	err = en.Append(0xaa, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.Processors)))
+	if err != nil {
+		err = msgp.WrapError(err, "Processors")
+		return
+	}
+	for za0003 := range z.Processors {
+		err = z.Processors[za0003].EncodeMsg(en)
+		if err != nil {
+			err = msgp.WrapError(err, "Processors", za0003)
+			return
+		}
+	}
 	// write "tables"
 	err = en.Append(0xa6, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x73)
 	if err != nil {
@@ -358,10 +394,10 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "Tables")
 		return
 	}
-	for za0003 := range z.Tables {
-		err = en.WriteString(z.Tables[za0003])
+	for za0004 := range z.Tables {
+		err = en.WriteString(z.Tables[za0004])
 		if err != nil {
-			err = msgp.WrapError(err, "Tables", za0003)
+			err = msgp.WrapError(err, "Tables", za0004)
 			return
 		}
 	}
@@ -408,9 +444,9 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 8
+	// map header, size 9
 	// string "id"
-	o = append(o, 0x88, 0xa2, 0x69, 0x64)
+	o = append(o, 0x89, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "name"
 	o = append(o, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
@@ -427,11 +463,21 @@ func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	for za0002 := range z.Sinks {
 		o = msgp.AppendString(o, z.Sinks[za0002])
 	}
+	// string "processors"
+	o = append(o, 0xaa, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.Processors)))
+	for za0003 := range z.Processors {
+		o, err = z.Processors[za0003].MarshalMsg(o)
+		if err != nil {
+			err = msgp.WrapError(err, "Processors", za0003)
+			return
+		}
+	}
 	// string "tables"
 	o = append(o, 0xa6, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x73)
 	o = msgp.AppendArrayHeader(o, uint32(len(z.Tables)))
-	for za0003 := range z.Tables {
-		o = msgp.AppendString(o, z.Tables[za0003])
+	for za0004 := range z.Tables {
+		o = msgp.AppendString(o, z.Tables[za0004])
 	}
 	// string "batch_size"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
@@ -521,22 +567,41 @@ func (z *PipelineConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 					return
 				}
 			}
-		case "tables":
+		case "processors":
 			var zb0004 uint32
 			zb0004, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Processors")
+				return
+			}
+			if cap(z.Processors) >= int(zb0004) {
+				z.Processors = (z.Processors)[:zb0004]
+			} else {
+				z.Processors = make([]ProcessorConfig, zb0004)
+			}
+			for za0003 := range z.Processors {
+				bts, err = z.Processors[za0003].UnmarshalMsg(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Processors", za0003)
+					return
+				}
+			}
+		case "tables":
+			var zb0005 uint32
+			zb0005, bts, err = msgp.ReadArrayHeaderBytes(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "Tables")
 				return
 			}
-			if cap(z.Tables) >= int(zb0004) {
-				z.Tables = (z.Tables)[:zb0004]
+			if cap(z.Tables) >= int(zb0005) {
+				z.Tables = (z.Tables)[:zb0005]
 			} else {
-				z.Tables = make([]string, zb0004)
+				z.Tables = make([]string, zb0005)
 			}
-			for za0003 := range z.Tables {
-				z.Tables[za0003], bts, err = msgp.ReadStringBytes(bts)
+			for za0004 := range z.Tables {
+				z.Tables[za0004], bts, err = msgp.ReadStringBytes(bts)
 				if err != nil {
-					err = msgp.WrapError(err, "Tables", za0003)
+					err = msgp.WrapError(err, "Tables", za0004)
 					return
 				}
 			}
@@ -591,15 +656,242 @@ func (z *PipelineConfig) Msgsize() (s int) {
 	for za0002 := range z.Sinks {
 		s += msgp.StringPrefixSize + len(z.Sinks[za0002])
 	}
+	s += 11 + msgp.ArrayHeaderSize
+	for za0003 := range z.Processors {
+		s += z.Processors[za0003].Msgsize()
+	}
 	s += 7 + msgp.ArrayHeaderSize
-	for za0003 := range z.Tables {
-		s += msgp.StringPrefixSize + len(z.Tables[za0003])
+	for za0004 := range z.Tables {
+		s += msgp.StringPrefixSize + len(z.Tables[za0004])
 	}
 	s += 11 + msgp.IntSize + 11 + msgp.DurationSize + 6
 	if z.Retry == nil {
 		s += msgp.NilSize
 	} else {
 		s += z.Retry.Msgsize()
+	}
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
+func (z *ProcessorConfig) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "name":
+			z.Name, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Name")
+				return
+			}
+		case "type":
+			z.Type, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Type")
+				return
+			}
+		case "options":
+			var zb0002 uint32
+			zb0002, err = dc.ReadMapHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Options")
+				return
+			}
+			if z.Options == nil {
+				z.Options = make(map[string]interface{}, zb0002)
+			} else if len(z.Options) > 0 {
+				clear(z.Options)
+			}
+			for zb0002 > 0 {
+				zb0002--
+				var za0001 string
+				za0001, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Options")
+					return
+				}
+				var za0002 interface{}
+				za0002, err = dc.ReadIntf()
+				if err != nil {
+					err = msgp.WrapError(err, "Options", za0001)
+					return
+				}
+				z.Options[za0001] = za0002
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *ProcessorConfig) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 3
+	// write "name"
+	err = en.Append(0x83, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Name)
+	if err != nil {
+		err = msgp.WrapError(err, "Name")
+		return
+	}
+	// write "type"
+	err = en.Append(0xa4, 0x74, 0x79, 0x70, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Type)
+	if err != nil {
+		err = msgp.WrapError(err, "Type")
+		return
+	}
+	// write "options"
+	err = en.Append(0xa7, 0x6f, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteMapHeader(uint32(len(z.Options)))
+	if err != nil {
+		err = msgp.WrapError(err, "Options")
+		return
+	}
+	for za0001, za0002 := range z.Options {
+		err = en.WriteString(za0001)
+		if err != nil {
+			err = msgp.WrapError(err, "Options")
+			return
+		}
+		err = en.WriteIntf(za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Options", za0001)
+			return
+		}
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *ProcessorConfig) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 3
+	// string "name"
+	o = append(o, 0x83, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
+	o = msgp.AppendString(o, z.Name)
+	// string "type"
+	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
+	o = msgp.AppendString(o, z.Type)
+	// string "options"
+	o = append(o, 0xa7, 0x6f, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x73)
+	o = msgp.AppendMapHeader(o, uint32(len(z.Options)))
+	for za0001, za0002 := range z.Options {
+		o = msgp.AppendString(o, za0001)
+		o, err = msgp.AppendIntf(o, za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Options", za0001)
+			return
+		}
+	}
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *ProcessorConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "name":
+			z.Name, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Name")
+				return
+			}
+		case "type":
+			z.Type, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Type")
+				return
+			}
+		case "options":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadMapHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Options")
+				return
+			}
+			if z.Options == nil {
+				z.Options = make(map[string]interface{}, zb0002)
+			} else if len(z.Options) > 0 {
+				clear(z.Options)
+			}
+			for zb0002 > 0 {
+				var za0002 interface{}
+				zb0002--
+				var za0001 string
+				za0001, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Options")
+					return
+				}
+				za0002, bts, err = msgp.ReadIntfBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Options", za0001)
+					return
+				}
+				z.Options[za0001] = za0002
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *ProcessorConfig) Msgsize() (s int) {
+	s = 1 + 5 + msgp.StringPrefixSize + len(z.Name) + 5 + msgp.StringPrefixSize + len(z.Type) + 8 + msgp.MapHeaderSize
+	if z.Options != nil {
+		for za0001, za0002 := range z.Options {
+			_ = za0002
+			s += msgp.StringPrefixSize + len(za0001) + msgp.GuessSize(za0002)
+		}
 	}
 	return
 }

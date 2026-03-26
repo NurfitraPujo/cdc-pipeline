@@ -181,8 +181,12 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	groupCols := make(map[string][]string)
 
 	for _, m := range messages {
-		var data map[string]any
-		if err := json.Unmarshal(m.Payload, &data); err != nil { continue }
+		data := m.Data
+		if data == nil {
+			if err := json.Unmarshal(m.Payload, &data); err != nil {
+				continue
+			}
+		}
 		
 		cols := make([]string, 0, len(data))
 		for k := range data { cols = append(cols, k) }
@@ -252,8 +256,12 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 	if len(pks) == 0 { pks = []string{"id"} }
 
 	for _, m := range messages {
-		var data map[string]any
-		if err := json.Unmarshal(m.Payload, &data); err != nil { continue }
+		data := m.Data
+		if data == nil {
+			if err := json.Unmarshal(m.Payload, &data); err != nil {
+				continue
+			}
+		}
 
 		var whereClauses []string
 		var args []any

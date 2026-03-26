@@ -12,15 +12,16 @@ type SchemaMetadata struct {
 }
 
 type Message struct {
-	SourceID  string          `msg:"sid"`
-	Table     string          `msg:"tbl"`
-	Op        string          `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
-	LSN       uint64          `msg:"lsn"`
-	PK        string          `msg:"pk"`
-	UUID      string          `msg:"uuid"`
-	Payload   []byte          `msg:"pay"`
-	Timestamp time.Time       `msg:"ts"`
-	Schema    *SchemaMetadata `msg:"meta,omitempty" json:"schema,omitempty"`
+	SourceID  string                 `msg:"sid"`
+	Table     string                 `msg:"tbl"`
+	Op        string                 `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
+	LSN       uint64                 `msg:"lsn"`
+	PK        string                 `msg:"pk"`
+	UUID      string                 `msg:"uuid"`
+	Data      map[string]interface{} `msg:"data,omitempty"`
+	Payload   []byte                 `msg:"pay"`
+	Timestamp time.Time              `msg:"ts"`
+	Schema    *SchemaMetadata        `msg:"meta,omitempty" json:"schema,omitempty"`
 }
 
 type MessageBatch []Message

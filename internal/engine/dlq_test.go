@@ -29,7 +29,7 @@ func TestConsumer_DLQ(t *testing.T) {
 		EnableDLQ:       true,
 	}
 
-	c := NewConsumer("p1", mockSub, mockPub, mockSink, mockKV, 1, 100*time.Millisecond, retryCfg)
+	c := NewConsumer("p1", mockSub, mockPub, mockSink, nil, mockKV, 1, 100*time.Millisecond, retryCfg)
 
 	t.Run("Isolate and route to DLQ after MaxRetries", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

@@ -181,7 +181,7 @@ func (e *Environment) StartWorker() {
 		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("daya-worker-%s", id), 1000, 30*time.Second)
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
-		cons := engine.NewConsumer(id, sub, pub, snk, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3})
+		cons := engine.NewConsumer(id, sub, pub, snk, nil, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3})
 		
 		pipe := engine.NewPipeline(id, prod, cons, cfg)
 		pipe.Start(workerCtx)
