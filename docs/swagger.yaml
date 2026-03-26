@@ -7,6 +7,17 @@ definitions:
       batch_wait:
         example: 5s
         type: string
+      retry:
+        $ref: '#/definitions/protocol.RetryConfig'
+    type: object
+  protocol.HistoryPoint:
+    properties:
+      lag_ms:
+        type: integer
+      rps:
+        type: number
+      timestamp:
+        type: string
     type: object
   protocol.PipelineConfig:
     properties:
@@ -21,6 +32,12 @@ definitions:
         type: string
       name:
         type: string
+      processors:
+        items:
+          $ref: '#/definitions/protocol.ProcessorConfig'
+        type: array
+      retry:
+        $ref: '#/definitions/protocol.RetryConfig'
       sinks:
         items:
           type: string
@@ -33,6 +50,30 @@ definitions:
         items:
           type: string
         type: array
+    type: object
+  protocol.ProcessorConfig:
+    properties:
+      name:
+        type: string
+      options:
+        additionalProperties: true
+        type: object
+      type:
+        description: e.g., "mask", "filter", "custom"
+        type: string
+    type: object
+  protocol.RetryConfig:
+    properties:
+      enable_dlq:
+        type: boolean
+      initial_interval:
+        example: 1s
+        type: string
+      max_interval:
+        example: 30s
+        type: string
+      max_retries:
+        type: integer
     type: object
   protocol.SinkConfig:
     properties:
@@ -49,7 +90,13 @@ definitions:
     properties:
       batch_size:
         type: integer
+      batch_wait:
+        example: 5s
+        type: string
       database:
+        type: string
+      discovery_interval:
+        example: 30s
         type: string
       host:
         type: string
@@ -61,13 +108,60 @@ definitions:
         type: integer
       publication_name:
         type: string
+      schemas:
+        items:
+          type: string
+        type: array
       slot_name:
         type: string
+      snapshot_chunk_size:
+        type: integer
+      snapshot_interval:
+        example: 1s
+        type: string
+      tables:
+        items:
+          type: string
+        type: array
       type:
         description: e.g., "postgres"
         type: string
       user:
         type: string
+    type: object
+  protocol.StatsSummary:
+    properties:
+      avg_lag_ms:
+        type: integer
+      error_count:
+        type: integer
+      healthy_count:
+        type: integer
+      total_pipelines:
+        type: integer
+      total_rows_synced:
+        type: integer
+      transitioning_count:
+        type: integer
+    type: object
+  protocol.TableMetadata:
+    properties:
+      columns:
+        items:
+          type: string
+        type: array
+      id:
+        type: string
+      name:
+        type: string
+      pk_columns:
+        items:
+          type: string
+        type: array
+      types:
+        items:
+          type: string
+        type: array
     type: object
   protocol.WorkerHeartbeat:
     properties:
@@ -169,17 +263,32 @@ paths:
       - auth
   /pipelines:
     get:
-      description: Retrieve all pipeline configurations
+      description: Retrieve pipeline configurations with search, status filtering,
+        and pagination
+      parameters:
+      - description: Search by name or ID
+        in: query
+        name: search
+        type: string
+      - description: Filter by status (Healthy, Error, Transitioning)
+        in: query
+        name: status
+        type: string
+      - description: 'Page number (default: 1)'
+        in: query
+        name: page
+        type: integer
+      - description: 'Items per page (default: 10)'
+        in: query
+        name: limit
+        type: integer
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            additionalProperties:
-              items:
-                $ref: '#/definitions/protocol.PipelineConfig'
-              type: array
+            additionalProperties: true
             type: object
       security:
       - Bearer: []
@@ -292,6 +401,46 @@ paths:
       summary: Update pipeline
       tags:
       - pipelines
+  /pipelines/{id}/metrics:
+    get:
+      description: Server-Sent Events stream for pipeline status and stats
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - text/event-stream
+      responses: {}
+      security:
+      - Bearer: []
+      summary: Stream pipeline metrics
+      tags:
+      - pipelines
+  /pipelines/{id}/restart:
+    post:
+      description: Trigger a manual restart/reload for a pipeline
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Restart pipeline
+      tags:
+      - pipelines
   /pipelines/{id}/status:
     get:
       description: Retrieve aggregated multi-table status and stats for a pipeline
@@ -371,6 +520,32 @@ paths:
       security:
       - Bearer: []
       summary: Delete sink
+      tags:
+      - sinks
+    get:
+      description: Retrieve a specific sink configuration
+      parameters:
+      - description: Sink ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.SinkConfig'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Get sink
       tags:
       - sinks
     put:
@@ -460,6 +635,32 @@ paths:
       summary: Delete source
       tags:
       - sources
+    get:
+      description: Retrieve a specific source configuration
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.SourceConfig'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Get source
+      tags:
+      - sources
     put:
       consumes:
       - application/json
@@ -488,6 +689,86 @@ paths:
       summary: Update source
       tags:
       - sources
+  /sources/{id}/schema:
+    get:
+      description: Discover available tables and schemas directly from the source
+        database
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - Bearer: []
+      summary: Get source schema
+      tags:
+      - sources
+  /sources/{id}/tables:
+    get:
+      description: Retrieve all discovered tables and their metadata for a source
+      parameters:
+      - description: Source ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/protocol.TableMetadata'
+              type: array
+            type: object
+      security:
+      - Bearer: []
+      summary: List source tables
+      tags:
+      - sources
+  /stats/history:
+    get:
+      description: Retrieve time-series data (Deprecated/Ditched)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/protocol.HistoryPoint'
+            type: array
+      security:
+      - Bearer: []
+      summary: Get metrics history
+      tags:
+      - stats
+  /stats/summary:
+    get:
+      description: Retrieve multi-pipeline totals with lazy refresh (Optimized)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/protocol.StatsSummary'
+      security:
+      - Bearer: []
+      summary: Get dashboard summary
+      tags:
+      - stats
   /workers/{id}/heartbeat:
     get:
       description: Retrieve heartbeat and uptime for a worker

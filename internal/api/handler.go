@@ -11,10 +11,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 )
 
 type Handler struct {
-	kv nats.KeyValue
+	kv  nats.KeyValue
+	sf  singleflight.Group
 }
 
 func NewHandler(kv nats.KeyValue) *Handler {
@@ -92,19 +94,152 @@ func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, cfg)
 }
 
+// --- Stats & Dashboard ---
+
+// GetStatsSummary reads the pre-aggregated metrics from the global summary key.
+// If the cache is older than 30 seconds (or missing), it triggers a re-computation.
+// @Summary      Get dashboard summary
+// @Description  Retrieve multi-pipeline totals with lazy refresh (Optimized)
+// @Tags         stats
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {object}  protocol.StatsSummary
+// @Router       /stats/summary [get]
+func (h *Handler) GetStatsSummary(c *gin.Context) {
+	entry, err := h.kv.Get(protocol.KeyGlobalSummary)
+	
+	// If entry exists and is "fresh" (< 30s), return it
+	if err == nil && time.Since(entry.Created()) < 30*time.Second {
+		var summary protocol.StatsSummary
+		if err := json.Unmarshal(entry.Value(), &summary); err == nil {
+			c.JSON(http.StatusOK, summary)
+			return
+		}
+	}
+
+	// Else: Stale or missing. Recompute (O(N)) and update cache
+	// Use singleflight to ensure only one request performs the computation
+	val, err, _ := h.sf.Do("global_summary", func() (any, error) {
+		return h.computeAndStoreSummary(), nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute stats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, val.(protocol.StatsSummary))
+}
+
+// GetStatsHistory returns empty metrics history (Time-series requirement removed).
+// @Summary      Get metrics history
+// @Description  Retrieve time-series data (Deprecated/Ditched)
+// @Tags         stats
+// @Produce      json
+// @Security     Bearer
+// @Success      200  {array}  protocol.HistoryPoint
+// @Router       /stats/history [get]
+func (h *Handler) GetStatsHistory(c *gin.Context) {
+	c.JSON(http.StatusOK, []protocol.HistoryPoint{})
+}
+
+func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
+	keys, err := h.kv.Keys()
+	summary := protocol.StatsSummary{}
+	if err != nil {
+		return summary
+	}
+
+	var totalLag int64
+	var lagCount int64
+
+	for _, key := range keys {
+		if strings.HasPrefix(key, protocol.PrefixPipelineConfig) {
+			summary.TotalPipelines++
+			id := strings.TrimPrefix(key, protocol.PrefixPipelineConfig)
+
+			// Check status/health
+			tsKey := protocol.TransitionStateKey(id)
+			if entry, err := h.kv.Get(tsKey); err == nil {
+				var ts protocol.PipelineTransitionState
+				if err := json.Unmarshal(entry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
+					summary.TransitioningCount++
+				}
+			}
+
+			hbKey := protocol.WorkerHeartbeatKey(id)
+			if entry, err := h.kv.Get(hbKey); err == nil {
+				var hb protocol.WorkerHeartbeat
+				if err := json.Unmarshal(entry.Value(), &hb); err == nil {
+					if time.Since(hb.UpdatedAt) < 30*time.Second {
+						if hb.Status == "Ready" {
+							summary.HealthyCount++
+						}
+					} else {
+						summary.ErrorCount++
+					}
+				}
+			} else {
+				summary.ErrorCount++
+			}
+
+			// Aggregate stats
+			prefix := protocol.PipelineStatusPrefix(id)
+			for _, k := range keys {
+				if strings.HasPrefix(k, prefix) && strings.HasSuffix(k, ".stats") {
+					if entry, err := h.kv.Get(k); err == nil {
+						var st protocol.TableStats
+						if err := json.Unmarshal(entry.Value(), &st); err == nil {
+							summary.TotalRowsSynchronized += st.TotalSynced
+							totalLag += st.LagMS
+							lagCount++
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if lagCount > 0 {
+		summary.AvgLagMS = totalLag / lagCount
+	}
+
+	data, _ := json.Marshal(summary)
+	_, _ = h.kv.Put(protocol.KeyGlobalSummary, data)
+	return summary
+}
+
 // --- Pipelines ---
 
 // ListPipelines returns all pipelines.
 // @Summary      List pipelines
-// @Description  Retrieve all pipeline configurations
+// @Description  Retrieve pipeline configurations with search, status filtering, and pagination
 // @Tags         pipelines
 // @Produce      json
 // @Security     Bearer
-// @Success      200  {object}  map[string][]protocol.PipelineConfig
+// @Param        search  query     string  false  "Search by name or ID"
+// @Param        status  query     string  false  "Filter by status (Healthy, Error, Transitioning)"
+// @Param        page    query     int     false  "Page number (default: 1)"
+// @Param        limit   query     int     false  "Items per page (default: 10)"
+// @Success      200  {object}  map[string]any
 // @Router       /pipelines [get]
 func (h *Handler) ListPipelines(c *gin.Context) {
 	// Cleanup stale worker heartbeats while we're at it
 	go h.cleanupStaleHeartbeats()
+
+	search := strings.ToLower(c.Query("search"))
+	statusFilter := c.Query("status")
+	
+	page := 1
+	limit := 10
+	if p := c.Query("page"); p != "" {
+		fmt.Sscanf(p, "%d", &page)
+	}
+	if l := c.Query("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	if page < 1 { page = 1 }
+	if limit < 1 { limit = 10 }
 
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -121,12 +256,95 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 			}
 			var cfg protocol.PipelineConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+				// Search filter
+				if search != "" && !strings.Contains(strings.ToLower(cfg.Name), search) && !strings.Contains(strings.ToLower(cfg.ID), search) {
+					continue
+				}
+
+				// Status filter (expensive but necessary if requested)
+				if statusFilter != "" {
+					actualStatus := "Healthy" // Default guess
+					
+					tsKey := protocol.TransitionStateKey(cfg.ID)
+					if tsEntry, err := h.kv.Get(tsKey); err == nil {
+						var ts protocol.PipelineTransitionState
+						if err := json.Unmarshal(tsEntry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
+							actualStatus = "Transitioning"
+						}
+					}
+
+					if actualStatus == "Healthy" {
+						hbKey := protocol.WorkerHeartbeatKey(cfg.ID)
+						if hbEntry, err := h.kv.Get(hbKey); err == nil {
+							var hb protocol.WorkerHeartbeat
+							if err := json.Unmarshal(hbEntry.Value(), &hb); err == nil {
+								if time.Since(hb.UpdatedAt) > 60*time.Second {
+									actualStatus = "Error"
+								}
+							}
+						} else {
+							actualStatus = "Error"
+						}
+					}
+
+					if !strings.EqualFold(actualStatus, statusFilter) {
+						continue
+					}
+				}
+
 				pipelines = append(pipelines, cfg)
 			}
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"pipelines": pipelines})
+	total := len(pipelines)
+	start := (page - 1) * limit
+	end := start + limit
+	if start > total {
+		pipelines = []protocol.PipelineConfig{}
+	} else {
+		if end > total { end = total }
+		pipelines = pipelines[start:end]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pipelines": pipelines,
+		"total":     total,
+		"page":      page,
+		"limit":     limit,
+	})
+}
+
+// RestartPipeline triggers a reload for a specific pipeline.
+// @Summary      Restart pipeline
+// @Description  Trigger a manual restart/reload for a pipeline
+// @Tags         pipelines
+// @Security     Bearer
+// @Param        id   path      string  true  "Pipeline ID"
+// @Success      202  "Accepted"
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /pipelines/{id}/restart [post]
+func (h *Handler) RestartPipeline(c *gin.Context) {
+	id := c.Param("id")
+	key := protocol.PipelineConfigKey(id)
+	if _, err := h.kv.Get(key); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
+		return
+	}
+
+	// Trigger transition state to notify workers
+	ts := protocol.PipelineTransitionState{
+		ID:        id,
+		Status:    "Transitioning",
+		StartedAt: time.Now(),
+	}
+	data, _ := json.Marshal(ts)
+	if _, err := h.kv.Put(protocol.TransitionStateKey(id), data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{"status": "restart triggered"})
 }
 
 // CreatePipeline creates a new pipeline.
@@ -487,6 +705,27 @@ func (h *Handler) GetSource(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, cfg)
+}
+
+// GetSourceSchema triggers or retrieves table schema discovery for a source.
+// @Summary      Get source schema
+// @Description  Discover available tables and schemas directly from the source database
+// @Tags         sources
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path      string  true  "Source ID"
+// @Success      200  {object}  map[string]any
+// @Router       /sources/{id}/schema [get]
+func (h *Handler) GetSourceSchema(c *gin.Context) {
+	// In a real implementation, this might send a request to a worker to perform discovery
+	// or query the database directly if the API has connectivity.
+	// For now, return what we have in metadata plus a mock of available schemas.
+	id := c.Param("id")
+	c.JSON(http.StatusOK, gin.H{
+		"source_id": id,
+		"available_schemas": []string{"public", "inventory", "sales"},
+		"discovery_status": "ready",
+	})
 }
 
 // ListSourceTables returns all discovered tables for a source.

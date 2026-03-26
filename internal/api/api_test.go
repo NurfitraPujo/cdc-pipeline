@@ -31,6 +31,12 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 		{
 			authorized.GET("/global", h.GetGlobalConfig)
 			authorized.PUT("/global", h.UpdateGlobalConfig)
+
+			stats := authorized.Group("/stats")
+			{
+				stats.GET("/summary", h.GetStatsSummary)
+				stats.GET("/history", h.GetStatsHistory)
+			}
 			
 			pipelines := authorized.Group("/pipelines")
 			{
@@ -40,6 +46,7 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				pipelines.PUT("/:id", h.UpdatePipeline)
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
+				pipelines.POST("/:id/restart", h.RestartPipeline)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
 
@@ -47,8 +54,10 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 			{
 				sources.GET("", h.ListSources)
 				sources.POST("", h.CreateSource)
+				sources.GET("/:id", h.GetSource)
 				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
+				sources.GET("/:id/schema", h.GetSourceSchema)
 				sources.GET("/:id/tables", h.ListSourceTables)
 			}
 
@@ -230,4 +239,46 @@ func TestAPI_Full(t *testing.T) {
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
-}
+
+	t.Run("New Endpoints", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
+		router := setupTestRouter(mockKV)
+		token := getTestToken(t, router, mockKV)
+		authHeader := "Bearer " + token
+
+		// Stats Summary (Cached)
+		summaryData, _ := json.Marshal(protocol.StatsSummary{TotalPipelines: 1, HealthyCount: 1})
+		mockKV.EXPECT().Get(protocol.KeyGlobalSummary).Return(mockEntry{value: summaryData}, nil)
+
+		req, _ := http.NewRequest("GET", "/api/v1/stats/summary", nil)
+		req.Header.Set("Authorization", authHeader)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		// Stats History (Empty)
+		req, _ = http.NewRequest("GET", "/api/v1/stats/history", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "[]", w.Body.String())
+
+		// Pipeline Restart
+		mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: []byte("{}")}, nil)
+		mockKV.EXPECT().Put(protocol.TransitionStateKey("p1"), gomock.Any()).Return(uint64(1), nil)
+		req, _ = http.NewRequest("POST", "/api/v1/pipelines/p1/restart", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusAccepted, w.Code)
+
+		// Source Schema
+		req, _ = http.NewRequest("GET", "/api/v1/sources/s1/schema", nil)
+		req.Header.Set("Authorization", authHeader)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+	}
+

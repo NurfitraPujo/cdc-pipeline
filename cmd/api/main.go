@@ -106,6 +106,12 @@ func main() {
 			authorized.GET("/global", h.GetGlobalConfig)
 			authorized.PUT("/global", h.UpdateGlobalConfig)
 
+			stats := authorized.Group("/stats")
+			{
+				stats.GET("/summary", h.GetStatsSummary)
+				stats.GET("/history", h.GetStatsHistory)
+			}
+
 			pipelines := authorized.Group("/pipelines")
 			{
 				pipelines.GET("", h.ListPipelines)
@@ -114,6 +120,7 @@ func main() {
 				pipelines.PUT("/:id", h.UpdatePipeline)
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
+				pipelines.POST("/:id/restart", h.RestartPipeline)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
 
@@ -124,6 +131,7 @@ func main() {
 				sources.GET("/:id", h.GetSource)
 				sources.PUT("/:id", h.UpdateSource)
 				sources.DELETE("/:id", h.DeleteSource)
+				sources.GET("/:id/schema", h.GetSourceSchema)
 				sources.GET("/:id/tables", h.ListSourceTables)
 			}
 

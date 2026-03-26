@@ -148,7 +148,7 @@ const docTemplate = `{
                         "Bearer": []
                     }
                 ],
-                "description": "Retrieve all pipeline configurations",
+                "description": "Retrieve pipeline configurations with search, status filtering, and pagination",
                 "produces": [
                     "application/json"
                 ],
@@ -156,17 +156,38 @@ const docTemplate = `{
                     "pipelines"
                 ],
                 "summary": "List pipelines",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Search by name or ID",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by status (Healthy, Error, Transitioning)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number (default: 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page (default: 10)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
                             "type": "object",
-                            "additionalProperties": {
-                                "type": "array",
-                                "items": {
-                                    "$ref": "#/definitions/protocol.PipelineConfig"
-                                }
-                            }
+                            "additionalProperties": true
                         }
                     }
                 }
@@ -340,6 +361,70 @@ const docTemplate = `{
                 }
             }
         },
+        "/pipelines/{id}/metrics": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Server-Sent Events stream for pipeline status and stats",
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Stream pipeline metrics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {}
+            }
+        },
+        "/pipelines/{id}/restart": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Trigger a manual restart/reload for a pipeline",
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Restart pipeline",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/pipelines/{id}/status": {
             "get": {
                 "security": [
@@ -444,6 +529,47 @@ const docTemplate = `{
             }
         },
         "/sinks/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve a specific sink configuration",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sinks"
+                ],
+                "summary": "Get sink",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Sink ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SinkConfig"
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
             "put": {
                 "security": [
                     {
@@ -584,6 +710,47 @@ const docTemplate = `{
             }
         },
         "/sources/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve a specific source configuration",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sources"
+                ],
+                "summary": "Get source",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.SourceConfig"
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
             "put": {
                 "security": [
                     {
@@ -655,6 +822,134 @@ const docTemplate = `{
                 }
             }
         },
+        "/sources/{id}/schema": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Discover available tables and schemas directly from the source database",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sources"
+                ],
+                "summary": "Get source schema",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/sources/{id}/tables": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve all discovered tables and their metadata for a source",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sources"
+                ],
+                "summary": "List source tables",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Source ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "array",
+                                "items": {
+                                    "$ref": "#/definitions/protocol.TableMetadata"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/stats/history": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve time-series data (Deprecated/Ditched)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stats"
+                ],
+                "summary": "Get metrics history",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/protocol.HistoryPoint"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/stats/summary": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Retrieve multi-pipeline totals with lazy refresh (Optimized)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stats"
+                ],
+                "summary": "Get dashboard summary",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/protocol.StatsSummary"
+                        }
+                    }
+                }
+            }
+        },
         "/workers/{id}/heartbeat": {
             "get": {
                 "security": [
@@ -700,6 +995,23 @@ const docTemplate = `{
                 "batch_wait": {
                     "type": "string",
                     "example": "5s"
+                },
+                "retry": {
+                    "$ref": "#/definitions/protocol.RetryConfig"
+                }
+            }
+        },
+        "protocol.HistoryPoint": {
+            "type": "object",
+            "properties": {
+                "lag_ms": {
+                    "type": "integer"
+                },
+                "rps": {
+                    "type": "number"
+                },
+                "timestamp": {
+                    "type": "string"
                 }
             }
         },
@@ -721,6 +1033,15 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "processors": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/protocol.ProcessorConfig"
+                    }
+                },
+                "retry": {
+                    "$ref": "#/definitions/protocol.RetryConfig"
+                },
                 "sinks": {
                     "type": "array",
                     "items": {
@@ -738,6 +1059,41 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "protocol.ProcessorConfig": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "options": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "type": {
+                    "description": "e.g., \"mask\", \"filter\", \"custom\"",
+                    "type": "string"
+                }
+            }
+        },
+        "protocol.RetryConfig": {
+            "type": "object",
+            "properties": {
+                "enable_dlq": {
+                    "type": "boolean"
+                },
+                "initial_interval": {
+                    "type": "string",
+                    "example": "1s"
+                },
+                "max_interval": {
+                    "type": "string",
+                    "example": "30s"
+                },
+                "max_retries": {
+                    "type": "integer"
                 }
             }
         },
@@ -763,8 +1119,16 @@ const docTemplate = `{
                 "batch_size": {
                     "type": "integer"
                 },
+                "batch_wait": {
+                    "type": "string",
+                    "example": "5s"
+                },
                 "database": {
                     "type": "string"
+                },
+                "discovery_interval": {
+                    "type": "string",
+                    "example": "30s"
                 },
                 "host": {
                     "type": "string"
@@ -781,8 +1145,27 @@ const docTemplate = `{
                 "publication_name": {
                     "type": "string"
                 },
+                "schemas": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "slot_name": {
                     "type": "string"
+                },
+                "snapshot_chunk_size": {
+                    "type": "integer"
+                },
+                "snapshot_interval": {
+                    "type": "string",
+                    "example": "1s"
+                },
+                "tables": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "type": {
                     "description": "e.g., \"postgres\"",
@@ -790,6 +1173,58 @@ const docTemplate = `{
                 },
                 "user": {
                     "type": "string"
+                }
+            }
+        },
+        "protocol.StatsSummary": {
+            "type": "object",
+            "properties": {
+                "avg_lag_ms": {
+                    "type": "integer"
+                },
+                "error_count": {
+                    "type": "integer"
+                },
+                "healthy_count": {
+                    "type": "integer"
+                },
+                "total_pipelines": {
+                    "type": "integer"
+                },
+                "total_rows_synced": {
+                    "type": "integer"
+                },
+                "transitioning_count": {
+                    "type": "integer"
+                }
+            }
+        },
+        "protocol.TableMetadata": {
+            "type": "object",
+            "properties": {
+                "columns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "pk_columns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },

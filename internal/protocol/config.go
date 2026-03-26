@@ -24,9 +24,17 @@ const (
 	// Operational/State Keys
 	PrefixPipelineState = "cdc.pipeline."
 	PrefixWorkerState   = "cdc.worker."
+
+	// Summary and Cache Keys
+	KeyGlobalSummary     = "cdc.stats.global_summary"
+	PrefixDiscoveryCache = "cdc.discovery."
 )
 
 // Helper functions for key construction
+func DiscoveryCacheKey(sourceID string) string {
+	return PrefixDiscoveryCache + sourceID
+}
+
 func TransitionStateKey(id string) string {
 	return fmt.Sprintf("%s%s.transition", PrefixPipelineState, id)
 }

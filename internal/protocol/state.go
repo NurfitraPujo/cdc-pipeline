@@ -43,3 +43,18 @@ type WorkerHeartbeat struct {
 	UptimeSec int64     `msg:"uptime" json:"uptime_sec"`
 	UpdatedAt time.Time `msg:"upd" json:"updated_at"`
 }
+
+type StatsSummary struct {
+	TotalPipelines      int     `json:"total_pipelines"`
+	HealthyCount        int     `json:"healthy_count"`
+	ErrorCount          int     `json:"error_count"`
+	TransitioningCount  int     `json:"transitioning_count"`
+	TotalRowsSynchronized uint64  `json:"total_rows_synced"`
+	AvgLagMS            int64   `json:"avg_lag_ms"`
+}
+
+type HistoryPoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	RPS       float64   `json:"rps"`
+	LagMS     int64     `json:"lag_ms"`
+}
