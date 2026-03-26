@@ -194,30 +194,48 @@ curl -N -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipeline
 
 ## 🛠️ Development & Testing
 
-### Running the Full E2E Suite
+### Prerequisites
+Before running the pipeline or its tests, ensure you have the following installed:
+- **Go 1.26+**: For the backend services.
+- **Node.js & pnpm**: For the frontend dashboard.
+- **Container Runtime**: Docker or Podman (with the Docker socket enabled). This is **required** for the E2E integration tests as they use [Testcontainers](https://testcontainers.com/).
+
+### 1. Backend Setup
+```bash
+# Install dependencies
+go mod tidy
+
+# (Optional) Generate MessagePack encoders if you modify internal/protocol
+go generate ./internal/protocol/...
+```
+
+### 2. Running the Full E2E Suite
+The integration tests orchestrate real NATS, Postgres, and Databend instances. Ensure your Docker/Podman daemon is running:
 ```bash
 go test -v -timeout 10m ./internal/test/e2e/...
 ```
 
-### Generating Protocol Code
-If you modify structs in `internal/protocol`, regenerate the MessagePack code:
+### 3. Running the Components Locally
 ```bash
-go generate ./internal/protocol/...
-```
-
-### Running the Components
-```bash
-# Start the Worker (Auto-bootstraps NATS KV)
+# Terminal 1: Start the Stateful Worker
+# It will automatically bootstrap NATS KV if not present
 export NATS_URL="nats://localhost:4222"
 go run ./cmd/pipeline
 
-# Start the API Control Plane
+# Terminal 2: Start the Control Plane API
 export NATS_URL="nats://localhost:4222"
-export JWT_SECRET="your-secret-key"
+export JWT_SECRET="your-dev-secret"
 go run ./cmd/api
+```
+
+### 4. Frontend Setup
+```bash
+cd web
+pnpm install
+pnpm dev
 ```
 
 ---
 
 ## 🛡️ Stability Note
-This project includes a critical patch for `go-pq-cdc` located in the `vendor/` directory. This patch replaces an aggressive `panic` with an error log during connection EOF on shutdown. Combined with the **Cancel->Sleep->Close** sequence in `internal/source/postgres`, this ensures your production process never crashes during routine reloads.
+This project includes a critical patch for `go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. This patch replaces an aggressive `panic` with an error log during connection EOF on shutdown. This is linked via a `replace` directive in `go.mod`. Combined with the **Cancel->Sleep->Close** sequence in `internal/source/postgres`, this ensures your production process never crashes during routine reloads.
