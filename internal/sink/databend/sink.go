@@ -83,6 +83,10 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 	return g.Wait()
 }
 
+func quoteIdentifier(name string) string {
+	return "\"" + strings.ReplaceAll(name, "\"", "\"\"") + "\""
+}
+
 func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
 	log.Info().Str("table", schema.Table).Msg("Syncing schema in Databend")
 
@@ -95,6 +99,8 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 		return fmt.Errorf("failed to check existing columns: %w", err)
 	}
 
+	quotedTable := quoteIdentifier(schema.Table)
+
 	if len(existingCols) == 0 {
 		var colDefs []string
 		var colNames []string
@@ -104,10 +110,10 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 		for _, name := range colNames {
 			pgType := schema.Columns[name]
 			dbType := mapPgTypeToDatabend(pgType)
-			colDefs = append(colDefs, fmt.Sprintf("\"%s\" %s", name, dbType))
+			colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(name), dbType))
 		}
-		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)", 
-			schema.Table, strings.Join(colDefs, ", "))
+		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", 
+			quotedTable, strings.Join(colDefs, ", "))
 		
 		log.Info().Str("table", schema.Table).Str("query", query).Msg("Executing DDL")
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
@@ -119,8 +125,8 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 	for name, pgType := range schema.Columns {
 		if !existingCols[strings.ToLower(name)] {
 			dbType := mapPgTypeToDatabend(pgType)
-			query := fmt.Sprintf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s", 
-				schema.Table, name, dbType)
+			query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", 
+				quotedTable, quoteIdentifier(name), dbType)
 			
 			log.Info().Str("table", schema.Table).Str("column", name).Str("query", query).Msg("Executing Evolution DDL")
 			if _, err := s.db.ExecContext(ctx, query); err != nil {
@@ -207,17 +213,18 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	if len(pks) == 0 { pks = []string{"id"} }
 
 	quotedPks := make([]string, len(pks))
-	for i, pk := range pks { quotedPks[i] = "\"" + pk + "\"" }
+	for i, pk := range pks { quotedPks[i] = quoteIdentifier(pk) }
 	pkList := strings.Join(quotedPks, ", ")
+
+	quotedTable := quoteIdentifier(table)
 
 	for key, records := range groups {
 		columns := groupCols[key]
 		quotedColumns := make([]string, len(columns))
-		for i, col := range columns { quotedColumns[i] = "\"" + col + "\"" }
+		for i, col := range columns { quotedColumns[i] = quoteIdentifier(col) }
 		colList := strings.Join(quotedColumns, ", ")
 
-		// #nosec G201 -- table, columns, and pks are from Postgres schema (trusted)
-		query := fmt.Sprintf("REPLACE INTO \"%s\" (%s) ON (%s) VALUES ", table, colList, pkList)
+		query := fmt.Sprintf("REPLACE INTO %s (%s) ON (%s) VALUES ", quotedTable, colList, pkList)
 		
 		valueStrings := make([]string, 0, len(records))
 		valueArgs := make([]any, 0, len(records)*len(columns))
@@ -275,14 +282,13 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 		for _, pk := range pks {
 			val, ok := data[pk]
 			if !ok { continue }
-			whereClauses = append(whereClauses, fmt.Sprintf("\"%s\" = ?", pk))
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteIdentifier(pk)))
 			args = append(args, val)
 		}
 
 		if len(whereClauses) == 0 { continue }
 
-		// #nosec G201 -- table and pks are from Postgres schema (trusted)
-		query := fmt.Sprintf("DELETE FROM \"%s\" WHERE %s", table, strings.Join(whereClauses, " AND "))
+		query := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdentifier(table), strings.Join(whereClauses, " AND "))
 		if _, err := s.db.ExecContext(ctx, query, args...); err != nil { return err }
 	}
 	return nil

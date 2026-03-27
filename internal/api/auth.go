@@ -10,12 +10,15 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func getJWTSecret() []byte {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		return []byte("cdc-secret-key-change-me-in-production")
+		log.Error().Msg("JWT_SECRET environment variable is not set. API will be unusable.")
+		return []byte("cdc-PLACEHOLDER-FOR-EMERGENCY-BOOT-ONLY")
 	}
 	return []byte(secret)
 }
@@ -53,13 +56,21 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	if creds.Username == authCfg.Username && creds.Password == authCfg.Password {
+	// Compare with bcrypt
+	err = bcrypt.CompareHashAndPassword([]byte(authCfg.Password), []byte(creds.Password))
+	if creds.Username == authCfg.Username && err == nil {
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"username": creds.Username,
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),
 		})
 
-		tokenString, _ := token.SignedString(getJWTSecret())
+		secret := getJWTSecret()
+		if string(secret) == "cdc-PLACEHOLDER-FOR-EMERGENCY-BOOT-ONLY" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT_SECRET not configured"})
+			return
+		}
+
+		tokenString, _ := token.SignedString(secret)
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 		return
 	}

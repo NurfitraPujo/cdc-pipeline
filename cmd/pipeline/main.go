@@ -16,13 +16,14 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
-        "github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -266,6 +267,14 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 
 	if err := yaml.Unmarshal(defaultConfigFile, &seed); err != nil {
 		return err
+	}
+
+	// Hash the default password before storage
+	hashed, err := bcrypt.GenerateFromPassword([]byte(seed.Auth.Password), bcrypt.DefaultCost)
+	if err == nil {
+		seed.Auth.Password = string(hashed)
+	} else {
+		log.Error().Err(err).Msg("Failed to hash bootstrap password")
 	}
 
 	authData, _ := json.Marshal(seed.Auth)

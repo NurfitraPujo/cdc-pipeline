@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -16,9 +17,11 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func setupTestRouter(kv nats.KeyValue) *gin.Engine {
+	os.Setenv("JWT_SECRET", "test-secret")
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
 	h := NewHandler(kv)
@@ -79,11 +82,11 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 }
 
 func getTestToken(t *testing.T, router *gin.Engine, mockKV *mocks.MockKeyValue) string {
-	user := protocol.UserConfig{Username: "admin", Password: "password"}
+	hashed, _ := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
+	user := protocol.UserConfig{Username: "admin", Password: string(hashed)}
 	data, _ := json.Marshal(user)
-	
-	mockKV.EXPECT().Get(protocol.KeyAuthConfig).Return(mockEntry{value: data}, nil)
 
+	mockKV.EXPECT().Get(protocol.KeyAuthConfig).Return(mockEntry{value: data}, nil)
 	loginBody, _ := json.Marshal(map[string]string{
 		"username": "admin",
 		"password": "password",

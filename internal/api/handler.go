@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
@@ -575,6 +576,7 @@ func (h *Handler) ListSources(c *gin.Context) {
 		return
 	}
 
+	encryptionKey := crypto.GetEncryptionKey()
 	var sources []protocol.SourceConfig
 	for _, key := range keys {
 		if strings.HasPrefix(key, protocol.PrefixSourceConfig) {
@@ -584,6 +586,10 @@ func (h *Handler) ListSources(c *gin.Context) {
 			}
 			var cfg protocol.SourceConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+				// Decrypt sensitive fields
+				if cfg.PassEncrypted != "" {
+					cfg.PassEncrypted, _ = crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
+				}
 				sources = append(sources, cfg)
 			}
 		}
@@ -614,10 +620,15 @@ func (h *Handler) CreateSource(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117
+	// Encrypt sensitive fields
+	key := crypto.GetEncryptionKey()
+	if cfg.PassEncrypted != "" {
+		cfg.PassEncrypted, _ = crypto.Encrypt(cfg.PassEncrypted, key)
+	}
+
 	data, _ := json.Marshal(cfg)
-	key := protocol.SourceConfigKey(cfg.ID)
-	if _, err := h.kv.Put(key, data); err != nil {
+	storageKey := protocol.SourceConfigKey(cfg.ID)
+	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -650,10 +661,15 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 		return
 	}
 
-	// #nosec G117
+	// Encrypt sensitive fields
+	key := crypto.GetEncryptionKey()
+	if cfg.PassEncrypted != "" {
+		cfg.PassEncrypted, _ = crypto.Encrypt(cfg.PassEncrypted, key)
+	}
+
 	data, _ := json.Marshal(cfg)
-	key := protocol.SourceConfigKey(id)
-	if _, err := h.kv.Put(key, data); err != nil {
+	storageKey := protocol.SourceConfigKey(id)
+	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -702,6 +718,12 @@ func (h *Handler) GetSource(c *gin.Context) {
 	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Decrypt sensitive fields
+	encryptionKey := crypto.GetEncryptionKey()
+	if cfg.PassEncrypted != "" {
+		cfg.PassEncrypted, _ = crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
 	}
 
 	c.JSON(http.StatusOK, cfg)
@@ -780,6 +802,7 @@ func (h *Handler) ListSinks(c *gin.Context) {
 		return
 	}
 
+	encryptionKey := crypto.GetEncryptionKey()
 	var sinks []protocol.SinkConfig
 	for _, key := range keys {
 		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
@@ -789,6 +812,9 @@ func (h *Handler) ListSinks(c *gin.Context) {
 			}
 			var cfg protocol.SinkConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+				if cfg.DSN != "" {
+					cfg.DSN, _ = crypto.Decrypt(cfg.DSN, encryptionKey)
+				}
 				sinks = append(sinks, cfg)
 			}
 		}
@@ -822,6 +848,12 @@ func (h *Handler) GetSink(c *gin.Context) {
 		return
 	}
 
+	// Decrypt sensitive fields
+	encryptionKey := crypto.GetEncryptionKey()
+	if cfg.DSN != "" {
+		cfg.DSN, _ = crypto.Decrypt(cfg.DSN, encryptionKey)
+	}
+
 	c.JSON(http.StatusOK, cfg)
 }
 
@@ -847,9 +879,15 @@ func (h *Handler) CreateSink(c *gin.Context) {
 		return
 	}
 
+	// Encrypt sensitive fields
+	key := crypto.GetEncryptionKey()
+	if cfg.DSN != "" {
+		cfg.DSN, _ = crypto.Encrypt(cfg.DSN, key)
+	}
+
 	data, _ := json.Marshal(cfg)
-	key := protocol.SinkConfigKey(cfg.ID)
-	if _, err := h.kv.Put(key, data); err != nil {
+	storageKey := protocol.SinkConfigKey(cfg.ID)
+	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -882,9 +920,15 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 		return
 	}
 
+	// Encrypt sensitive fields
+	key := crypto.GetEncryptionKey()
+	if cfg.DSN != "" {
+		cfg.DSN, _ = crypto.Encrypt(cfg.DSN, key)
+	}
+
 	data, _ := json.Marshal(cfg)
-	key := protocol.SinkConfigKey(id)
-	if _, err := h.kv.Put(key, data); err != nil {
+	storageKey := protocol.SinkConfigKey(id)
+	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
