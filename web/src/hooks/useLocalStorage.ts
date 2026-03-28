@@ -3,8 +3,9 @@ import { useState, useCallback, useEffect } from 'react';
 export function useLocalStorage<T>(
   key: string,
   initialValue: T
-): [T, (value: T | ((prev: T) => T)) => void, () => void] {
-  const [storedValue, setStoredValue] = useState<T>(initialValue);
+): [T | undefined, (value: T | ((prev: T) => T)) => void, () => void] {
+  // Initialize with undefined to prevent SSR/hydration mismatch flicker
+  const [storedValue, setStoredValue] = useState<T | undefined>(undefined);
   const [isInitialized, setIsInitialized] = useState(false);
 
   useEffect(() => {
@@ -12,12 +13,15 @@ export function useLocalStorage<T>(
       const item = window.localStorage.getItem(key);
       if (item) {
         setStoredValue(JSON.parse(item));
+      } else {
+        setStoredValue(initialValue);
       }
     } catch (error) {
       console.warn(`Error reading localStorage key "${key}":`, error);
+      setStoredValue(initialValue);
     }
     setIsInitialized(true);
-  }, [key]);
+  }, [key, initialValue]);
 
   const setValue = useCallback(
     (value: T | ((prev: T) => T)) => {
@@ -43,9 +47,7 @@ export function useLocalStorage<T>(
     }
   }, [key, initialValue]);
 
-  if (!isInitialized) {
-    return [initialValue, setValue, removeValue];
-  }
-
+  // Return undefined during SSR/hydration to prevent flicker
+  // Component should handle undefined state with loading/fallback UI
   return [storedValue, setValue, removeValue];
 }
