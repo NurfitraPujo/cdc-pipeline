@@ -21,15 +21,15 @@ function formatLag(lagMs: number): string {
 }
 
 function DashboardPage() {
-	const { data, isLoading } = useQuery({
+	const { data, isLoading, isError, error } = useQuery({
 		queryKey: ["stats", "summary"],
 		queryFn: () => statsApi.getSummary(),
 		refetchInterval: REFRESH_INTERVAL,
 	});
 
 	const healthyPercent = data?.total_pipelines
-		? Math.round((data.healthy_count / data.total_pipelines) * 100)
-		: 0;
+		? `${Math.round((data.healthy_count / data.total_pipelines) * 100)}%`
+		: null;
 
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
@@ -39,6 +39,15 @@ function DashboardPage() {
 					Overview of your CDC pipeline health and performance metrics.
 				</p>
 			</div>
+
+			{isError && (
+				<div className="mb-4 rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
+					<p className="font-medium">Failed to load dashboard data</p>
+					<p className="text-sm">
+						{error instanceof Error ? error.message : "Please try again later."}
+					</p>
+				</div>
+			)}
 
 			<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
 				<MetricCard
@@ -59,7 +68,7 @@ function DashboardPage() {
 
 				<MetricCard
 					title="Healthy"
-					value={`${healthyPercent}%`}
+					value={healthyPercent}
 					description={`${data?.healthy_count ?? 0} of ${data?.total_pipelines ?? 0} pipelines`}
 					icon={Activity}
 					isLoading={isLoading}
