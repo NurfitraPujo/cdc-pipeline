@@ -51,13 +51,6 @@ export const useAuthStore = create<AuthStore>()(
         token: state.token,
         isAuthenticated: state.isAuthenticated,
       }),
-      onError: (error) => {
-        console.warn('Auth store persist error:', error);
-        // Handle storage quota exceeded or private browsing mode
-        if (error instanceof Error && error.name === 'QuotaExceededError') {
-          console.error('Storage quota exceeded. Token will not persist.');
-        }
-      },
     }
   )
 );

@@ -2,6 +2,8 @@ import {
   HeadContent,
   Scripts,
   createRootRouteWithContext,
+  Navigate,
+  useLocation,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
@@ -13,6 +15,8 @@ import TanStackQueryProvider from '../integrations/tanstack-query/root-provider'
 import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 
 import StoreDevtools from '../lib/demo-store-devtools'
+
+import { useAuthStore } from '../stores/authStore'
 
 import appCss from '../styles.css?url'
 
@@ -35,7 +39,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
         content: 'width=device-width, initial-scale=1',
       },
       {
-        title: 'TanStack Start Starter',
+        title: 'CDC Pipeline Dashboard',
       },
     ],
     links: [
@@ -45,6 +49,18 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
       },
     ],
   }),
+  beforeLoad: ({ location }) => {
+    const { isAuthenticated } = useAuthStore.getState()
+    const isLoginPage = location.pathname === '/login'
+
+    if (!isAuthenticated && !isLoginPage) {
+      throw Navigate({ to: '/login' })
+    }
+
+    if (isAuthenticated && isLoginPage) {
+      throw Navigate({ to: '/dashboard' })
+    }
+  },
   shellComponent: RootDocument,
 })
 
@@ -57,9 +73,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       </head>
       <body className="font-sans antialiased [overflow-wrap:anywhere] selection:bg-[rgba(79,184,178,0.24)]">
         <TanStackQueryProvider>
-          <Header />
-          {children}
-          <Footer />
+          <RootLayout>{children}</RootLayout>
           <TanStackDevtools
             config={{
               position: 'bottom-right',
@@ -77,5 +91,18 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <Scripts />
       </body>
     </html>
+  )
+}
+
+function RootLayout({ children }: { children: React.ReactNode }) {
+  const location = useLocation()
+  const isLoginPage = location.pathname === '/login'
+
+  return (
+    <>
+      {!isLoginPage && <Header />}
+      {children}
+      {!isLoginPage && <Footer />}
+    </>
   )
 }
