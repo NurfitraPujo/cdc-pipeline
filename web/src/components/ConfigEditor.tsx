@@ -1,8 +1,14 @@
-import { useState, useCallback } from "react";
 import Editor from "@monaco-editor/react";
-import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
+import { AlertCircle, RotateCcw, Save } from "lucide-react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { RotateCcw, Save, AlertCircle } from "lucide-react";
+import {
+	Card,
+	CardContent,
+	CardFooter,
+	CardHeader,
+	CardTitle,
+} from "@/components/ui/card";
 
 interface ConfigEditorProps {
 	initialValue: string;
@@ -10,7 +16,11 @@ interface ConfigEditorProps {
 	isLoading?: boolean;
 }
 
-export function ConfigEditor({ initialValue, onSave, isLoading = false }: ConfigEditorProps) {
+export function ConfigEditor({
+	initialValue,
+	onSave,
+	isLoading = false,
+}: ConfigEditorProps) {
 	const [value, setValue] = useState(initialValue);
 	const [error, setError] = useState<string | null>(null);
 
@@ -28,27 +38,31 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 
 	const validateJson = useCallback((jsonContent: string): boolean => {
 		// Basic JSON validation - check for common errors
-		const lines = jsonContent.split('\n');
+		const lines = jsonContent.split("\n");
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			const trimmedLine = line.trim();
 
 			// Skip empty lines and comments
-			if (!trimmedLine || trimmedLine.startsWith('#')) {
+			if (!trimmedLine || trimmedLine.startsWith("#")) {
 				continue;
 			}
 
 			// Check for tabs (JSON should use spaces)
-			if (line.includes('\t')) {
-				setError(`Line ${i + 1}: Tabs are not allowed. Use spaces for indentation.`);
+			if (line.includes("\t")) {
+				setError(
+					`Line ${i + 1}: Tabs are not allowed. Use spaces for indentation.`,
+				);
 				return false;
 			}
 
 			// Check indentation consistency
 			const leadingSpaces = line.length - line.trimStart().length;
 			if (leadingSpaces % 2 !== 0 && leadingSpaces > 0) {
-				setError(`Line ${i + 1}: Indentation should be a multiple of 2 spaces.`);
+				setError(
+					`Line ${i + 1}: Indentation should be a multiple of 2 spaces.`,
+				);
 				return false;
 			}
 		}
@@ -92,7 +106,10 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 				<CardTitle>Configuration Editor</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-4">
-				<div className="border rounded-md overflow-hidden" style={{ height: "500px" }}>
+				<div
+					className="border rounded-md overflow-hidden"
+					style={{ height: "500px" }}
+				>
 					<Editor
 						height="100%"
 						defaultLanguage="json"
@@ -134,10 +151,7 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 					<RotateCcw className="mr-2 h-4 w-4" />
 					Reset
 				</Button>
-				<Button
-					onClick={handleSave}
-					disabled={!hasChanges || isLoading}
-				>
+				<Button onClick={handleSave} disabled={!hasChanges || isLoading}>
 					{isLoading ? (
 						<>
 							<div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />

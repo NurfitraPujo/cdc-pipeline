@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { useAuthStore } from "@/stores/authStore";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/constants";
+import { useAuthStore } from "@/stores/authStore";
 
 interface SSEOptions {
 	onMessage?: (data: unknown) => void;
@@ -18,7 +18,10 @@ interface SSEReturn<T> extends SSEState<T> {
 	reconnect: () => void;
 }
 
-export function useSSE<T = unknown>(endpoint: string, options: SSEOptions = {}): SSEReturn<T> {
+export function useSSE<T = unknown>(
+	endpoint: string,
+	options: SSEOptions = {},
+): SSEReturn<T> {
 	const { token } = useAuthStore();
 	const [state, setState] = useState<SSEState<T>>({
 		data: null,
@@ -27,7 +30,9 @@ export function useSSE<T = unknown>(endpoint: string, options: SSEOptions = {}):
 	});
 
 	const eventSourceRef = useRef<EventSource | null>(null);
-	const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+		null,
+	);
 
 	const connect = useCallback(() => {
 		// Close existing connection
@@ -76,7 +81,7 @@ export function useSSE<T = unknown>(endpoint: string, options: SSEOptions = {}):
 						data: parsedData,
 					}));
 					options.onMessage?.(parsedData);
-				} catch (err) {
+				} catch (_err) {
 					// If not JSON, use raw data
 					const rawData = event.data as unknown as T;
 					setState((prev) => ({
@@ -104,7 +109,8 @@ export function useSSE<T = unknown>(endpoint: string, options: SSEOptions = {}):
 			setState((prev) => ({
 				...prev,
 				isConnected: false,
-				error: err instanceof Error ? err : new Error("Failed to connect to SSE"),
+				error:
+					err instanceof Error ? err : new Error("Failed to connect to SSE"),
 			}));
 		}
 	}, [endpoint, token, options]);

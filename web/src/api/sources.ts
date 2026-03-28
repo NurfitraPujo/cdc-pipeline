@@ -11,7 +11,9 @@ export const sourcesApi = {
 	},
 
 	async getTables(id: string): Promise<string[]> {
-		const response = await apiClient.get<TableResponse>(`/sources/${id}/tables`);
+		const response = await apiClient.get<TableResponse>(
+			`/sources/${id}/tables`,
+		);
 		return response.tables;
 	},
 };

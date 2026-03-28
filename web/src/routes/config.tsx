@@ -1,11 +1,16 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Settings, Save, AlertCircle, CheckCircle } from "lucide-react";
+import { AlertCircle, CheckCircle, Settings } from "lucide-react";
+import { useState } from "react";
 import { apiClient } from "@/api/client";
 import { ConfigEditor } from "@/components/ConfigEditor";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { useState } from "react";
+import {
+	Card,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from "@/components/ui/card";
 
 interface GlobalConfig {
 	maxConcurrentPipelines: number;
@@ -19,7 +24,9 @@ const fetchGlobalConfig = async (): Promise<GlobalConfig> => {
 	return apiClient.get<GlobalConfig>("/global");
 };
 
-const saveGlobalConfig = async (config: GlobalConfig): Promise<GlobalConfig> => {
+const saveGlobalConfig = async (
+	config: GlobalConfig,
+): Promise<GlobalConfig> => {
 	return apiClient.put<GlobalConfig>("/global", config);
 };
 
@@ -40,7 +47,7 @@ function ConfigPage() {
 	const [saveError, setSaveError] = useState<string | null>(null);
 	const [saveSuccess, setSaveSuccess] = useState(false);
 
-	const { data: config, isLoading, error } = useQuery({
+	const { data: config, error } = useQuery({
 		queryKey: ["global-config"],
 		queryFn: fetchGlobalConfig,
 	});
@@ -63,7 +70,7 @@ function ConfigPage() {
 		try {
 			const parsedConfig = JSON.parse(jsonContent) as GlobalConfig;
 			mutation.mutate(parsedConfig);
-		} catch (err) {
+		} catch (_err) {
 			setSaveError("Invalid JSON format. Please check your configuration.");
 		}
 	};
@@ -76,7 +83,9 @@ function ConfigPage() {
 			<div className="mb-8">
 				<div className="flex items-center gap-3">
 					<Settings className="h-8 w-8 text-[#56c6be]" />
-					<h1 className="text-3xl font-bold tracking-tight">Global Configuration</h1>
+					<h1 className="text-3xl font-bold tracking-tight">
+						Global Configuration
+					</h1>
 				</div>
 				<p className="mt-2 text-muted-foreground">
 					Manage global settings for your CDC pipeline system.
@@ -108,13 +117,16 @@ function ConfigPage() {
 				<CardHeader>
 					<CardTitle>Configuration Settings</CardTitle>
 					<CardDescription>
-						Edit the global configuration below. Changes will take effect immediately after saving.
+						Edit the global configuration below. Changes will take effect
+						immediately after saving.
 					</CardDescription>
 				</CardHeader>
 				<CardContent className="space-y-4">
 					<div className="grid gap-4 md:grid-cols-2">
 						<div className="space-y-2">
-							<span className="text-sm font-medium">Max Concurrent Pipelines</span>
+							<span className="text-sm font-medium">
+								Max Concurrent Pipelines
+							</span>
 							<p className="text-xs text-muted-foreground">
 								Maximum number of pipelines that can run simultaneously
 							</p>
@@ -126,7 +138,9 @@ function ConfigPage() {
 							</p>
 						</div>
 						<div className="space-y-2">
-							<span className="text-sm font-medium">Default Flush Interval</span>
+							<span className="text-sm font-medium">
+								Default Flush Interval
+							</span>
 							<p className="text-xs text-muted-foreground">
 								Milliseconds between automatic flushes
 							</p>

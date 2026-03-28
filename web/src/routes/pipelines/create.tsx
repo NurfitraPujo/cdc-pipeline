@@ -1,20 +1,20 @@
-import { useState, useEffect } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
+	AlertCircle,
 	ArrowLeft,
 	Database,
-	Server,
-	Plus,
-	X,
 	Loader2,
-	AlertCircle,
+	Plus,
+	Server,
+	X,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { pipelinesApi } from "@/api/pipelines";
-import { sourcesApi } from "@/api/sources";
 import { sinksApi } from "@/api/sinks";
+import { sourcesApi } from "@/api/sources";
+
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
 	Card,
 	CardContent,
@@ -22,8 +22,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import type { Source, Sink } from "@/api/types";
+import { Input } from "@/components/ui/input";
 
 export const Route = createFileRoute("/pipelines/create")({
 	component: CreatePipelinePage,
@@ -37,7 +36,9 @@ function CreatePipelinePage() {
 	const [selectedSource, setSelectedSource] = useState<string | null>(null);
 	const [selectedSink, setSelectedSink] = useState<string | null>(null);
 	const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
-	const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
+	const [validationErrors, setValidationErrors] = useState<
+		Record<string, string>
+	>({});
 
 	const { data: sources = [], isLoading: isLoadingSources } = useQuery({
 		queryKey: ["sources"],
@@ -61,7 +62,9 @@ function CreatePipelinePage() {
 
 	// Reset selected tables when source changes
 	useEffect(() => {
-		setSelectedTables(new Set());
+		if (selectedSource) {
+			setSelectedTables(new Set());
+		}
 	}, [selectedSource]);
 
 	const createMutation = useMutation({
@@ -156,7 +159,9 @@ function CreatePipelinePage() {
 						Back to Pipelines
 					</Link>
 				</Button>
-				<h1 className="mt-4 text-3xl font-bold tracking-tight">Create Pipeline</h1>
+				<h1 className="mt-4 text-3xl font-bold tracking-tight">
+					Create Pipeline
+				</h1>
 				<p className="mt-2 text-muted-foreground">
 					Configure a new CDC pipeline to sync data from source to sink.
 				</p>
@@ -172,23 +177,23 @@ function CreatePipelinePage() {
 						</CardDescription>
 					</CardHeader>
 					<CardContent>
-					<Input
-						placeholder="e.g., postgres-to-kafka"
-						value={pipelineId}
-						onChange={(e) => {
-							setPipelineId(e.target.value);
-							if (validationErrors.pipelineId) {
-								setValidationErrors((prev) => ({ ...prev, pipelineId: "" }));
-							}
-						}}
-						className="max-w-md"
-					/>
-					{validationErrors.pipelineId && (
-						<p className="text-sm text-destructive mt-2 flex items-center gap-1">
-							<AlertCircle className="h-3 w-3" />
-							{validationErrors.pipelineId}
-						</p>
-					)}
+						<Input
+							placeholder="e.g., postgres-to-kafka"
+							value={pipelineId}
+							onChange={(e) => {
+								setPipelineId(e.target.value);
+								if (validationErrors.pipelineId) {
+									setValidationErrors((prev) => ({ ...prev, pipelineId: "" }));
+								}
+							}}
+							className="max-w-md"
+						/>
+						{validationErrors.pipelineId && (
+							<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+								<AlertCircle className="h-3 w-3" />
+								{validationErrors.pipelineId}
+							</p>
+						)}
 					</CardContent>
 				</Card>
 
@@ -338,9 +343,7 @@ function CreatePipelinePage() {
 											}`}
 										>
 											{table}
-											{selectedTables.has(table) && (
-												<X className="h-3 w-3" />
-											)}
+											{selectedTables.has(table) && <X className="h-3 w-3" />}
 										</button>
 									))}
 								</div>
@@ -355,18 +358,18 @@ function CreatePipelinePage() {
 											Clear all
 										</Button>
 									</div>
-							)}
-							{validationErrors.tables && (
-								<p className="text-sm text-destructive mt-2 flex items-center gap-1">
-									<AlertCircle className="h-3 w-3" />
-									{validationErrors.tables}
-								</p>
-							)}
-						</div>
-					)}
-				</CardContent>
-			</Card>
-		</div>
+								)}
+								{validationErrors.tables && (
+									<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+										<AlertCircle className="h-3 w-3" />
+										{validationErrors.tables}
+									</p>
+								)}
+							</div>
+						)}
+					</CardContent>
+				</Card>
+			</div>
 
 			{/* Mutation Error */}
 			{createMutation.error && (
@@ -386,9 +389,7 @@ function CreatePipelinePage() {
 			{/* Actions */}
 			<div className="mt-8 flex items-center justify-end gap-4">
 				<Button asChild variant="outline">
-					<Link to="/pipelines">
-						Cancel
-					</Link>
+					<Link to="/pipelines">Cancel</Link>
 				</Button>
 				<Button
 					onClick={handleCreate}

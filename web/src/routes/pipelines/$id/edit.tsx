@@ -1,7 +1,8 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, Loader2 } from "lucide-react";
 import { pipelinesApi } from "@/api/pipelines";
+import type { Pipeline } from "@/api/types";
 import { ConfigEditor } from "@/components/ConfigEditor";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +12,6 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
-import type { Pipeline } from "@/api/types";
 
 export const Route = createFileRoute("/pipelines/$id/edit")({
 	component: EditPipelinePage,
@@ -86,7 +86,9 @@ function jsonToUpdateRequest(jsonContent: string): Record<string, unknown> {
 			processorConfig: parsed.processorConfig,
 		};
 	} catch {
-		throw new Error("Invalid configuration format. Please ensure valid JSON syntax.");
+		throw new Error(
+			"Invalid configuration format. Please ensure valid JSON syntax.",
+		);
 	}
 }
 
@@ -162,7 +164,9 @@ function EditPipelinePage() {
 						Back to Pipeline
 					</Link>
 				</Button>
-				<h1 className="mt-4 text-3xl font-bold tracking-tight">Edit Pipeline</h1>
+				<h1 className="mt-4 text-3xl font-bold tracking-tight">
+					Edit Pipeline
+				</h1>
 				<p className="mt-2 text-muted-foreground">
 					Edit the configuration for <strong>{pipeline.name}</strong>.
 				</p>
@@ -204,7 +208,7 @@ function EditPipelinePage() {
 				</CardHeader>
 				<CardContent className="space-y-2 text-sm text-muted-foreground">
 					<ul className="list-disc list-inside space-y-1">
-					<li>Ensure JSON syntax is valid before saving</li>
+						<li>Ensure JSON syntax is valid before saving</li>
 						<li>Connection passwords are not shown for security reasons</li>
 						<li>Changes to the pipeline ID are not allowed</li>
 						<li>Use the Reset button to discard changes</li>

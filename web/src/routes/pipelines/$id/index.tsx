@@ -1,18 +1,20 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
+	Activity,
+	AlertCircle,
 	ArrowLeft,
+	Database,
 	Edit,
 	RefreshCw,
-	Database,
 	Table,
-	Activity,
 	Wifi,
 	WifiOff,
-	AlertCircle,
 } from "lucide-react";
 import { pipelinesApi } from "@/api/pipelines";
-import { useSSE } from "@/hooks/useSSE";
+import type { PipelineStatus, TableStats } from "@/api/types";
+import { MetricCard } from "@/components/MetricCard";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -21,9 +23,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { MetricCard } from "@/components/MetricCard";
-import type { Pipeline, PipelineStatus, TableStats } from "@/api/types";
+import { useSSE } from "@/hooks/useSSE";
 
 interface PipelineMetrics {
 	pipeline_id: string;
@@ -58,8 +58,8 @@ function PipelineDetailPage() {
 		queryFn: () => pipelinesApi.get(id),
 	});
 
-	const { data: metrics, isConnected, error: sseError } = useSSE<PipelineMetrics>(
-		`/pipelines/${id}/metrics`
+	const { data: metrics, isConnected } = useSSE<PipelineMetrics>(
+		`/pipelines/${id}/metrics`,
 	);
 
 	const restartMutation = useMutation({
@@ -76,8 +76,8 @@ function PipelineDetailPage() {
 					<div className="h-8 w-64 bg-muted rounded" />
 					<div className="h-4 w-48 bg-muted rounded" />
 					<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mt-8">
-					{[1, 2, 3, 4].map((num) => (
-						<div key={`loading-${num}`} className="h-32 bg-muted rounded" />
+						{[1, 2, 3, 4].map((num) => (
+							<div key={`loading-${num}`} className="h-32 bg-muted rounded" />
 						))}
 					</div>
 				</div>
@@ -107,13 +107,12 @@ function PipelineDetailPage() {
 
 	const totalEvents =
 		metrics?.tables?.reduce((sum, t) => sum + (t.eventsTotal || 0), 0) || 0;
-	const avgLag =
-		metrics?.tables?.length
-			? Math.round(
-					metrics.tables.reduce((sum, t) => sum + (t.lagMs || 0), 0) /
-						metrics.tables.length
-				)
-			: 0;
+	const avgLag = metrics?.tables?.length
+		? Math.round(
+				metrics.tables.reduce((sum, t) => sum + (t.lagMs || 0), 0) /
+					metrics.tables.length,
+			)
+		: 0;
 
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
@@ -253,114 +252,127 @@ function PipelineDetailPage() {
 									<Badge key={table} variant="secondary">
 										{table}
 									</Badge>
-									))}
-								</div>
+								))}
 							</div>
-						</CardContent>
-					</Card>
+						</div>
+					</CardContent>
+				</Card>
 
-					{/* Sink Configuration */}
-					<Card>
-						<CardHeader>
-							<div className="flex items-center gap-2">
-								<Database className="h-5 w-5 text-muted-foreground" />
-								<CardTitle>Sink</CardTitle>
+				{/* Sink Configuration */}
+				<Card>
+					<CardHeader>
+						<div className="flex items-center gap-2">
+							<Database className="h-5 w-5 text-muted-foreground" />
+							<CardTitle>Sink</CardTitle>
+						</div>
+						<CardDescription>
+							{pipeline.sink.type.toUpperCase()} - {pipeline.sink.name}
+						</CardDescription>
+					</CardHeader>
+					<CardContent className="space-y-4">
+						<div className="grid grid-cols-2 gap-4">
+							<div>
+								<p className="text-sm text-muted-foreground">Host</p>
+								<p className="font-medium">{pipeline.sink.connection.host}</p>
 							</div>
-							<CardDescription>
-								{pipeline.sink.type.toUpperCase()} - {pipeline.sink.name}
-							</CardDescription>
-						</CardHeader>
-						<CardContent className="space-y-4">
-							<div className="grid grid-cols-2 gap-4">
+							{pipeline.sink.connection.port && (
 								<div>
-									<p className="text-sm text-muted-foreground">Host</p>
-									<p className="font-medium">{pipeline.sink.connection.host}</p>
+									<p className="text-sm text-muted-foreground">Port</p>
+									<p className="font-medium">{pipeline.sink.connection.port}</p>
 								</div>
-								{pipeline.sink.connection.port && (
-									<div>
-										<p className="text-sm text-muted-foreground">Port</p>
-										<p className="font-medium">{pipeline.sink.connection.port}</p>
-									</div>
-								)}
-								{pipeline.sink.connection.index && (
-									<div>
-										<p className="text-sm text-muted-foreground">Index</p>
-										<p className="font-medium">{pipeline.sink.connection.index}</p>
-									</div>
-								)}
-								{pipeline.sink.connection.topic && (
-									<div>
-										<p className="text-sm text-muted-foreground">Topic</p>
-										<p className="font-medium">{pipeline.sink.connection.topic}</p>
-									</div>
-								)}
-							</div>
-						</CardContent>
-					</Card>
-				</div>
+							)}
+							{pipeline.sink.connection.index && (
+								<div>
+									<p className="text-sm text-muted-foreground">Index</p>
+									<p className="font-medium">
+										{pipeline.sink.connection.index}
+									</p>
+								</div>
+							)}
+							{pipeline.sink.connection.topic && (
+								<div>
+									<p className="text-sm text-muted-foreground">Topic</p>
+									<p className="font-medium">
+										{pipeline.sink.connection.topic}
+									</p>
+								</div>
+							)}
+						</div>
+					</CardContent>
+				</Card>
+			</div>
 
-				{/* Table Metrics */}
-				{metrics?.tables && metrics.tables.length > 0 && (
-					<Card className="mb-8">
-						<CardHeader>
-							<CardTitle>Table Metrics</CardTitle>
-							<CardDescription>Real-time metrics per table</CardDescription>
-						</CardHeader>
-						<CardContent>
-							<div className="overflow-x-auto">
-								<table className="w-full">
-									<thead>
-										<tr className="border-b">
-											<th className="text-left py-3 px-4 font-medium">
-												Table Name
-											</th>
-											<th className="text-right py-3 px-4 font-medium">Inserted</th>
-											<th className="text-right py-3 px-4 font-medium">Updated</th>
-											<th className="text-right py-3 px-4 font-medium">Deleted</th>
-											<th className="text-right py-3 px-4 font-medium">Total</th>
-											<th className="text-right py-3 px-4 font-medium">Lag</th>
+			{/* Table Metrics */}
+			{metrics?.tables && metrics.tables.length > 0 && (
+				<Card className="mb-8">
+					<CardHeader>
+						<CardTitle>Table Metrics</CardTitle>
+						<CardDescription>Real-time metrics per table</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<div className="overflow-x-auto">
+							<table className="w-full">
+								<thead>
+									<tr className="border-b">
+										<th className="text-left py-3 px-4 font-medium">
+											Table Name
+										</th>
+										<th className="text-right py-3 px-4 font-medium">
+											Inserted
+										</th>
+										<th className="text-right py-3 px-4 font-medium">
+											Updated
+										</th>
+										<th className="text-right py-3 px-4 font-medium">
+											Deleted
+										</th>
+										<th className="text-right py-3 px-4 font-medium">Total</th>
+										<th className="text-right py-3 px-4 font-medium">Lag</th>
+									</tr>
+								</thead>
+								<tbody>
+									{metrics.tables.map((table) => (
+										<tr
+											key={table.tableName}
+											className="border-b last:border-0"
+										>
+											<td className="py-3 px-4 font-medium">
+												{table.tableName}
+											</td>
+											<td className="text-right py-3 px-4">
+												{table.eventsInserted.toLocaleString()}
+											</td>
+											<td className="text-right py-3 px-4">
+												{table.eventsUpdated.toLocaleString()}
+											</td>
+											<td className="text-right py-3 px-4">
+												{table.eventsDeleted.toLocaleString()}
+											</td>
+											<td className="text-right py-3 px-4 font-semibold">
+												{table.eventsTotal.toLocaleString()}
+											</td>
+											<td className="text-right py-3 px-4">{table.lagMs}ms</td>
 										</tr>
-										</thead>
-										<tbody>
-											{metrics.tables.map((table) => (
-												<tr key={table.tableName} className="border-b last:border-0">
-													<td className="py-3 px-4 font-medium">{table.tableName}</td>
-													<td className="text-right py-3 px-4">
-														{table.eventsInserted.toLocaleString()}
-													</td>
-													<td className="text-right py-3 px-4">
-														{table.eventsUpdated.toLocaleString()}
-													</td>
-													<td className="text-right py-3 px-4">
-														{table.eventsDeleted.toLocaleString()}
-													</td>
-													<td className="text-right py-3 px-4 font-semibold">
-														{table.eventsTotal.toLocaleString()}
-													</td>
-													<td className="text-right py-3 px-4">
-														{table.lagMs}ms
-													</td>
-												</tr>
-											))}
-											</tbody>
-										</table>
-									</div>
-								</CardContent>
-							</Card>
-						)}
+									))}
+								</tbody>
+							</table>
+						</div>
+					</CardContent>
+				</Card>
+			)}
 
-						{/* Raw Config */}
-						<Card>
-							<CardHeader>
-								<CardTitle>Configuration</CardTitle>
-								<CardDescription>Raw pipeline configuration</CardDescription>
-							</CardHeader>
-							<CardContent>
-								<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm">
-									<code>{JSON.stringify(pipeline, null, 2)}</code>
-								</pre>
-							</CardContent>
-						</Card>
-					</div>
+			{/* Raw Config */}
+			<Card>
+				<CardHeader>
+					<CardTitle>Configuration</CardTitle>
+					<CardDescription>Raw pipeline configuration</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm">
+						<code>{JSON.stringify(pipeline, null, 2)}</code>
+					</pre>
+				</CardContent>
+			</Card>
+		</div>
 	);
 }

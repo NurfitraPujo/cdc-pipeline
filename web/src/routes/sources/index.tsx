@@ -25,8 +25,8 @@ function SourcesPage() {
 					</div>
 					<h3 className="text-lg font-semibold">No sources configured</h3>
 					<p className="mt-2 max-w-sm text-sm text-muted-foreground">
-						Sources represent your database connections (PostgreSQL, MySQL, MongoDB)
-						that you want to capture change events from.
+						Sources represent your database connections (PostgreSQL, MySQL,
+						MongoDB) that you want to capture change events from.
 					</p>
 					<p className="mt-4 text-sm text-muted-foreground">
 						Source management coming soon.

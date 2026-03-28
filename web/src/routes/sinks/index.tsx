@@ -25,8 +25,9 @@ function SinksPage() {
 					</div>
 					<h3 className="text-lg font-semibold">No sinks configured</h3>
 					<p className="mt-2 max-w-sm text-sm text-muted-foreground">
-						Sinks represent your destination systems (PostgreSQL, MySQL, Elasticsearch,
-						Kafka, Webhook) where change events will be delivered to.
+						Sinks represent your destination systems (PostgreSQL, MySQL,
+						Elasticsearch, Kafka, Webhook) where change events will be delivered
+						to.
 					</p>
 					<p className="mt-4 text-sm text-muted-foreground">
 						Sink management coming soon.
