@@ -1,129 +1,129 @@
 export interface User {
-  id: string;
-  email: string;
-  name: string;
-  role: 'admin' | 'user';
-  createdAt: string;
-  updatedAt: string;
+	id: string;
+	email: string;
+	name: string;
+	role: "admin" | "user";
+	createdAt: string;
+	updatedAt: string;
 }
 
 export interface LoginRequest {
-  username: string;
-  password: string;
+	username: string;
+	password: string;
 }
 
 export interface LoginResponse {
-  token: string;
+	token: string;
 }
 
 export interface StatsSummary {
-  totalPipelines: number;
-  activePipelines: number;
-  totalEventsProcessed: number;
-  eventsPerSecond: number;
-  lagMs: number;
-  errorsLast24h: number;
+	total_pipelines: number;
+	healthy_count: number;
+	error_count: number;
+	transitioning_count: number;
+	total_rows_synchronized: number;
+	avg_lag_ms: number;
 }
 
 export interface Pipeline {
-  id: string;
-  name: string;
-  description?: string;
-  status: PipelineStatus;
-  source: Source;
-  sink: Sink;
-  processorConfig: ProcessorConfig;
-  globalConfig: GlobalConfig;
-  createdAt: string;
-  updatedAt: string;
-  lastRunAt?: string;
+	id: string;
+	name: string;
+	description?: string;
+	status: PipelineStatus;
+	source: Source;
+	sink: Sink;
+	processorConfig: ProcessorConfig;
+	globalConfig: GlobalConfig;
+	createdAt: string;
+	updatedAt: string;
+	lastRunAt?: string;
 }
 
-export type PipelineStatus = 'running' | 'stopped' | 'error' | 'paused';
+export type PipelineStatus = "running" | "stopped" | "error" | "paused";
 
 export interface ProcessorConfig {
-  batchSize: number;
-  flushIntervalMs: number;
-  maxRetries: number;
-  retryDelayMs: number;
-  deadLetterQueueEnabled: boolean;
-  transformations?: Transformation[];
+	batchSize: number;
+	flushIntervalMs: number;
+	maxRetries: number;
+	retryDelayMs: number;
+	deadLetterQueueEnabled: boolean;
+	transformations?: Transformation[];
 }
 
 export interface Transformation {
-  id: string;
-  type: 'filter' | 'map' | 'enrich';
-  config: Record<string, unknown>;
-  order: number;
+	id: string;
+	type: "filter" | "map" | "enrich";
+	config: Record<string, unknown>;
+	order: number;
 }
 
 export interface TableStats {
-  tableName: string;
-  eventsInserted: number;
-  eventsUpdated: number;
-  eventsDeleted: number;
-  eventsTotal: number;
-  lagMs: number;
-  lastEventAt?: string;
+	tableName: string;
+	eventsInserted: number;
+	eventsUpdated: number;
+	eventsDeleted: number;
+	eventsTotal: number;
+	lagMs: number;
+	lastEventAt?: string;
 }
 
 export interface Source {
-  id: string;
-  type: 'postgres' | 'mysql' | 'mongodb';
-  name: string;
-  connection: {
-    host: string;
-    port: number;
-    database: string;
-    username: string;
-    password?: string;
-    ssl?: boolean;
-  };
-  tables: string[];
+	id: string;
+	type: "postgres" | "mysql" | "mongodb";
+	name: string;
+	connection: {
+		host: string;
+		port: number;
+		database: string;
+		username: string;
+		password?: string;
+		ssl?: boolean;
+	};
+	tables: string[];
 }
 
 export interface Sink {
-  id: string;
-  type: 'postgres' | 'mysql' | 'elasticsearch' | 'kafka' | 'webhook';
-  name: string;
-  connection: {
-    host: string;
-    port?: number;
-    index?: string;
-    topic?: string;
-    url?: string;
-    headers?: Record<string, string>;
-  };
+	id: string;
+	type: "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook";
+	name: string;
+	connection: {
+		host: string;
+		port?: number;
+		index?: string;
+		topic?: string;
+		url?: string;
+		headers?: Record<string, string>;
+	};
 }
 
 export interface GlobalConfig {
-  maxConcurrentPipelines: number;
-  defaultBatchSize: number;
-  defaultFlushIntervalMs: number;
-  healthCheckIntervalMs: number;
-  metricsRetentionDays: number;
+	maxConcurrentPipelines: number;
+	defaultBatchSize: number;
+	defaultFlushIntervalMs: number;
+	healthCheckIntervalMs: number;
+	metricsRetentionDays: number;
 }
 
 export interface WorkerHeartbeat {
-  workerId: string;
-  pipelineId: string;
-  status: 'healthy' | 'unhealthy' | 'busy';
-  lastHeartbeatAt: string;
-  eventsProcessed: number;
-  currentLagMs: number;
-  memoryUsageMb: number;
-  cpuUsagePercent: number;
+	workerId: string;
+	pipelineId: string;
+	status: "healthy" | "unhealthy" | "busy";
+	lastHeartbeatAt: string;
+	eventsProcessed: number;
+	currentLagMs: number;
+	memoryUsageMb: number;
+	cpuUsagePercent: number;
 }
 
 export interface SSEMetrics {
-  type: 'metrics' | 'heartbeat' | 'error' | 'status_change';
-  timestamp: string;
-  data: {
-    pipelineId?: string;
-    eventsPerSecond?: number;
-    lagMs?: number;
-    errorCount?: number;
-    message?: string;
-    status?: PipelineStatus;
-  };
+	type: "metrics" | "heartbeat" | "error" | "status_change";
+	timestamp: string;
+	data: {
+		pipelineId?: string;
+		eventsPerSecond?: number;
+		lagMs?: number;
+		errorCount?: number;
+		message?: string;
+		status?: PipelineStatus;
+	};
 }
