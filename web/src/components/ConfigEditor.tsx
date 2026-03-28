@@ -26,11 +26,9 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 		setError(null);
 	}, [initialValue]);
 
-	const validateYaml = useCallback((yamlContent: string): boolean => {
-		// Basic YAML validation - check for common errors
-		const lines = yamlContent.split('\n');
-		let inMultilineString = false;
-		let multilineIndent = 0;
+	const validateJson = useCallback((jsonContent: string): boolean => {
+		// Basic JSON validation - check for common errors
+		const lines = jsonContent.split('\n');
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
@@ -41,7 +39,7 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 				continue;
 			}
 
-			// Check for tabs (YAML should use spaces)
+			// Check for tabs (JSON should use spaces)
 			if (line.includes('\t')) {
 				setError(`Line ${i + 1}: Tabs are not allowed. Use spaces for indentation.`);
 				return false;
@@ -58,33 +56,33 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 		// Try to check for basic structure
 		try {
 			// Check for unmatched braces/brackets (simple check)
-			const openBraces = (yamlContent.match(/\{/g) || []).length;
-			const closeBraces = (yamlContent.match(/\}/g) || []).length;
-			const openBrackets = (yamlContent.match(/\[/g) || []).length;
-			const closeBrackets = (yamlContent.match(/\]/g) || []).length;
+			const openBraces = (jsonContent.match(/\{/g) || []).length;
+			const closeBraces = (jsonContent.match(/\}/g) || []).length;
+			const openBrackets = (jsonContent.match(/\[/g) || []).length;
+			const closeBrackets = (jsonContent.match(/\]/g) || []).length;
 
 			if (openBraces !== closeBraces) {
-				setError("Unmatched curly braces in YAML content.");
+				setError("Unmatched curly braces in JSON content.");
 				return false;
 			}
 
 			if (openBrackets !== closeBrackets) {
-				setError("Unmatched square brackets in YAML content.");
+				setError("Unmatched square brackets in JSON content.");
 				return false;
 			}
 
-		return true;
-	} catch {
-		setError("Invalid YAML format.");
-		return false;
-	}
-}, []);
+			return true;
+		} catch {
+			setError("Invalid JSON format.");
+			return false;
+		}
+	}, []);
 
 	const handleSave = useCallback(() => {
-		if (validateYaml(value)) {
+		if (validateJson(value)) {
 			onSave(value);
 		}
-	}, [value, onSave, validateYaml]);
+	}, [value, onSave, validateJson]);
 
 	const hasChanges = value !== initialValue;
 
@@ -97,7 +95,7 @@ export function ConfigEditor({ initialValue, onSave, isLoading = false }: Config
 				<div className="border rounded-md overflow-hidden" style={{ height: "500px" }}>
 					<Editor
 						height="100%"
-						defaultLanguage="yaml"
+						defaultLanguage="json"
 						value={value}
 						onChange={handleChange}
 						options={{

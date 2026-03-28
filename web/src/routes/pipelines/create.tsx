@@ -8,6 +8,7 @@ import {
 	Plus,
 	X,
 	Loader2,
+	AlertCircle,
 } from "lucide-react";
 import { pipelinesApi } from "@/api/pipelines";
 import { sourcesApi } from "@/api/sources";
@@ -33,9 +34,10 @@ function CreatePipelinePage() {
 	const queryClient = useQueryClient();
 
 	const [pipelineId, setPipelineId] = useState("");
-	const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
-	const [selectedSinks, setSelectedSinks] = useState<Set<string>>(new Set());
+	const [selectedSource, setSelectedSource] = useState<string | null>(null);
+	const [selectedSink, setSelectedSink] = useState<string | null>(null);
 	const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
+	const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
 	const { data: sources = [], isLoading: isLoadingSources } = useQuery({
 		queryKey: ["sources"],
@@ -48,20 +50,19 @@ function CreatePipelinePage() {
 	});
 
 	// Fetch tables when a source is selected
-	const selectedSourceId = Array.from(selectedSources)[0] || null;
 	const { data: tables = [], isLoading: isLoadingTables } = useQuery({
-		queryKey: ["source-tables", selectedSourceId],
+		queryKey: ["source-tables", selectedSource],
 		queryFn: () => {
-			if (!selectedSourceId) return Promise.resolve([]);
-			return sourcesApi.getTables(selectedSourceId);
+			if (!selectedSource) return Promise.resolve([]);
+			return sourcesApi.getTables(selectedSource);
 		},
-		enabled: !!selectedSourceId,
+		enabled: !!selectedSource,
 	});
 
 	// Reset selected tables when source changes
 	useEffect(() => {
 		setSelectedTables(new Set());
-	}, [selectedSourceId]);
+	}, [selectedSource]);
 
 	const createMutation = useMutation({
 		mutationFn: pipelinesApi.create,
@@ -71,32 +72,18 @@ function CreatePipelinePage() {
 		},
 	});
 
-	const handleToggleSource = (sourceId: string) => {
-		setSelectedSources((prev) => {
-			const next = new Set(prev);
-			if (next.has(sourceId)) {
-				next.delete(sourceId);
-			} else {
-				// Single source selection for now
-				next.clear();
-				next.add(sourceId);
-			}
-			return next;
-		});
+	const handleSelectSource = (sourceId: string) => {
+		setSelectedSource(sourceId);
+		if (validationErrors.source) {
+			setValidationErrors((prev) => ({ ...prev, source: "" }));
+		}
 	};
 
-	const handleToggleSink = (sinkId: string) => {
-		setSelectedSinks((prev) => {
-			const next = new Set(prev);
-			if (next.has(sinkId)) {
-				next.delete(sinkId);
-			} else {
-				// Single sink selection for now
-				next.clear();
-				next.add(sinkId);
-			}
-			return next;
-		});
+	const handleSelectSink = (sinkId: string) => {
+		setSelectedSink(sinkId);
+		if (validationErrors.sink) {
+			setValidationErrors((prev) => ({ ...prev, sink: "" }));
+		}
 	};
 
 	const handleToggleTable = (table: string) => {
@@ -112,12 +99,28 @@ function CreatePipelinePage() {
 	};
 
 	const handleCreate = () => {
-		if (!pipelineId || selectedSources.size === 0 || selectedSinks.size === 0) {
+		const errors: Record<string, string> = {};
+
+		if (!pipelineId.trim()) {
+			errors.pipelineId = "Pipeline ID is required";
+		}
+		if (!selectedSource) {
+			errors.source = "Please select a source";
+		}
+		if (!selectedSink) {
+			errors.sink = "Please select a sink";
+		}
+		if (selectedTables.size === 0) {
+			errors.tables = "Please select at least one table";
+		}
+
+		if (Object.keys(errors).length > 0) {
+			setValidationErrors(errors);
 			return;
 		}
 
-		const source = sources.find((s) => s.id === Array.from(selectedSources)[0]);
-		const sink = sinks.find((s) => s.id === Array.from(selectedSinks)[0]);
+		const source = sources.find((s) => s.id === selectedSource);
+		const sink = sinks.find((s) => s.id === selectedSink);
 
 		if (!source || !sink) return;
 
@@ -139,8 +142,8 @@ function CreatePipelinePage() {
 
 	const canCreate =
 		pipelineId.trim() !== "" &&
-		selectedSources.size > 0 &&
-		selectedSinks.size > 0 &&
+		selectedSource !== null &&
+		selectedSink !== null &&
 		selectedTables.size > 0;
 
 	return (
@@ -169,12 +172,23 @@ function CreatePipelinePage() {
 						</CardDescription>
 					</CardHeader>
 					<CardContent>
-						<Input
-							placeholder="e.g., postgres-to-kafka"
-							value={pipelineId}
-							onChange={(e) => setPipelineId(e.target.value)}
-							className="max-w-md"
-						/>
+					<Input
+						placeholder="e.g., postgres-to-kafka"
+						value={pipelineId}
+						onChange={(e) => {
+							setPipelineId(e.target.value);
+							if (validationErrors.pipelineId) {
+								setValidationErrors((prev) => ({ ...prev, pipelineId: "" }));
+							}
+						}}
+						className="max-w-md"
+					/>
+					{validationErrors.pipelineId && (
+						<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+							<AlertCircle className="h-3 w-3" />
+							{validationErrors.pipelineId}
+						</p>
+					)}
 					</CardContent>
 				</Card>
 
@@ -206,9 +220,10 @@ function CreatePipelinePage() {
 										className="flex items-start gap-3 rounded-lg border p-4 cursor-pointer hover:bg-muted/50 transition-colors"
 									>
 										<input
-											type="checkbox"
-											checked={selectedSources.has(source.id)}
-											onChange={() => handleToggleSource(source.id)}
+											type="radio"
+											name="source"
+											checked={selectedSource === source.id}
+											onChange={() => handleSelectSource(source.id)}
 											className="mt-1 h-4 w-4"
 										/>
 										<div className="flex-1">
@@ -221,6 +236,12 @@ function CreatePipelinePage() {
 									</label>
 								))}
 							</div>
+						)}
+						{validationErrors.source && (
+							<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+								<AlertCircle className="h-3 w-3" />
+								{validationErrors.source}
+							</p>
 						)}
 					</CardContent>
 				</Card>
@@ -253,9 +274,10 @@ function CreatePipelinePage() {
 										className="flex items-start gap-3 rounded-lg border p-4 cursor-pointer hover:bg-muted/50 transition-colors"
 									>
 										<input
-											type="checkbox"
-											checked={selectedSinks.has(sink.id)}
-											onChange={() => handleToggleSink(sink.id)}
+											type="radio"
+											name="sink"
+											checked={selectedSink === sink.id}
+											onChange={() => handleSelectSink(sink.id)}
 											className="mt-1 h-4 w-4"
 										/>
 										<div className="flex-1">
@@ -269,6 +291,12 @@ function CreatePipelinePage() {
 								))}
 							</div>
 						)}
+						{validationErrors.sink && (
+							<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+								<AlertCircle className="h-3 w-3" />
+								{validationErrors.sink}
+							</p>
+						)}
 					</CardContent>
 				</Card>
 
@@ -277,13 +305,13 @@ function CreatePipelinePage() {
 					<CardHeader>
 						<CardTitle>Select Tables</CardTitle>
 						<CardDescription>
-							{selectedSourceId
+							{selectedSource
 								? "Choose which tables to sync from the selected source."
 								: "Select a source first to see available tables."}
 						</CardDescription>
 					</CardHeader>
 					<CardContent>
-						{!selectedSourceId ? (
+						{!selectedSource ? (
 							<p className="text-center text-muted-foreground py-8">
 								Select a source to view available tables.
 							</p>
@@ -327,12 +355,33 @@ function CreatePipelinePage() {
 											Clear all
 										</Button>
 									</div>
-								)}
-							</div>
-						)}
-					</CardContent>
-				</Card>
-			</div>
+							)}
+							{validationErrors.tables && (
+								<p className="text-sm text-destructive mt-2 flex items-center gap-1">
+									<AlertCircle className="h-3 w-3" />
+									{validationErrors.tables}
+								</p>
+							)}
+						</div>
+					)}
+				</CardContent>
+			</Card>
+		</div>
+
+			{/* Mutation Error */}
+			{createMutation.error && (
+				<div className="mt-6 rounded-lg border border-destructive bg-destructive/10 p-4">
+					<div className="flex items-center gap-2 text-destructive">
+						<AlertCircle className="h-5 w-5" />
+						<p className="font-medium">Failed to create pipeline</p>
+					</div>
+					<p className="text-sm text-destructive/80 mt-1">
+						{createMutation.error instanceof Error
+							? createMutation.error.message
+							: "An unexpected error occurred"}
+					</p>
+				</div>
+			)}
 
 			{/* Actions */}
 			<div className="mt-8 flex items-center justify-end gap-4">

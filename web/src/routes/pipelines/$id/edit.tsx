@@ -17,8 +17,8 @@ export const Route = createFileRoute("/pipelines/$id/edit")({
 	component: EditPipelinePage,
 });
 
-// Convert pipeline config to YAML-like format
-function pipelineToYaml(pipeline: Pipeline): string {
+// Convert pipeline config to JSON format
+function pipelineToJson(pipeline: Pipeline): string {
 	const config = {
 		id: pipeline.id,
 		name: pipeline.name,
@@ -59,18 +59,18 @@ function pipelineToYaml(pipeline: Pipeline): string {
 		},
 	};
 
-	return `# Pipeline Configuration
-# Edit the configuration below and click Save to apply changes
+	return `// Pipeline Configuration
+// Edit the configuration below and click Save to apply changes
 
 ${JSON.stringify(config, null, 2)}
 `;
 }
 
-// Parse YAML-like content back to update request
-function yamlToUpdateRequest(yamlContent: string): Record<string, unknown> {
+// Parse JSON content back to update request
+function jsonToUpdateRequest(jsonContent: string): Record<string, unknown> {
 	try {
 		// Remove comments and parse JSON
-		const cleanedContent = yamlContent
+		const cleanedContent = jsonContent
 			.split("\n")
 			.filter((line) => !line.trim().startsWith("#"))
 			.join("\n");
@@ -86,7 +86,7 @@ function yamlToUpdateRequest(yamlContent: string): Record<string, unknown> {
 			processorConfig: parsed.processorConfig,
 		};
 	} catch {
-		throw new Error("Invalid configuration format. Please ensure valid JSON/YAML syntax.");
+		throw new Error("Invalid configuration format. Please ensure valid JSON syntax.");
 	}
 }
 
@@ -106,7 +106,7 @@ function EditPipelinePage() {
 
 	const updateMutation = useMutation({
 		mutationFn: (config: string) => {
-			const updateData = yamlToUpdateRequest(config);
+			const updateData = jsonToUpdateRequest(config);
 			return pipelinesApi.update(id, updateData);
 		},
 		onSuccess: () => {
@@ -150,7 +150,7 @@ function EditPipelinePage() {
 		);
 	}
 
-	const initialValue = pipelineToYaml(pipeline);
+	const initialValue = pipelineToJson(pipeline);
 
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
@@ -204,8 +204,7 @@ function EditPipelinePage() {
 				</CardHeader>
 				<CardContent className="space-y-2 text-sm text-muted-foreground">
 					<ul className="list-disc list-inside space-y-1">
-						<li>Use spaces (not tabs) for indentation</li>
-						<li>Ensure JSON syntax is valid before saving</li>
+					<li>Ensure JSON syntax is valid before saving</li>
 						<li>Connection passwords are not shown for security reasons</li>
 						<li>Changes to the pipeline ID are not allowed</li>
 						<li>Use the Reset button to discard changes</li>
