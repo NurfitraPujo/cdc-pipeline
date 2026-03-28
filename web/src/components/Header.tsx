@@ -1,7 +1,11 @@
 import { Link } from '@tanstack/react-router'
+import { LogOut } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
+import { useAuthStore } from '@/stores/authStore'
 
 export default function Header() {
+  const { isAuthenticated, logout } = useAuthStore()
+
   return (
     <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-bg)] px-4 backdrop-blur-lg">
       <nav className="page-wrap flex flex-wrap items-center gap-x-3 gap-y-2 py-3 sm:py-4">
@@ -46,6 +50,18 @@ export default function Header() {
           </a>
 
           <ThemeToggle />
+
+          {isAuthenticated && (
+            <button
+              type="button"
+              onClick={logout}
+              className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium text-[var(--sea-ink-soft)] transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
+              title="Logout"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
+          )}
         </div>
 
         <div className="order-3 flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-1 text-sm font-semibold sm:order-2 sm:w-auto sm:flex-nowrap sm:pb-0">

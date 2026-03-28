@@ -9,6 +9,7 @@ import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
 import Header from '../components/Header'
+import Sidebar from '../components/layout/Sidebar'
 
 import TanStackQueryProvider from '../integrations/tanstack-query/root-provider'
 
@@ -97,11 +98,16 @@ function RootDocument({ children }: { children: React.ReactNode }) {
 function RootLayout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const isLoginPage = location.pathname === '/login'
+  const { isAuthenticated } = useAuthStore()
+  const showSidebar = !isLoginPage && isAuthenticated
 
   return (
     <>
       {!isLoginPage && <Header />}
-      {children}
+      {showSidebar && <Sidebar />}
+      <main className={showSidebar ? 'pl-64' : ''}>
+        {children}
+      </main>
       {!isLoginPage && <Footer />}
     </>
   )
