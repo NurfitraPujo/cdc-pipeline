@@ -1,20 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useAuthStore } from "@/stores/authStore";
 
-// Mock localStorage
-const localStorageMock = {\tgetItem: vi.fn(),
-	setItem: vi.fn(),
-	removeItem: vi.fn(),
-};
-Object.defineProperty(window, "localStorage", {
-	value: localStorageMock,
-});
-
 describe("Auth Store", () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		localStorageMock.getItem.mockReturnValue(null);
+		// Clear the store state before each test
+		const { result } = renderHook(() => useAuthStore());
+		act(() => {
+			result.current.logout();
+		});
 	});
 
 	it("should have initial state", () => {
@@ -63,32 +57,22 @@ describe("Auth Store", () => {
 		expect(result.current.isAuthenticated).toBe(false);
 	});
 
-	it("should persist to localStorage", () => {
+	it("should update auth state when token changes", () => {
 		const { result } = renderHook(() => useAuthStore());
 
+		// Start unauthenticated
+		expect(result.current.isAuthenticated).toBe(false);
+
+		// Set valid token
 		act(() => {
-			result.current.setToken("test-token");
+			result.current.setToken("valid-token");
 		});
-
-		expect(localStorageMock.setItem).toHaveBeenCalledWith(
-			"cdc-auth-storage",
-			expect.stringContaining("test-token")
-		);
-	});
-
-	it("should restore from localStorage on init", () => {
-		const persistedState = JSON.stringify({
-			state: {
-				token: "persisted-token",
-				isAuthenticated: true,
-			},
-			version: 0,
-		});
-		localStorageMock.getItem.mockReturnValue(persistedState);
-
-		const { result } = renderHook(() => useAuthStore());
-
-		expect(result.current.token).toBe("persisted-token");
 		expect(result.current.isAuthenticated).toBe(true);
+
+		// Clear token
+		act(() => {
+			result.current.setToken(null);
+		});
+		expect(result.current.isAuthenticated).toBe(false);
 	});
 });

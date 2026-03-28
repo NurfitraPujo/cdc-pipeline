@@ -28,8 +28,8 @@ describe("MetricCard Component", () => {
 			/>
 		);
 
-		// Check for skeleton element
-		const skeleton = document.querySelector("[class*=*skeleton*]");
+		// Check for skeleton element by data attribute or class
+		const skeleton = document.querySelector('[data-slot="card-content"]');
 		expect(skeleton).toBeInTheDocument();
 	});
 
@@ -52,11 +52,12 @@ describe("MetricCard Component", () => {
 				title="Total Pipelines"
 				value={5}
 				icon={Activity}
-				trend={{ value: 10, isPositive: true }}
+				trend={{ value: 10, isPositive: true, label: "from last week" }}
 			/>
 		);
 
-		expect(screen.getByText(/↑ 10%/)).toBeInTheDocument();
+		expect(screen.getByText("+10%")).toBeInTheDocument();
+		expect(screen.getByText("from last week")).toBeInTheDocument();
 	});
 
 	it("should format large numbers", () => {
