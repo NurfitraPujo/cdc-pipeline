@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom";
 import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
+import { useAuthStore } from "@/stores/authStore";
 import { server } from "./mocks/server";
 
 // Mock matchMedia
@@ -49,6 +50,9 @@ afterEach(() => {
 	server.resetHandlers();
 	cleanup();
 	vi.clearAllMocks();
+
+	// Reset auth store to unauthenticated state
+	useAuthStore.setState({ token: null, isAuthenticated: false });
 });
 
 // Close server after all tests
