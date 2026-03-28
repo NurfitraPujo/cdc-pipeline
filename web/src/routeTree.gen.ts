@@ -14,10 +14,12 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as PipelinesIndexRouteImport } from './routes/pipelines/index'
+import { Route as PipelinesCreateRouteImport } from './routes/pipelines/create'
 import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
 import { Route as DemoTableRouteImport } from './routes/demo/table'
 import { Route as DemoStoreRouteImport } from './routes/demo/store'
 import { Route as PipelinesIdIndexRouteImport } from './routes/pipelines/$id/index'
+import { Route as PipelinesIdEditRouteImport } from './routes/pipelines/$id/edit'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -44,6 +46,11 @@ const PipelinesIndexRoute = PipelinesIndexRouteImport.update({
   path: '/pipelines/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PipelinesCreateRoute = PipelinesCreateRouteImport.update({
+  id: '/pipelines/create',
+  path: '/pipelines/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DemoTanstackQueryRoute = DemoTanstackQueryRouteImport.update({
   id: '/demo/tanstack-query',
   path: '/demo/tanstack-query',
@@ -64,6 +71,11 @@ const PipelinesIdIndexRoute = PipelinesIdIndexRouteImport.update({
   path: '/pipelines/$id/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PipelinesIdEditRoute = PipelinesIdEditRouteImport.update({
+  id: '/pipelines/$id/edit',
+  path: '/pipelines/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -73,7 +85,9 @@ export interface FileRoutesByFullPath {
   '/demo/store': typeof DemoStoreRoute
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/pipelines/create': typeof PipelinesCreateRoute
   '/pipelines/': typeof PipelinesIndexRoute
+  '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/pipelines/$id/': typeof PipelinesIdIndexRoute
 }
 export interface FileRoutesByTo {
@@ -84,7 +98,9 @@ export interface FileRoutesByTo {
   '/demo/store': typeof DemoStoreRoute
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/pipelines/create': typeof PipelinesCreateRoute
   '/pipelines': typeof PipelinesIndexRoute
+  '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/pipelines/$id': typeof PipelinesIdIndexRoute
 }
 export interface FileRoutesById {
@@ -96,7 +112,9 @@ export interface FileRoutesById {
   '/demo/store': typeof DemoStoreRoute
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/pipelines/create': typeof PipelinesCreateRoute
   '/pipelines/': typeof PipelinesIndexRoute
+  '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/pipelines/$id/': typeof PipelinesIdIndexRoute
 }
 export interface FileRouteTypes {
@@ -109,7 +127,9 @@ export interface FileRouteTypes {
     | '/demo/store'
     | '/demo/table'
     | '/demo/tanstack-query'
+    | '/pipelines/create'
     | '/pipelines/'
+    | '/pipelines/$id/edit'
     | '/pipelines/$id/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -120,7 +140,9 @@ export interface FileRouteTypes {
     | '/demo/store'
     | '/demo/table'
     | '/demo/tanstack-query'
+    | '/pipelines/create'
     | '/pipelines'
+    | '/pipelines/$id/edit'
     | '/pipelines/$id'
   id:
     | '__root__'
@@ -131,7 +153,9 @@ export interface FileRouteTypes {
     | '/demo/store'
     | '/demo/table'
     | '/demo/tanstack-query'
+    | '/pipelines/create'
     | '/pipelines/'
+    | '/pipelines/$id/edit'
     | '/pipelines/$id/'
   fileRoutesById: FileRoutesById
 }
@@ -143,7 +167,9 @@ export interface RootRouteChildren {
   DemoStoreRoute: typeof DemoStoreRoute
   DemoTableRoute: typeof DemoTableRoute
   DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
+  PipelinesCreateRoute: typeof PipelinesCreateRoute
   PipelinesIndexRoute: typeof PipelinesIndexRoute
+  PipelinesIdEditRoute: typeof PipelinesIdEditRoute
   PipelinesIdIndexRoute: typeof PipelinesIdIndexRoute
 }
 
@@ -184,6 +210,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PipelinesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/pipelines/create': {
+      id: '/pipelines/create'
+      path: '/pipelines/create'
+      fullPath: '/pipelines/create'
+      preLoaderRoute: typeof PipelinesCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/demo/tanstack-query': {
       id: '/demo/tanstack-query'
       path: '/demo/tanstack-query'
@@ -212,6 +245,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PipelinesIdIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/pipelines/$id/edit': {
+      id: '/pipelines/$id/edit'
+      path: '/pipelines/$id/edit'
+      fullPath: '/pipelines/$id/edit'
+      preLoaderRoute: typeof PipelinesIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -223,7 +263,9 @@ const rootRouteChildren: RootRouteChildren = {
   DemoStoreRoute: DemoStoreRoute,
   DemoTableRoute: DemoTableRoute,
   DemoTanstackQueryRoute: DemoTanstackQueryRoute,
+  PipelinesCreateRoute: PipelinesCreateRoute,
   PipelinesIndexRoute: PipelinesIndexRoute,
+  PipelinesIdEditRoute: PipelinesIdEditRoute,
   PipelinesIdIndexRoute: PipelinesIdIndexRoute,
 }
 export const routeTree = rootRouteImport
