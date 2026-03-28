@@ -3,7 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import {
 	createRootRouteWithContext,
 	HeadContent,
-	Navigate,
+	redirect,
 	Scripts,
 	useLocation,
 } from "@tanstack/react-router";
@@ -50,11 +50,11 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 		const isLoginPage = location.pathname === "/login";
 
 		if (!isAuthenticated && !isLoginPage) {
-			throw Navigate({ to: "/login" });
+			throw redirect({ to: "/login" });
 		}
 
 		if (isAuthenticated && isLoginPage) {
-			throw Navigate({ to: "/dashboard" });
+			throw redirect({ to: "/dashboard" });
 		}
 	},
 	shellComponent: RootDocument,
