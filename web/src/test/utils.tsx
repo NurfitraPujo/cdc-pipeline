@@ -2,8 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
 import type { RenderOptions } from "@testing-library/react";
-import { type ReactElement, ReactNode } from "react";
+import { type ReactElement, type ReactNode } from "react";
 import { routeTree } from "../routeTree.gen";
+import { useAuthStore } from "@/stores/authStore";
 
 // Create a test query client
 export function createTestQueryClient() {
@@ -50,16 +51,35 @@ export function renderWithProviders(
 	});
 }
 
+interface RenderWithRouterOptions {
+	queryClient?: QueryClient;
+	authenticated?: boolean;
+}
+
 // Helper to render with router
 export function renderWithRouter(
 	initialUrl: string = "/",
-	options: { queryClient?: QueryClient } = {}
+	options: RenderWithRouterOptions = {}
 ) {
-	const queryClient = options.queryClient ?? createTestQueryClient();
+	const { queryClient, authenticated = false } = options;
+	const testQueryClient = queryClient ?? createTestQueryClient();
+
+	// Set auth state before creating router
+	if (authenticated) {
+		useAuthStore.setState({
+			token: "test-auth-token",
+			isAuthenticated: true,
+		});
+	} else {
+		useAuthStore.setState({
+			token: null,
+			isAuthenticated: false,
+		});
+	}
 
 	const router = createRouter({
 		routeTree,
-		context: { queryClient },
+		context: { queryClient: testQueryClient },
 	});
 
 	// Navigate to initial URL
@@ -67,12 +87,12 @@ export function renderWithRouter(
 
 	return {
 		...render(
-			<QueryClientProvider client={queryClient}>
+			<QueryClientProvider client={testQueryClient}>
 				<RouterProvider router={router} />
 			</QueryClientProvider>
 		),
 		router,
-		queryClient,
+		queryClient: testQueryClient,
 	};
 }
 
