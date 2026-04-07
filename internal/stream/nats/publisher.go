@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	go_nats "github.com/nats-io/nats.go"
@@ -23,7 +24,7 @@ func NewNatsPublisher(url string) (*NatsPublisher, error) {
 				go_nats.Name("cdc-data-pipeline-publisher"),
 			},
 		},
-		nil, // Logger
+		logger.NewWatermillLogger(),
 	)
 	if err != nil {
 		return nil, err

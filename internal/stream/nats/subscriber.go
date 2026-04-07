@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	go_nats "github.com/nats-io/nats.go"
@@ -35,7 +36,7 @@ func NewNatsSubscriber(url string, queueGroupPrefix string, maxAckPending int, a
 				go_nats.Name("cdc-data-pipeline-subscriber"),
 			},
 		},
-		nil, // Logger
+		logger.NewWatermillLogger(),
 	)
 	if err != nil {
 		return nil, err

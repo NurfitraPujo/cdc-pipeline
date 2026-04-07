@@ -44,9 +44,10 @@ func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Sour
 
 			// Prometheus
 			stateVal := 0.0 // Closed
-			if to == gobreaker.StateOpen {
+			switch to {
+			case gobreaker.StateOpen:
 				stateVal = 1.0
-			} else if to == gobreaker.StateHalfOpen {
+			case gobreaker.StateHalfOpen:
 				stateVal = 2.0
 			}
 			metrics.CircuitBreakerState.WithLabelValues(pipelineID).Set(stateVal)

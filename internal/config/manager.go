@@ -26,14 +26,21 @@ type ConfigManager struct {
 }
 
 func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
+	cfg := protocol.GlobalConfig{
+		BatchSize:          1000,
+		BatchWait:          5 * time.Second,
+		DrainTimeout:       30 * time.Second,
+		ShutdownTimeout:    30 * time.Second,
+		StabilizationDelay: 2 * time.Second,
+		CrashRecoveryDelay: 5 * time.Second,
+		GlobalReloadDelay:  2 * time.Second,
+	}
+	cfg.SetDefaults()
 	return &ConfigManager{
-		kv:      kv,
-		factory: factory,
-		workers: make(map[string]engine.PipelineWorker),
-		globalConfig: protocol.GlobalConfig{
-			BatchSize: 1000,
-			BatchWait: 5 * time.Second,
-		},
+		kv:           kv,
+		factory:      factory,
+		workers:      make(map[string]engine.PipelineWorker),
+		globalConfig: cfg,
 	}
 }
 
@@ -41,11 +48,21 @@ func (m *ConfigManager) GetKV() nats.KeyValue {
 	return m.kv
 }
 
+// getGlobalConfig returns a copy of the current global config with defaults applied
+func (m *ConfigManager) getGlobalConfig() protocol.GlobalConfig {
+	m.globalConfigMu.RLock()
+	defer m.globalConfigMu.RUnlock()
+	cfg := m.globalConfig
+	cfg.SetDefaults()
+	return cfg
+}
+
 func (m *ConfigManager) Watch(ctx context.Context) error {
 	// 1. Prime Global Config (Get latest if it exists)
 	if entry, err := m.kv.Get(protocol.KeyGlobalConfig); err == nil {
 		var cfg protocol.GlobalConfig
 		if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+			cfg.SetDefaults()
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
@@ -86,12 +103,13 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 				log.Error().Err(err).Msg("Error unmarshaling global config")
 				continue
 			}
+			cfg.SetDefaults()
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
 
 			// Trigger reload for all active workers to apply new global defaults
-			time.Sleep(2 * time.Second)
+			time.Sleep(cfg.GlobalReloadDelay)
 			m.reloadAllWorkers(ctx)
 		}
 	}
@@ -203,8 +221,10 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 
 	if exists {
 		log.Info().Str("pipeline_id", id).Msg("Initiating two-phase transition")
+		// Capture timeout values at start of transition
+		timeouts := m.getGlobalConfig()
 		// #nosec G118 -- Intentional background transition
-		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig) {
+		go func(w engine.PipelineWorker, newCfg protocol.PipelineConfig, drainTimeout, shutdownTimeout, stabilizationDelay time.Duration) {
 			// Ensure cleanup of transition state if this goroutine exits for any reason
 			defer func() {
 				if err := m.kv.Delete(protocol.TransitionStateKey(id)); err != nil {
@@ -219,12 +239,12 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			select {
 			case <-w.Finished():
 				log.Info().Str("pipeline_id", id).Msg("Transition Phase 1 Complete: Worker drained")
-			case <-time.After(30 * time.Second):
+			case <-time.After(drainTimeout):
 				log.Warn().Str("pipeline_id", id).Msg("Drain timed out, forcing shutdown")
 			}
 
 			log.Info().Str("pipeline_id", id).Msg("Transition Phase 2: Shutting down worker")
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
 			if err := w.Shutdown(shutdownCtx); err != nil {
 				log.Error().Err(err).Str("pipeline_id", id).Msg("Error shutting down worker")
@@ -235,11 +255,11 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(2 * time.Second):
+			case <-time.After(stabilizationDelay):
 			}
 
 			m.startNewWorker(ctx, id, newCfg)
-		}(oldWorker, cfg)
+		}(oldWorker, cfg, timeouts.DrainTimeout, timeouts.ShutdownTimeout, timeouts.StabilizationDelay)
 	} else {
 		log.Info().Str("pipeline_id", id).Msg("Starting initial worker")
 		m.startNewWorker(ctx, id, cfg)
@@ -260,7 +280,9 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	log.Info().Str("pipeline_id", id).Msg("Successfully started new worker")
 
 	// --- SUPERVISOR GOROUTINE ---
-	go func(worker engine.PipelineWorker, pid string) {
+	// Capture crash recovery delay at start
+	crashRecoveryDelay := m.getGlobalConfig().CrashRecoveryDelay
+	go func(worker engine.PipelineWorker, pid string, recoveryDelay time.Duration) {
 		<-worker.Finished()
 
 		// When worker finishes, check if it was intentional (Transitioning)
@@ -270,7 +292,7 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(recoveryDelay):
 				log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
 				// Re-fetch latest config and restart.
 				// Note: startNewWorker will spawn a NEW supervisor for the next instance.
@@ -288,7 +310,7 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 				m.startNewWorker(ctx, pid, latestCfg)
 			}
 		}
-	}(newWorker, id)
+	}(newWorker, id, crashRecoveryDelay)
 }
 
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
@@ -313,10 +335,12 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 		if err := w.Drain(); err != nil {
 			log.Error().Err(err).Str("pipeline_id", id).Msg("Error draining worker during stop")
 		}
+		// Capture shutdown timeout
+		shutdownTimeout := m.getGlobalConfig().ShutdownTimeout
 		// #nosec G118 -- Intentional background cleanup
-		go func(worker engine.PipelineWorker, pid string) {
+		go func(worker engine.PipelineWorker, pid string, timeout time.Duration) {
 			<-worker.Finished()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			if err := worker.Shutdown(shutdownCtx); err != nil {
 				log.Error().Err(err).Str("pipeline_id", pid).Msg("Error shutting down worker during stop")
@@ -324,7 +348,7 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 			if err := m.kv.Delete(protocol.TransitionStateKey(pid)); err != nil {
 				log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to clear transition state after stop")
 			}
-		}(w, id)
+		}(w, id, shutdownTimeout)
 	}
 }
 
