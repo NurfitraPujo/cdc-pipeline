@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
@@ -41,7 +41,7 @@ func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Sour
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			log.Info().Str("breaker", name).Str("from", from.String()).Str("to", to.String()).Msg("Circuit Breaker changed state")
-			
+
 			// Prometheus
 			stateVal := 0.0 // Closed
 			if to == gobreaker.StateOpen {
@@ -54,12 +54,12 @@ func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Sour
 	}
 
 	return &Producer{
-		pipelineID:   pipelineID,
-		config:       cfg,
-		source:       src,
-		publisher:    pub,
-		kv:           kv,
-		cb:           gobreaker.NewCircuitBreaker(settings),
+		pipelineID: pipelineID,
+		config:     cfg,
+		source:     src,
+		publisher:  pub,
+		kv:         kv,
+		cb:         gobreaker.NewCircuitBreaker(settings),
 	}
 }
 
@@ -75,6 +75,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	}
 
 	var lastLSN uint64
+	maxPublishRetries := 10
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,16 +87,18 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					Timestamp: time.Now(),
 				}
 				batch := protocol.MessageBatch{marker}
-				payload, _ := batch.MarshalMsg(nil)
+				payload, err := batch.MarshalMsg(nil)
+				if err != nil {
+					return lastLSN, fmt.Errorf("failed to marshal drain marker: %w", err)
+				}
 				topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
 				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
 				if err := p.publisher.Publish(topic, wmMsg); err != nil {
-					log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error sending drain marker")
+					return lastLSN, fmt.Errorf("failed to publish drain marker: %w", err)
 				}
 				return lastLSN, nil
 			}
 
-		retryPublish:
 			// 1. Process Discovery
 			for _, m := range msgs {
 				if m.Op == "schema_change" && m.Schema != nil {
@@ -106,25 +109,31 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				}
 			}
 
-			// Wrap NATS publishing in a circuit breaker
-			_, err := p.cb.Execute(func() (interface{}, error) {
-				batch := protocol.MessageBatch(msgs)
-				payload, err := batch.MarshalMsg(nil)
-				if err != nil {
-					return nil, err
+			// Wrap NATS publishing in a circuit breaker with retry limit
+			var publishErr error
+			for attempt := 0; attempt < maxPublishRetries; attempt++ {
+				_, publishErr = p.cb.Execute(func() (interface{}, error) {
+					batch := protocol.MessageBatch(msgs)
+					payload, err := batch.MarshalMsg(nil)
+					if err != nil {
+						return nil, err
+					}
+
+					topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
+					wmMsg := message.NewMessage(watermill.NewUUID(), payload)
+
+					if err := p.publisher.Publish(topic, wmMsg); err != nil {
+						return nil, err
+					}
+					return nil, nil
+				})
+
+				if publishErr == nil {
+					break
 				}
 
-				topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
-				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
-				
-				if err := p.publisher.Publish(topic, wmMsg); err != nil {
-					return nil, err
-				}
-				return nil, nil
-			})
-
-			if err != nil {
-				if len(msgs) > 0 {
+				// Update circuit breaker status on first failure
+				if attempt == 0 && len(msgs) > 0 {
 					m := msgs[0]
 					stKey := protocol.TableStatsKey(p.pipelineID, m.SourceID, m.Table)
 					if entry, err := p.kv.Get(stKey); err == nil {
@@ -143,10 +152,14 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 
 				select {
 				case <-time.After(2 * time.Second):
-					goto retryPublish
+					// Continue to next retry
 				case <-ctx.Done():
 					return lastLSN, ctx.Err()
 				}
+			}
+
+			if publishErr != nil {
+				return lastLSN, fmt.Errorf("failed to publish after %d attempts: %w", maxPublishRetries, publishErr)
 			}
 
 			// Success! Update checkpoints
@@ -163,7 +176,11 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						Status:     "ACTIVE",
 						UpdatedAt:  time.Now(),
 					}
-					cpData, _ := cp.MarshalMsg(nil)
+					cpData, err := cp.MarshalMsg(nil)
+					if err != nil {
+						log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error marshaling checkpoint")
+						continue
+					}
 					key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
 					if _, err := p.kv.Put(key, cpData); err != nil {
 						log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating ingress checkpoint")
@@ -193,9 +210,11 @@ func (p *Producer) handleDiscovery(m protocol.Message) {
 	if isNew {
 		log.Info().Str("pipeline_id", p.pipelineID).Str("schema", m.Schema.Schema).Str("table", m.Schema.Table).Msg("New table discovered via CDC")
 		p.config.Tables = append(p.config.Tables, m.Schema.Table)
-		
-		data, _ := json.Marshal(p.config)
-		if _, err := p.kv.Put(protocol.PipelineConfigKey(p.pipelineID), data); err != nil {
+
+		data, err := json.Marshal(p.config)
+		if err != nil {
+			log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error marshaling pipeline config for discovery")
+		} else if _, err := p.kv.Put(protocol.PipelineConfigKey(p.pipelineID), data); err != nil {
 			log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating pipeline config for discovery")
 		}
 	}

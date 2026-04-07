@@ -192,7 +192,11 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 		Status:    "Transitioning",
 		StartedAt: time.Now(),
 	}
-	tsData, _ := json.Marshal(ts)
+	tsData, err := json.Marshal(ts)
+	if err != nil {
+		log.Error().Err(err).Str("pipeline_id", id).Msg("Failed to marshal transition state")
+		return
+	}
 	if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
 		log.Warn().Err(err).Str("pipeline_id", id).Msg("Failed to set transition state")
 	}
@@ -258,7 +262,7 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	// --- SUPERVISOR GOROUTINE ---
 	go func(worker engine.PipelineWorker, pid string) {
 		<-worker.Finished()
-		
+
 		// When worker finishes, check if it was intentional (Transitioning)
 		_, err := m.kv.Get(protocol.TransitionStateKey(pid))
 		if err == nats.ErrKeyNotFound {
@@ -268,7 +272,7 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 				return
 			case <-time.After(5 * time.Second):
 				log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
-				// Re-fetch latest config and restart. 
+				// Re-fetch latest config and restart.
 				// Note: startNewWorker will spawn a NEW supervisor for the next instance.
 				entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
 				if err != nil {
@@ -299,8 +303,10 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 		log.Info().Str("pipeline_id", id).Msg("Stopping pipeline")
 		// Mark as "Transitioning" so supervisor doesn't restart it
 		ts := protocol.PipelineTransitionState{ID: id, Status: "Stopping", StartedAt: time.Now()}
-		tsData, _ := json.Marshal(ts)
-		if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
+		tsData, err := json.Marshal(ts)
+		if err != nil {
+			log.Error().Err(err).Str("pipeline_id", id).Msg("Failed to marshal transition state for stop")
+		} else if _, err := m.kv.Put(protocol.TransitionStateKey(id), tsData); err != nil {
 			log.Warn().Err(err).Str("pipeline_id", id).Msg("Failed to set transition state for stop")
 		}
 
@@ -338,7 +344,7 @@ func (m *ConfigManager) Stop(ctx context.Context) {
 			m.stopWorker(ctx, pid)
 		}(id)
 	}
-	
+
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
