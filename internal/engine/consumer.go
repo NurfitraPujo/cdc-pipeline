@@ -17,20 +17,23 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const retryCleanupInterval = 5 * time.Minute
+
 type Consumer struct {
-	pipelineID   string
-	subscriber   stream.Subscriber
-	publisher    stream.Publisher // for DLQ
-	sink         sink.Sink
-	transformers []transformer.Transformer
-	kv           nats.KeyValue
-	batchSize    int
-	batchWait    time.Duration
-	retryConfig  protocol.RetryConfig
-	retries      map[string]retryEntry // UUID -> retry info with timestamp
-	retryMu      sync.Mutex
-	stats        map[string]*protocol.TableStats
-	statsMu      sync.Mutex
+	pipelineID      string
+	subscriber      stream.Subscriber
+	publisher       stream.Publisher // for DLQ
+	sink            sink.Sink
+	transformers    []transformer.Transformer
+	kv              nats.KeyValue
+	batchSize       int
+	batchWait       time.Duration
+	retryConfig     protocol.RetryConfig
+	retries         map[string]retryEntry // UUID -> retry info with timestamp
+	retryMu         sync.Mutex
+	stats           map[string]*protocol.TableStats
+	statsMu         sync.Mutex
+	lastCleanupTime time.Time
 
 	// Drain control
 	mu         sync.RWMutex
@@ -45,17 +48,18 @@ type retryEntry struct {
 
 func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
 	return &Consumer{
-		pipelineID:   pipelineID,
-		subscriber:   sub,
-		publisher:    pub,
-		sink:         snk,
-		transformers: transformers,
-		kv:           kv,
-		batchSize:    batchSize,
-		batchWait:    batchWait,
-		retryConfig:  retry,
-		retries:      make(map[string]retryEntry),
-		stats:        make(map[string]*protocol.TableStats),
+		pipelineID:      pipelineID,
+		subscriber:      sub,
+		publisher:       pub,
+		sink:            snk,
+		transformers:    transformers,
+		kv:              kv,
+		batchSize:       batchSize,
+		batchWait:       batchWait,
+		retryConfig:     retry,
+		retries:         make(map[string]retryEntry),
+		stats:           make(map[string]*protocol.TableStats),
+		lastCleanupTime: time.Now(),
 	}
 }
 
@@ -129,8 +133,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				delete(c.retries, m.UUID)
 				c.retryMu.Unlock()
 			}
-			// Cleanup old retry entries to prevent unbounded growth
-			c.cleanupOldRetries()
 			batch = nil
 			wmMsgs = nil
 			return nil
@@ -180,8 +182,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				c.isolatePoisonBatch(ctx, wmMsgs)
 				batch = nil
 				wmMsgs = nil
-				// Cleanup old retry entries
-				c.cleanupOldRetries()
 				return nil
 			}
 
@@ -291,6 +291,13 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 		// Stop current timer and create new one to avoid race conditions
 		timer.Stop()
 		timer = time.NewTimer(c.batchWait)
+
+		// Periodic cleanup of old retry entries (every 5 minutes)
+		if time.Since(c.lastCleanupTime) > retryCleanupInterval {
+			c.cleanupOldRetries()
+			c.lastCleanupTime = time.Now()
+		}
+
 		return nil
 	}
 
