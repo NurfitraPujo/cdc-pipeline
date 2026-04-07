@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
@@ -16,8 +16,8 @@ import (
 )
 
 type Handler struct {
-	kv  nats.KeyValue
-	sf  singleflight.Group
+	kv nats.KeyValue
+	sf singleflight.Group
 }
 
 func NewHandler(kv nats.KeyValue) *Handler {
@@ -108,7 +108,7 @@ func (h *Handler) UpdateGlobalConfig(c *gin.Context) {
 // @Router       /stats/summary [get]
 func (h *Handler) GetStatsSummary(c *gin.Context) {
 	entry, err := h.kv.Get(protocol.KeyGlobalSummary)
-	
+
 	// If entry exists and is "fresh" (< 30s), return it
 	if err == nil && time.Since(entry.Created()) < 30*time.Second {
 		var summary protocol.StatsSummary
@@ -230,7 +230,7 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 
 	search := strings.ToLower(c.Query("search"))
 	statusFilter := c.Query("status")
-	
+
 	page := 1
 	limit := 10
 	if p := c.Query("page"); p != "" {
@@ -239,8 +239,12 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	if l := c.Query("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
-	if page < 1 { page = 1 }
-	if limit < 1 { limit = 10 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
 
 	keys, err := h.kv.Keys()
 	if err != nil {
@@ -265,7 +269,7 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 				// Status filter (expensive but necessary if requested)
 				if statusFilter != "" {
 					actualStatus := "Healthy" // Default guess
-					
+
 					tsKey := protocol.TransitionStateKey(cfg.ID)
 					if tsEntry, err := h.kv.Get(tsKey); err == nil {
 						var ts protocol.PipelineTransitionState
@@ -304,7 +308,9 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	if start > total {
 		pipelines = []protocol.PipelineConfig{}
 	} else {
-		if end > total { end = total }
+		if end > total {
+			end = total
+		}
 		pipelines = pipelines[start:end]
 	}
 
@@ -588,7 +594,12 @@ func (h *Handler) ListSources(c *gin.Context) {
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
 				// Decrypt sensitive fields
 				if cfg.PassEncrypted != "" {
-					cfg.PassEncrypted, _ = crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
+					decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
+					if err != nil {
+						log.Warn().Err(err).Str("source_id", cfg.ID).Msg("Failed to decrypt password, returning encrypted value")
+					} else {
+						cfg.PassEncrypted = decrypted
+					}
 				}
 				sources = append(sources, cfg)
 			}
@@ -623,10 +634,19 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	// Encrypt sensitive fields
 	key := crypto.GetEncryptionKey()
 	if cfg.PassEncrypted != "" {
-		cfg.PassEncrypted, _ = crypto.Encrypt(cfg.PassEncrypted, key)
+		encrypted, err := crypto.Encrypt(cfg.PassEncrypted, key)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt password"})
+			return
+		}
+		cfg.PassEncrypted = encrypted
 	}
 
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
+		return
+	}
 	storageKey := protocol.SourceConfigKey(cfg.ID)
 	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -664,10 +684,19 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 	// Encrypt sensitive fields
 	key := crypto.GetEncryptionKey()
 	if cfg.PassEncrypted != "" {
-		cfg.PassEncrypted, _ = crypto.Encrypt(cfg.PassEncrypted, key)
+		encrypted, err := crypto.Encrypt(cfg.PassEncrypted, key)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt password"})
+			return
+		}
+		cfg.PassEncrypted = encrypted
 	}
 
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
+		return
+	}
 	storageKey := protocol.SourceConfigKey(id)
 	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -723,7 +752,12 @@ func (h *Handler) GetSource(c *gin.Context) {
 	// Decrypt sensitive fields
 	encryptionKey := crypto.GetEncryptionKey()
 	if cfg.PassEncrypted != "" {
-		cfg.PassEncrypted, _ = crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
+		decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
+		if err != nil {
+			log.Warn().Err(err).Str("source_id", cfg.ID).Msg("Failed to decrypt password, returning encrypted value")
+		} else {
+			cfg.PassEncrypted = decrypted
+		}
 	}
 
 	c.JSON(http.StatusOK, cfg)
@@ -744,9 +778,9 @@ func (h *Handler) GetSourceSchema(c *gin.Context) {
 	// For now, return what we have in metadata plus a mock of available schemas.
 	id := c.Param("id")
 	c.JSON(http.StatusOK, gin.H{
-		"source_id": id,
+		"source_id":         id,
 		"available_schemas": []string{"public", "inventory", "sales"},
-		"discovery_status": "ready",
+		"discovery_status":  "ready",
 	})
 }
 
@@ -813,7 +847,12 @@ func (h *Handler) ListSinks(c *gin.Context) {
 			var cfg protocol.SinkConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
 				if cfg.DSN != "" {
-					cfg.DSN, _ = crypto.Decrypt(cfg.DSN, encryptionKey)
+					decrypted, err := crypto.Decrypt(cfg.DSN, encryptionKey)
+					if err != nil {
+						log.Warn().Err(err).Str("sink_id", cfg.ID).Msg("Failed to decrypt DSN, returning encrypted value")
+					} else {
+						cfg.DSN = decrypted
+					}
 				}
 				sinks = append(sinks, cfg)
 			}
@@ -851,7 +890,12 @@ func (h *Handler) GetSink(c *gin.Context) {
 	// Decrypt sensitive fields
 	encryptionKey := crypto.GetEncryptionKey()
 	if cfg.DSN != "" {
-		cfg.DSN, _ = crypto.Decrypt(cfg.DSN, encryptionKey)
+		decrypted, err := crypto.Decrypt(cfg.DSN, encryptionKey)
+		if err != nil {
+			log.Warn().Err(err).Str("sink_id", cfg.ID).Msg("Failed to decrypt DSN, returning encrypted value")
+		} else {
+			cfg.DSN = decrypted
+		}
 	}
 
 	c.JSON(http.StatusOK, cfg)
@@ -882,10 +926,19 @@ func (h *Handler) CreateSink(c *gin.Context) {
 	// Encrypt sensitive fields
 	key := crypto.GetEncryptionKey()
 	if cfg.DSN != "" {
-		cfg.DSN, _ = crypto.Encrypt(cfg.DSN, key)
+		encrypted, err := crypto.Encrypt(cfg.DSN, key)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt DSN"})
+			return
+		}
+		cfg.DSN = encrypted
 	}
 
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
+		return
+	}
 	storageKey := protocol.SinkConfigKey(cfg.ID)
 	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -923,10 +976,19 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 	// Encrypt sensitive fields
 	key := crypto.GetEncryptionKey()
 	if cfg.DSN != "" {
-		cfg.DSN, _ = crypto.Encrypt(cfg.DSN, key)
+		encrypted, err := crypto.Encrypt(cfg.DSN, key)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt DSN"})
+			return
+		}
+		cfg.DSN = encrypted
 	}
 
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
+		return
+	}
 	storageKey := protocol.SinkConfigKey(id)
 	if _, err := h.kv.Put(storageKey, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -985,12 +1047,16 @@ func (h *Handler) GetWorkerHeartbeat(c *gin.Context) {
 
 func (h *Handler) cleanupStaleHeartbeats() {
 	keys, err := h.kv.Keys()
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 
 	for _, key := range keys {
 		if strings.HasPrefix(key, "cdc.worker.") && strings.HasSuffix(key, ".heartbeat") {
 			entry, err := h.kv.Get(key)
-			if err != nil { continue }
+			if err != nil {
+				continue
+			}
 
 			var hb protocol.WorkerHeartbeat
 			if err := json.Unmarshal(entry.Value(), &hb); err == nil {

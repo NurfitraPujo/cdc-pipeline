@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,9 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
-	"github.com/vmihailenco/msgpack/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog/log"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type PostgresSource struct {
@@ -50,11 +51,17 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	s.cancel = cancel
 
 	batchSize := srcConfig.BatchSize
-	if batchSize <= 0 { batchSize = 100 }
+	if batchSize <= 0 {
+		batchSize = 100
+	}
 	batchWait := srcConfig.BatchWait
-	if batchWait <= 0 { batchWait = 5 * time.Second }
+	if batchWait <= 0 {
+		batchWait = 5 * time.Second
+	}
 	discoveryInterval := srcConfig.DiscoveryInterval
-	if discoveryInterval <= 0 { discoveryInterval = 30 * time.Second }
+	if discoveryInterval <= 0 {
+		discoveryInterval = 30 * time.Second
+	}
 
 	var mu sync.Mutex
 	var msgs []protocol.Message
@@ -65,22 +72,34 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		defer close(flushReq) // dummy, but for completeness
 		for {
 			select {
-			case <-ctx.Done(): return
+			case <-ctx.Done():
+				return
 			case m := <-flushReq:
 				select {
 				case out <- m:
 					select {
 					case <-ack:
-					case <-ctx.Done(): return
+					case <-ctx.Done():
+						return
 					}
-				case <-ctx.Done(): return
+				case <-ctx.Done():
+					return
 				}
 			}
 		}
 	}()
 
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		srcConfig.User, srcConfig.PassEncrypted, srcConfig.Host, srcConfig.Port, srcConfig.Database)
+	// Build DSN using url.URL for proper escaping of special characters
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   fmt.Sprintf("%s:%d", srcConfig.Host, srcConfig.Port),
+		User:   url.UserPassword(srcConfig.User, srcConfig.PassEncrypted),
+		Path:   srcConfig.Database,
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+	dsn := u.String()
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		cancel()
@@ -93,7 +112,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	triggerFlush := func() {
 		mu.Lock()
-		if len(msgs) == 0 { mu.Unlock(); return }
+		if len(msgs) == 0 {
+			mu.Unlock()
+			return
+		}
 		mCopy := make([]protocol.Message, len(msgs))
 		copy(mCopy, msgs)
 		msgs = msgs[:0]
@@ -111,8 +133,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done(): return
-			case <-ticker.C: triggerFlush()
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				triggerFlush()
 			}
 		}
 	}()
@@ -127,7 +151,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 					SourceID: srcConfig.ID, Table: t, Op: "schema_change", Timestamp: time.Now(),
 					Schema: &protocol.SchemaMetadata{Table: t, Schema: "public", Columns: cols, PKColumns: pks},
 				}
-				mu.Lock(); msgs = append(msgs, m); mu.Unlock(); triggerFlush()
+				mu.Lock()
+				msgs = append(msgs, m)
+				mu.Unlock()
+				triggerFlush()
 			}
 		}
 
@@ -135,8 +162,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done(): return
-			case <-ticker.C: s.discoverTables(ctx, db, srcConfig, &mu, &msgs, knownTables, triggerFlush)
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.discoverTables(ctx, db, srcConfig, &mu, &msgs, knownTables, triggerFlush)
 			}
 		}
 	}()
@@ -168,35 +197,81 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Relation:
-			if strings.HasPrefix(msg.Name, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
-			if !s.isSchemaAllowed(msg.Namespace, srcConfig.Schemas) { mu.Unlock(); lc.Ack(); return }
+			if strings.HasPrefix(msg.Name, "cdc_snapshot_") {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			if !s.isSchemaAllowed(msg.Namespace, srcConfig.Schemas) {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			knownTables[msg.Namespace+"."+msg.Name] = true
 			cols := make(map[string]string)
-			for _, col := range msg.Columns { cols[col.Name] = s.resolveTypeName(col.DataType) }
+			for _, col := range msg.Columns {
+				cols[col.Name] = s.resolveTypeName(col.DataType)
+			}
 			m = protocol.Message{
 				SourceID: srcConfig.ID, Table: msg.Name, Op: "schema_change", Timestamp: time.Now(),
 				Schema: &protocol.SchemaMetadata{Table: msg.Name, Schema: msg.Namespace, Columns: cols},
 			}
 		case *format.Insert:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
+			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			payload, err := msgpack.Marshal(msg.Decoded)
-			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling insert"); mu.Unlock(); lc.Ack(); return }
+			if err != nil {
+				log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling insert")
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Data: msg.Decoded, Timestamp: msg.MessageTime}
 		case *format.Update:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
+			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			payload, err := msgpack.Marshal(msg.NewDecoded)
-			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling update"); mu.Unlock(); lc.Ack(); return }
+			if err != nil {
+				log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling update")
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Data: msg.NewDecoded, Timestamp: msg.MessageTime}
 		case *format.Delete:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
+			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			payload, err := msgpack.Marshal(msg.OldDecoded)
-			if err != nil { log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling delete"); mu.Unlock(); lc.Ack(); return }
+			if err != nil {
+				log.Error().Err(err).Str("table", msg.TableName).Msg("Error marshaling delete")
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Data: msg.OldDecoded, Timestamp: msg.MessageTime}
 		case *format.Snapshot:
-			if strings.HasPrefix(msg.Table, "cdc_snapshot_") { mu.Unlock(); lc.Ack(); return }
+			if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
 			if msg.EventType == format.SnapshotEventTypeData {
 				payload, err := msgpack.Marshal(msg.Data)
-				if err != nil { log.Error().Err(err).Str("table", msg.Table).Msg("Error marshaling snapshot"); mu.Unlock(); lc.Ack(); return }
+				if err != nil {
+					log.Error().Err(err).Str("table", msg.Table).Msg("Error marshaling snapshot")
+					mu.Unlock()
+					lc.Ack()
+					return
+				}
 				m = protocol.Message{SourceID: srcConfig.ID, Table: msg.Table, Op: "snapshot", LSN: uint64(msg.LSN), Payload: payload, Data: msg.Data, Timestamp: msg.ServerTime}
 			}
 		}
@@ -235,46 +310,71 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 func (s *PostgresSource) getTableMetadata(ctx context.Context, db *sql.DB, schema, table string) (map[string]string, []string, error) {
 	rows, err := db.QueryContext(ctx, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2", schema, table)
-	if err != nil { return nil, nil, err }
+	if err != nil {
+		return nil, nil, err
+	}
 	defer rows.Close()
 	cols := make(map[string]string)
 	for rows.Next() {
 		var name, dtype string
-		if err := rows.Scan(&name, &dtype); err == nil { cols[name] = dtype }
+		if err := rows.Scan(&name, &dtype); err == nil {
+			cols[name] = dtype
+		}
 	}
 	pkQuery := `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = ($1 || '.' || $2)::regclass AND i.indisprimary;`
 	rowsPk, err := db.QueryContext(ctx, pkQuery, schema, table)
-	if err != nil { return cols, []string{"id"}, nil }
+	if err != nil {
+		return cols, []string{"id"}, nil
+	}
 	defer rowsPk.Close()
 	var pks []string
 	for rowsPk.Next() {
 		var pk string
-		if err := rowsPk.Scan(&pk); err == nil { pks = append(pks, pk) }
+		if err := rowsPk.Scan(&pk); err == nil {
+			pks = append(pks, pk)
+		}
 	}
-	if len(pks) == 0 { pks = []string{"id"} }
+	if len(pks) == 0 {
+		pks = []string{"id"}
+	}
 	return cols, pks, nil
 }
 
 func (s *PostgresSource) isSchemaAllowed(namespace string, allowed []string) bool {
-	if len(allowed) == 0 { return true }
-	for _, a := range allowed { if a == namespace { return true } }
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		if a == namespace {
+			return true
+		}
+	}
 	return false
 }
 
 func (s *PostgresSource) resolveTypeName(oid uint32) string {
-	s.oidMu.RLock(); defer s.oidMu.RUnlock()
-	if name, ok := s.oidCache[oid]; ok { return name }
+	s.oidMu.RLock()
+	defer s.oidMu.RUnlock()
+	if name, ok := s.oidCache[oid]; ok {
+		return name
+	}
 	return fmt.Sprintf("oid:%d", oid)
 }
 
 func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, "SELECT oid, typname FROM pg_type")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer rows.Close()
-	s.oidMu.Lock(); defer s.oidMu.Unlock()
+	s.oidMu.Lock()
+	defer s.oidMu.Unlock()
 	for rows.Next() {
-		var oid uint32; var name string
-		if err := rows.Scan(&oid, &name); err == nil { s.oidCache[oid] = name }
+		var oid uint32
+		var name string
+		if err := rows.Scan(&oid, &name); err == nil {
+			s.oidCache[oid] = name
+		}
 	}
 	return nil
 }
@@ -282,26 +382,41 @@ func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
 func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConfig protocol.SourceConfig, mu *sync.Mutex, msgs *[]protocol.Message, known map[string]bool, triggerFlush func()) {
 	for _, schema := range srcConfig.Schemas {
 		rows, err := db.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
-		if err != nil { continue }
-		for rows.Next() {
-			var tableName string
-			if err := rows.Scan(&tableName); err == nil {
-				if strings.HasPrefix(tableName, "cdc_snapshot_") { continue }
+		if err != nil {
+			log.Warn().Err(err).Str("schema", schema).Msg("Failed to query tables for schema")
+			continue
+		}
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var tableName string
+				if err := rows.Scan(&tableName); err != nil {
+					log.Warn().Err(err).Str("schema", schema).Msg("Failed to scan table name")
+					continue
+				}
+				if strings.HasPrefix(tableName, "cdc_snapshot_") {
+					continue
+				}
 				fullKey := schema + "." + tableName
 				mu.Lock()
 				if !known[fullKey] {
 					known[fullKey] = true
-					cols, pks, _ := s.getTableMetadata(ctx, db, schema, tableName)
+					cols, pks, err := s.getTableMetadata(ctx, db, schema, tableName)
+					if err != nil {
+						log.Warn().Err(err).Str("schema", schema).Str("table", tableName).Msg("Failed to get table metadata")
+					}
 					m := protocol.Message{
 						SourceID: srcConfig.ID, Table: tableName, Op: "schema_change", Timestamp: time.Now(),
 						Schema: &protocol.SchemaMetadata{Table: tableName, Schema: schema, Columns: cols, PKColumns: pks},
 					}
-					*msgs = append(*msgs, m); mu.Unlock(); triggerFlush(); mu.Lock()
+					*msgs = append(*msgs, m)
+					mu.Unlock()
+					triggerFlush()
+					mu.Lock()
 				}
 				mu.Unlock()
 			}
-		}
-		rows.Close()
+		}()
 	}
 }
 
@@ -314,15 +429,15 @@ func (s *PostgresSource) Stop() error {
 				log.Info().Msg("PostgresSource: Canceling context...")
 				s.cancel()
 			}
-			
-			// 2. Short sleep to allow ReceiveMessage loops (which have a 300ms deadline) 
+
+			// 2. Short sleep to allow ReceiveMessage loops (which have a 300ms deadline)
 			// to finish their current iteration and see the canceled context.
 			time.Sleep(400 * time.Millisecond)
 
-			// 3. Explicitly close the connector. 
+			// 3. Explicitly close the connector.
 			// Because the context is already done, the internal loops will see the EOF
-			// and check s.closed. Since Close() is running, we MUST ensure the library 
-			// sees 'closed' before it panics. 
+			// and check s.closed. Since Close() is running, we MUST ensure the library
+			// sees 'closed' before it panics.
 			log.Info().Msg("PostgresSource: Signaling explicit close...")
 			s.connector.Close()
 		}
