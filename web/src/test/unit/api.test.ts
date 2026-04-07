@@ -82,7 +82,7 @@ describe("API Client", () => {
 			const token = "test-token";
 			localStorageMock.getItem.mockReturnValue(token);
 
-			let requestHeaders: Headers | null = null;
+			let requestHeaders: Headers | undefined;
 			server.use(
 				http.get(`${API_BASE_URL}/protected`, ({ request }) => {
 					requestHeaders = request.headers;

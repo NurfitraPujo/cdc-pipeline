@@ -68,7 +68,7 @@ function DashboardPage() {
 
 				<MetricCard
 					title="Healthy"
-					value={healthyPercent}
+					value={healthyPercent ?? "0%"}
 					description={`${data?.healthy_count ?? 0} of ${data?.total_pipelines ?? 0} pipelines`}
 					icon={Activity}
 					isLoading={isLoading}

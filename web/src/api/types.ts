@@ -33,7 +33,7 @@ export interface Pipeline {
 	source: Source;
 	sink: Sink;
 	processorConfig: ProcessorConfig;
-	globalConfig: GlobalConfig;
+	globalConfig: PipelineGlobalConfig;
 	createdAt: string;
 	updatedAt: string;
 	lastRunAt?: string;
@@ -84,7 +84,7 @@ export interface Source {
 
 export interface Sink {
 	id: string;
-	type: "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook";
+	type: "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook" | "databend";
 	name: string;
 	connection: {
 		host: string;
@@ -93,6 +93,20 @@ export interface Sink {
 		topic?: string;
 		url?: string;
 		headers?: Record<string, string>;
+		database?: string;
+		username?: string;
+		password?: string;
+		ssl?: boolean;
+	};
+}
+
+export interface PipelineGlobalConfig {
+	batchSize: number;
+	batchWait: string;
+	retry: {
+		maxRetries: number;
+		initialBackoff: string;
+		maxBackoff: string;
 	};
 }
 

@@ -1,11 +1,7 @@
 import { http, HttpResponse } from "msw";
 import type {
 	LoginRequest,
-	LoginResponse,
 	Pipeline,
-	Source,
-	Sink,
-	StatsSummary,
 } from "@/api/types";
 import {
 	mockLoginResponse,
@@ -20,15 +16,15 @@ const API_BASE = "http://localhost:8080/api/v1";
 
 export const handlers = [
 	// Auth
-	http.post<LoginRequest, LoginResponse>(
+	http.post(
 		`${API_BASE}/login`,
 		async ({ request }) => {
-			const body = await request.json();
-			
+			const body = (await request.json()) as LoginRequest;
+
 			if (body.username === "admin" && body.password === "admin") {
 				return HttpResponse.json(mockLoginResponse);
 			}
-			
+
 			return HttpResponse.json(
 				{ error: "Invalid credentials" },
 				{ status: 401 }
@@ -96,10 +92,10 @@ export const handlers = [
 		return HttpResponse.json(pipeline);
 	}),
 
-	http.post<Omit<Pipeline, "id">, Pipeline>(
+	http.post<never, Pipeline>(
 		`${API_BASE}/pipelines`,
 		async ({ request }) => {
-			const body = await request.json();
+			const body = await request.json() as Omit<Pipeline, "id">;
 			const newPipeline = createMockPipeline(body);
 			mockPipelines.push(newPipeline);
 			return HttpResponse.json(newPipeline, { status: 201 });
@@ -158,7 +154,7 @@ export const handlers = [
 		return HttpResponse.json(mockSources);
 	}),
 
-	http.get<{ id: string }>(`${API_BASE}/sources/:id/tables`, ({ params }) => {
+	http.get<{ id: string }>(`${API_BASE}/sources/:id/tables`, () => {
 		return HttpResponse.json(["users", "orders", "products", "categories"]);
 	}),
 

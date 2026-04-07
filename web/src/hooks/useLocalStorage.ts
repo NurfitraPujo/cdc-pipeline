@@ -27,7 +27,7 @@ export function useLocalStorage<T>(
 		(value: T | ((prev: T) => T)) => {
 			try {
 				setStoredValue((prev) => {
-					const valueToStore = value instanceof Function ? value(prev) : value;
+					const valueToStore = value instanceof Function ? value(prev ?? initialValue) : value;
 					window.localStorage.setItem(key, JSON.stringify(valueToStore));
 					return valueToStore;
 				});
@@ -35,7 +35,7 @@ export function useLocalStorage<T>(
 				console.warn(`Error setting localStorage key "${key}":`, error);
 			}
 		},
-		[key],
+		[key, initialValue],
 	);
 
 	const removeValue = useCallback(() => {

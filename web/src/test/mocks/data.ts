@@ -35,6 +35,7 @@ export const mockSources: Source[] = [
 			username: "cdc_user",
 			ssl: true,
 		},
+		tables: ["users", "orders"],
 	},
 	{
 		id: "mysql-1",
@@ -47,6 +48,7 @@ export const mockSources: Source[] = [
 			username: "cdc_user",
 			ssl: false,
 		},
+		tables: ["customers", "products"],
 	},
 ];
 
