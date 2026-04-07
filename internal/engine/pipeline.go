@@ -5,21 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/rs/zerolog/log"
 )
 
 type Pipeline struct {
-	id         string
-	producer   *Producer
-	consumer   *Consumer
-	config     protocol.PipelineConfig
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	finished   chan struct{}
+	id       string
+	producer *Producer
+	consumer *Consumer
+	config   protocol.PipelineConfig
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	finished chan struct{}
 }
 
 func NewPipeline(id string, prod *Producer, cons *Consumer, cfg protocol.PipelineConfig) *Pipeline {
@@ -53,7 +52,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	go func() {
 		defer p.wg.Done()
-		
+
 		// 1. Resolve Sources
 		if len(p.config.Sources) == 0 {
 			log.Warn().Str("pipeline_id", p.id).Msg("No sources defined")
@@ -66,7 +65,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to get source config")
 			return
 		}
-		
+
 		var srcCfg protocol.SourceConfig
 		if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
 			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
@@ -82,8 +81,9 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 		srcCfg.Tables = p.config.Tables
 		// Ensure unique slot for every worker instance to avoid contention on reload
+		// Use pipeline ID suffix for stable slot naming across restarts (preserves LSN continuity)
 		if srcCfg.Type == "postgres" && srcCfg.SlotName != "" {
-			srcCfg.SlotName = fmt.Sprintf("%s_%d", srcCfg.SlotName, time.Now().UnixNano())
+			srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, p.id)
 		}
 
 		// 2. Get Checkpoints for all tables
@@ -100,7 +100,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 				}
 			}
 		}
-		
+
 		initialCP := protocol.Checkpoint{IngressLSN: minLSN}
 
 		// 3. Load Egress Stats for the consumer
@@ -110,7 +110,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		if err != nil && err != context.Canceled {
 			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed")
 		}
-		
+
 		// In a drain scenario, the producer finishes.
 		// We should tell the consumer to drain until this LSN.
 		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling consumer drain.")
@@ -137,7 +137,7 @@ func (p *Pipeline) Finished() <-chan struct{} {
 
 func (p *Pipeline) Shutdown(ctx context.Context) error {
 	p.cancel()
-	
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/datafuselabs/databend-go"
-	"github.com/vmihailenco/msgpack/v5"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	_ "github.com/datafuselabs/databend-go"
 	"github.com/rs/zerolog/log"
+	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -33,9 +33,9 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	
+
 	return &DatabendSink{
-		name:    name, 
+		name:    name,
 		db:      db,
 		pkCache: make(map[string][]string),
 	}, nil
@@ -84,11 +84,31 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 }
 
 func quoteIdentifier(name string) string {
+	// Replace any double quotes with doubled quotes to escape them
 	return "\"" + strings.ReplaceAll(name, "\"", "\"\"") + "\""
+}
+
+// validateIdentifier checks if the identifier contains only allowed characters
+// Returns error if the identifier contains potentially dangerous characters
+func validateIdentifier(name string) error {
+	if name == "" {
+		return fmt.Errorf("identifier cannot be empty")
+	}
+	// Only allow alphanumeric characters, underscores, and dots (for schema.table)
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '.' {
+			return fmt.Errorf("invalid character in identifier: %q", r)
+		}
+	}
+	return nil
 }
 
 func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
 	log.Info().Str("table", schema.Table).Msg("Syncing schema in Databend")
+
+	if err := validateIdentifier(schema.Table); err != nil {
+		return fmt.Errorf("invalid table name: %w", err)
+	}
 
 	s.pkMu.Lock()
 	s.pkCache[schema.Table] = schema.PKColumns
@@ -104,17 +124,22 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 	if len(existingCols) == 0 {
 		var colDefs []string
 		var colNames []string
-		for name := range schema.Columns { colNames = append(colNames, name) }
+		for name := range schema.Columns {
+			colNames = append(colNames, name)
+		}
 		sort.Strings(colNames)
 
 		for _, name := range colNames {
+			if err := validateIdentifier(name); err != nil {
+				return fmt.Errorf("invalid column name %q: %w", name, err)
+			}
 			pgType := schema.Columns[name]
 			dbType := mapPgTypeToDatabend(pgType)
 			colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(name), dbType))
 		}
-		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", 
+		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)",
 			quotedTable, strings.Join(colDefs, ", "))
-		
+
 		log.Info().Str("table", schema.Table).Str("query", query).Msg("Executing DDL")
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -123,11 +148,15 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMe
 	}
 
 	for name, pgType := range schema.Columns {
+		if err := validateIdentifier(name); err != nil {
+			log.Warn().Str("column", name).Err(err).Msg("Skipping invalid column name")
+			continue
+		}
 		if !existingCols[strings.ToLower(name)] {
 			dbType := mapPgTypeToDatabend(pgType)
-			query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", 
+			query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
 				quotedTable, quoteIdentifier(name), dbType)
-			
+
 			log.Info().Str("table", schema.Table).Str("column", name).Str("query", query).Msg("Executing Evolution DDL")
 			if _, err := s.db.ExecContext(ctx, query); err != nil {
 				log.Warn().Err(err).Str("table", schema.Table).Str("column", name).Msg("Failed to add column")
@@ -159,28 +188,48 @@ func (s *DatabendSink) getCurrentColumns(ctx context.Context, table string) (map
 func mapPgTypeToDatabend(pgType string) string {
 	t := strings.ToLower(pgType)
 	switch {
-	case strings.Contains(t, "bool"): return "BOOLEAN"
-	case strings.Contains(t, "int"): return "INT64"
-	case strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"): return "FLOAT64"
-	case strings.Contains(t, "timestamp"): return "TIMESTAMP"
-	case strings.Contains(t, "date"): return "DATE"
-	case strings.Contains(t, "json") || strings.Contains(t, "variant"): return "VARIANT"
-	case strings.Contains(t, "bytea") || strings.Contains(t, "blob"): return "BINARY"
-	case strings.Contains(t, "uuid") || strings.Contains(t, "text") || strings.Contains(t, "varchar") || strings.Contains(t, "char"): return "STRING"
+	case strings.Contains(t, "bool"):
+		return "BOOLEAN"
+	case strings.Contains(t, "int"):
+		return "INT64"
+	case strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+		return "FLOAT64"
+	case strings.Contains(t, "timestamp"):
+		return "TIMESTAMP"
+	case strings.Contains(t, "date"):
+		return "DATE"
+	case strings.Contains(t, "json") || strings.Contains(t, "variant"):
+		return "VARIANT"
+	case strings.Contains(t, "bytea") || strings.Contains(t, "blob"):
+		return "BINARY"
+	case strings.Contains(t, "uuid") || strings.Contains(t, "text") || strings.Contains(t, "varchar") || strings.Contains(t, "char"):
+		return "STRING"
 	default:
 		switch pgType {
-		case "16": return "BOOLEAN"
-		case "23", "20": return "INT64"
-		case "1043", "25": return "STRING"
-		case "1114", "1184": return "TIMESTAMP"
-		case "3802": return "VARIANT"
-		default: return "STRING"
+		case "16":
+			return "BOOLEAN"
+		case "23", "20":
+			return "INT64"
+		case "1043", "25":
+			return "STRING"
+		case "1114", "1184":
+			return "TIMESTAMP"
+		case "3802":
+			return "VARIANT"
+		default:
+			return "STRING"
 		}
 	}
 }
 
 func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
-	if len(messages) == 0 { return nil }
+	if len(messages) == 0 {
+		return nil
+	}
+
+	if err := validateIdentifier(table); err != nil {
+		return fmt.Errorf("invalid table name: %w", err)
+	}
 
 	// GROUP BY COLUMN SET
 	// CDC batches might contain records with different column sets (evolution or different sources)
@@ -197,11 +246,13 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 				}
 			}
 		}
-		
+
 		cols := make([]string, 0, len(data))
-		for k := range data { cols = append(cols, k) }
+		for k := range data {
+			cols = append(cols, k)
+		}
 		sort.Strings(cols)
-		
+
 		key := strings.Join(cols, ",")
 		groups[key] = append(groups[key], data)
 		groupCols[key] = cols
@@ -210,22 +261,41 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	s.pkMu.RLock()
 	pks := s.pkCache[table]
 	s.pkMu.RUnlock()
-	if len(pks) == 0 { pks = []string{"id"} }
+	if len(pks) == 0 {
+		pks = []string{"id"}
+	}
+
+	// Validate primary key names
+	for _, pk := range pks {
+		if err := validateIdentifier(pk); err != nil {
+			return fmt.Errorf("invalid primary key name %q: %w", pk, err)
+		}
+	}
 
 	quotedPks := make([]string, len(pks))
-	for i, pk := range pks { quotedPks[i] = quoteIdentifier(pk) }
+	for i, pk := range pks {
+		quotedPks[i] = quoteIdentifier(pk)
+	}
 	pkList := strings.Join(quotedPks, ", ")
 
 	quotedTable := quoteIdentifier(table)
 
 	for key, records := range groups {
 		columns := groupCols[key]
+		// Validate all column names before using them
+		for _, col := range columns {
+			if err := validateIdentifier(col); err != nil {
+				return fmt.Errorf("invalid column name %q: %w", col, err)
+			}
+		}
 		quotedColumns := make([]string, len(columns))
-		for i, col := range columns { quotedColumns[i] = quoteIdentifier(col) }
+		for i, col := range columns {
+			quotedColumns[i] = quoteIdentifier(col)
+		}
 		colList := strings.Join(quotedColumns, ", ")
 
 		query := fmt.Sprintf("REPLACE INTO %s (%s) ON (%s) VALUES ", quotedTable, colList, pkList)
-		
+
 		valueStrings := make([]string, 0, len(records))
 		valueArgs := make([]any, 0, len(records)*len(columns))
 
@@ -249,7 +319,6 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 
 		query += strings.Join(valueStrings, ", ")
 
-		// #nosec G201
 		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
 			return fmt.Errorf("uploadTableBatch for group %s failed: %w", key, err)
 		}
@@ -259,12 +328,27 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 }
 
 func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
-	if len(messages) == 0 { return nil }
+	if len(messages) == 0 {
+		return nil
+	}
+
+	if err := validateIdentifier(table); err != nil {
+		return fmt.Errorf("invalid table name: %w", err)
+	}
 
 	s.pkMu.RLock()
 	pks := s.pkCache[table]
 	s.pkMu.RUnlock()
-	if len(pks) == 0 { pks = []string{"id"} }
+	if len(pks) == 0 {
+		pks = []string{"id"}
+	}
+
+	// Validate primary key names
+	for _, pk := range pks {
+		if err := validateIdentifier(pk); err != nil {
+			return fmt.Errorf("invalid primary key name %q: %w", pk, err)
+		}
+	}
 
 	for _, m := range messages {
 		data := m.Data
@@ -281,20 +365,28 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 		var args []any
 		for _, pk := range pks {
 			val, ok := data[pk]
-			if !ok { continue }
+			if !ok {
+				continue
+			}
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteIdentifier(pk)))
 			args = append(args, val)
 		}
 
-		if len(whereClauses) == 0 { continue }
+		if len(whereClauses) == 0 {
+			continue
+		}
 
 		query := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdentifier(table), strings.Join(whereClauses, " AND "))
-		if _, err := s.db.ExecContext(ctx, query, args...); err != nil { return err }
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (s *DatabendSink) Stop() error {
-	if s.db != nil { return s.db.Close() }
+	if s.db != nil {
+		return s.db.Close()
+	}
 	return nil
 }

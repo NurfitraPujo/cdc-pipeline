@@ -51,7 +51,7 @@ func Encrypt(plaintext string, key []byte) (string, error) {
 
 func Decrypt(ciphertextStr string, key []byte) (string, error) {
 	if len(key) == 0 {
-		return ciphertextStr, nil
+		return "", errors.New("decryption key cannot be empty")
 	}
 
 	data, err := base64.StdEncoding.DecodeString(ciphertextStr)

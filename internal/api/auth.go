@@ -8,19 +8,17 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/gin-gonic/gin"
-	"github.com/rs/zerolog/log"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
-func getJWTSecret() []byte {
+func getJWTSecret() ([]byte, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		log.Error().Msg("JWT_SECRET environment variable is not set. API will be unusable.")
-		return []byte("cdc-PLACEHOLDER-FOR-EMERGENCY-BOOT-ONLY")
+		return nil, fmt.Errorf("JWT_SECRET environment variable is not set")
 	}
-	return []byte(secret)
+	return []byte(secret), nil
 }
 
 // Login handles user authentication.
@@ -64,13 +62,17 @@ func (h *Handler) Login(c *gin.Context) {
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),
 		})
 
-		secret := getJWTSecret()
-		if string(secret) == "cdc-PLACEHOLDER-FOR-EMERGENCY-BOOT-ONLY" {
+		secret, err := getJWTSecret()
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT_SECRET not configured"})
 			return
 		}
 
-		tokenString, _ := token.SignedString(secret)
+		tokenString, err := token.SignedString(secret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sign token"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 		return
 	}
@@ -91,11 +93,17 @@ func AuthMiddleware() gin.HandlerFunc {
 			tokenString = tokenString[7:]
 		}
 
+		secret, err := getJWTSecret()
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authentication not configured"})
+			return
+		}
+
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method")
 			}
-			return getJWTSecret(), nil
+			return secret, nil
 		})
 
 		if err != nil || !token.Valid {

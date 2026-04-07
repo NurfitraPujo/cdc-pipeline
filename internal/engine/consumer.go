@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
@@ -24,18 +24,23 @@ type Consumer struct {
 	sink         sink.Sink
 	transformers []transformer.Transformer
 	kv           nats.KeyValue
-	batchSize   int
-	batchWait   time.Duration
-	retryConfig protocol.RetryConfig
-	retries     map[string]int // UUID -> attempt count
-	retryMu     sync.Mutex
-	stats       map[string]*protocol.TableStats
-	statsMu     sync.Mutex
+	batchSize    int
+	batchWait    time.Duration
+	retryConfig  protocol.RetryConfig
+	retries      map[string]retryEntry // UUID -> retry info with timestamp
+	retryMu      sync.Mutex
+	stats        map[string]*protocol.TableStats
+	statsMu      sync.Mutex
 
 	// Drain control
 	mu         sync.RWMutex
 	isDraining bool
 	targetLSN  uint64
+}
+
+type retryEntry struct {
+	count     int
+	lastRetry time.Time
 }
 
 func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
@@ -49,7 +54,7 @@ func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher,
 		batchSize:    batchSize,
 		batchWait:    batchWait,
 		retryConfig:  retry,
-		retries:      make(map[string]int),
+		retries:      make(map[string]retryEntry),
 		stats:        make(map[string]*protocol.TableStats),
 	}
 }
@@ -124,6 +129,8 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				delete(c.retries, m.UUID)
 				c.retryMu.Unlock()
 			}
+			// Cleanup old retry entries to prevent unbounded growth
+			c.cleanupOldRetries()
 			batch = nil
 			wmMsgs = nil
 			return nil
@@ -141,13 +148,14 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				s.ErrorCount++
 				s.Status = "ERROR"
 				s.UpdatedAt = time.Now()
-				
+
 				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
 				statsData, err := s.MarshalMsg(nil)
 				if err == nil {
 					statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
-					// #nosec G104 -- Best effort update
-					_, _ = c.kv.Put(statsKey, statsData)
+					if _, err := c.kv.Put(statsKey, statsData); err != nil {
+						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
+					}
 				}
 			}
 			c.statsMu.Unlock()
@@ -155,9 +163,13 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			// Check if any message in this batch should be isolated
 			shouldIsolate := false
 			c.retryMu.Lock()
+			now := time.Now()
 			for _, m := range wmMsgs {
-				c.retries[m.UUID]++
-				if c.retries[m.UUID] > c.retryConfig.MaxRetries {
+				entry := c.retries[m.UUID]
+				entry.count++
+				entry.lastRetry = now
+				c.retries[m.UUID] = entry
+				if entry.count > c.retryConfig.MaxRetries {
 					shouldIsolate = true
 				}
 			}
@@ -168,25 +180,27 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				c.isolatePoisonBatch(ctx, wmMsgs)
 				batch = nil
 				wmMsgs = nil
+				// Cleanup old retry entries
+				c.cleanupOldRetries()
 				return nil
 			}
 
 			// Nack all messages in the batch to trigger NATS JetStream redelivery.
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
-			
+
 			// Exponential backoff sleep
 			backoff := c.retryConfig.InitialInterval
 			maxAttempts := 0
 			c.retryMu.Lock()
 			for _, m := range wmMsgs {
-				if c.retries[m.UUID] > maxAttempts {
-					maxAttempts = c.retries[m.UUID]
+				if c.retries[m.UUID].count > maxAttempts {
+					maxAttempts = c.retries[m.UUID].count
 				}
 			}
 			c.retryMu.Unlock()
-			
+
 			log.Info().Str("pipeline_id", c.pipelineID).Int("max_attempts", maxAttempts).Msg("Max attempts for batch so far")
-			
+
 			for i := 1; i < maxAttempts; i++ {
 				backoff *= 2
 				if backoff > c.retryConfig.MaxInterval {
@@ -194,14 +208,14 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 					break
 				}
 			}
-			
+
 			for _, m := range wmMsgs {
 				m.Nack()
 			}
 
 			batch = nil
 			wmMsgs = nil
-			
+
 			if backoff > 0 {
 				time.Sleep(backoff)
 			} else {
@@ -260,7 +274,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			s.LastProcessedTS = now
 			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
 			s.UpdatedAt = now
-			
+
 			metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
 
 			statsData, err := s.MarshalMsg(nil)
@@ -274,13 +288,9 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 		batch = nil
 		wmMsgs = nil
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(c.batchWait)
+		// Stop current timer and create new one to avoid race conditions
+		timer.Stop()
+		timer = time.NewTimer(c.batchWait)
 		return nil
 	}
 
@@ -330,7 +340,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 						wmMsg.Nack()
 						return fmt.Errorf("failed to apply schema change: %w", err)
 					}
-					// Flush schema change immediately as its own "batch" if needed, 
+					// Flush schema change immediately as its own "batch" if needed,
 					// but here we just append and flush below.
 				}
 
@@ -343,7 +353,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 					if c.checkDrained(m.LSN) {
 						return nil
 					}
-					wmMsgs = nil 
+					wmMsgs = nil
 					continue
 				}
 			}
@@ -395,9 +405,10 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 		// Try uploading this single Watermill message (which might be a sub-batch)
 		if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message failed in isolation")
-			
+
 			c.retryMu.Lock()
-			attempts := c.retries[wmMsg.UUID]
+			entry := c.retries[wmMsg.UUID]
+			attempts := entry.count
 			c.retryMu.Unlock()
 
 			if attempts >= c.retryConfig.MaxRetries && c.retryConfig.EnableDLQ {
@@ -421,7 +432,7 @@ func (c *Consumer) routeToDLQ(msg *message.Message) {
 	dlqTopic := protocol.DLQTopic(c.pipelineID)
 	if err := c.publisher.Publish(dlqTopic, msg); err != nil {
 		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("CRITICAL - Failed to route message to DLQ")
-		// If we can't even send to DLQ, we MUST Nack to avoid data loss, 
+		// If we can't even send to DLQ, we MUST Nack to avoid data loss,
 		// even if it causes Head-of-Line blocking.
 		msg.Nack()
 		return
@@ -431,4 +442,16 @@ func (c *Consumer) routeToDLQ(msg *message.Message) {
 	c.retryMu.Lock()
 	delete(c.retries, msg.UUID)
 	c.retryMu.Unlock()
+}
+
+// cleanupOldRetries removes retry entries older than 1 hour to prevent unbounded growth
+func (c *Consumer) cleanupOldRetries() {
+	c.retryMu.Lock()
+	defer c.retryMu.Unlock()
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for uuid, entry := range c.retries {
+		if entry.lastRetry.Before(cutoff) {
+			delete(c.retries, uuid)
+		}
+	}
 }
