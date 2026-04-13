@@ -12,9 +12,12 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/postgresdebug"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -23,10 +26,10 @@ import (
 )
 
 type Environment struct {
-	T *testing.T
-	Ctx context.Context
+	T      *testing.T
+	Ctx    context.Context
 	Cancel context.CancelFunc
-	
+
 	NatsConn *go_nats.Conn
 	JS       go_nats.JetStreamContext
 	KV       go_nats.KeyValue
@@ -37,6 +40,8 @@ type Environment struct {
 
 	Databend *sql.DB
 	DbConfig protocol.SinkConfig
+
+	DebugDB *sql.DB
 
 	Mgr *config.ConfigManager
 
@@ -55,11 +60,10 @@ func Setup(t *testing.T) *Environment {
 	natsURL, _ := natsC.ConnectionString(ctx)
 	nc, _ := go_nats.Connect(natsURL)
 	js, _ := nc.JetStream()
-	
+
 	_, err = js.AddStream(&go_nats.StreamConfig{
 		Name:     "cdc-data-pipeline",
 		Subjects: []string{"cdc_pipeline_*_ingest", "cdc_pipeline_*_dlq"},
-
 	})
 	require.NoError(t, err)
 
@@ -143,47 +147,120 @@ func (e *Environment) Close() {
 		e.Mgr.Stop(ctx)
 		cancel()
 	}
-	
+
 	time.Sleep(1 * time.Second)
 
-	if e.Postgres != nil { e.Postgres.Close() }
-	if e.Databend != nil { e.Databend.Close() }
-	if e.NatsConn != nil { e.NatsConn.Close() }
-	
-	if e.PostgresC != nil { e.PostgresC.Terminate(context.Background()) }
-	if e.DatabendC != nil { e.DatabendC.Terminate(context.Background()) }
-	if e.NatsC != nil { e.NatsC.Terminate(context.Background()) }
-	
-	if e.Cancel != nil { e.Cancel() }
+	if e.Postgres != nil {
+		e.Postgres.Close()
+	}
+	if e.Databend != nil {
+		e.Databend.Close()
+	}
+	if e.NatsConn != nil {
+		e.NatsConn.Close()
+	}
+
+	if e.PostgresC != nil {
+		e.PostgresC.Terminate(context.Background())
+	}
+	if e.DatabendC != nil {
+		e.DatabendC.Terminate(context.Background())
+	}
+	if e.NatsC != nil {
+		e.NatsC.Terminate(context.Background())
+	}
+
+	if e.Cancel != nil {
+		e.Cancel()
+	}
 }
 
 func (e *Environment) StartWorker() {
 	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		if len(cfg.Sources) == 0 { return nil, fmt.Errorf("no sources") }
+		if len(cfg.Sources) == 0 {
+			return nil, fmt.Errorf("no sources")
+		}
 		sourceID := cfg.Sources[0]
-		entry, _ := e.KV.Get(protocol.SourceConfigKey(sourceID))
+		srcEntry, err := e.KV.Get(protocol.SourceConfigKey(sourceID))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get source config: %w", err)
+		}
 		var srcCfg protocol.SourceConfig
-		json.Unmarshal(entry.Value(), &srcCfg)
+		if err := json.Unmarshal(srcEntry.Value(), &srcCfg); err != nil {
+			return nil, err
+		}
 		srcCfg.Tables = cfg.Tables
 		// Ensure unique slot for every worker instance to avoid contention on reload
 		srcCfg.SlotName = fmt.Sprintf("%s_%d", srcCfg.SlotName, time.Now().UnixNano())
 
 		src := postgres.NewPostgresSource(sourceID)
-		
-		if len(cfg.Sinks) == 0 { return nil, fmt.Errorf("no sinks") }
-		sinkID := cfg.Sinks[0]
-		entry, _ = e.KV.Get(protocol.SinkConfigKey(sinkID))
-		var snkCfg protocol.SinkConfig
-		json.Unmarshal(entry.Value(), &snkCfg)
+		pub, err := nats.NewNatsPublisher(e.NatsURL)
+		if err != nil {
+			return nil, err
+		}
 
-		snk, _ := databend.NewDatabendSink(sinkID, snkCfg.DSN)
-		pub, _ := nats.NewNatsPublisher(e.NatsURL)
-		sub, _ := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("cdc-worker-%s", id), 1000, 30*time.Second)
+		var consumers []*engine.Consumer
+		for _, sinkID := range cfg.Sinks {
+			snkEntry, err := e.KV.Get(protocol.SinkConfigKey(sinkID))
+			if err != nil {
+				return nil, fmt.Errorf("failed to get sink config for %s: %w", sinkID, err)
+			}
+			var snkCfg protocol.SinkConfig
+			if err := json.Unmarshal(snkEntry.Value(), &snkCfg); err != nil {
+				return nil, err
+			}
+
+			var snk sink.Sink
+			var preHook sink.PreTransformHook
+			var postHook sink.PostTransformHook
+
+			switch snkCfg.Type {
+			case "databend":
+				snk, err = databend.NewDatabendSink(sinkID, snkCfg.DSN)
+				if err != nil {
+					return nil, err
+				}
+			case "postgres_debug":
+				opts, err := postgresdebug.ParseOptions(snkCfg.Options)
+				if err != nil {
+					return nil, err
+				}
+				dsnk, err := postgresdebug.NewDebugSink(sinkID, snkCfg.DSN, opts)
+				if err != nil {
+					return nil, err
+				}
+				snk = dsnk
+				preHook = dsnk.CaptureBefore
+				postHook = dsnk.CaptureAfter
+			default:
+				return nil, fmt.Errorf("unknown sink type: %s", snkCfg.Type)
+			}
+
+			sub, err := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("cdc-worker-%s-sink-%s", id, sinkID), 1000, 30*time.Second)
+			if err != nil {
+				return nil, err
+			}
+
+			// Initialize transformers for this consumer
+			var consumerTransformers []transformer.Transformer
+			for _, pCfg := range cfg.Processors {
+				tf, ok := transformer.GetTransformer(pCfg.Type)
+				if !ok {
+					return nil, fmt.Errorf("unknown transformer type: %s", pCfg.Type)
+				}
+				t, err := tf(pCfg.Options)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create transformer %s: %w", pCfg.Name, err)
+				}
+				consumerTransformers = append(consumerTransformers, t)
+			}
+
+			cons := engine.NewConsumer(id, sinkID, sub, pub, snk, consumerTransformers, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3}, preHook, postHook)
+			consumers = append(consumers, cons)
+		}
 
 		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
-		cons := engine.NewConsumer(id, sub, pub, snk, nil, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3})
-		
-		pipe := engine.NewPipeline(id, prod, cons, cfg)
+		pipe := engine.NewPipeline(id, prod, consumers, cfg)
 		pipe.Start(workerCtx)
 		return pipe, nil
 	}
@@ -197,7 +274,7 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 	require.NoError(e.T, err)
 
 	for i := 0; i < rows; i++ {
-		_, err = e.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age, metadata) VALUES ($1, $2, $3)", table), 
+		_, err = e.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age, metadata) VALUES ($1, $2, $3)", table),
 			fmt.Sprintf("user-%d", i), 20+(i%50), `{"key": "value"}`)
 		require.NoError(e.T, err)
 	}

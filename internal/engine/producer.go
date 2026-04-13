@@ -136,7 +136,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				// Update circuit breaker status on first failure
 				if attempt == 0 && len(msgs) > 0 {
 					m := msgs[0]
-					stKey := protocol.TableStatsKey(p.pipelineID, m.SourceID, m.Table)
+					stKey := protocol.ProducerTableStatsKey(p.pipelineID, m.SourceID, m.Table)
 					if entry, err := p.kv.Get(stKey); err == nil {
 						var st protocol.TableStats
 						if err := json.Unmarshal(entry.Value(), &st); err == nil {

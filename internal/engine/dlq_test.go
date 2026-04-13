@@ -29,7 +29,7 @@ func TestConsumer_DLQ(t *testing.T) {
 		EnableDLQ:       true,
 	}
 
-	c := NewConsumer("p1", mockSub, mockPub, mockSink, nil, mockKV, 1, 100*time.Millisecond, retryCfg)
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, nil, mockKV, 1, 100*time.Millisecond, retryCfg, nil, nil)
 
 	t.Run("Isolate and route to DLQ after MaxRetries", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -43,9 +43,9 @@ func TestConsumer_DLQ(t *testing.T) {
 		}
 		batch := protocol.MessageBatch{msg}
 		data, _ := batch.MarshalMsg(nil)
-		
+
 		wmMsg1 := message.NewMessage("uuid1", data)
-		wmMsg2 := message.NewMessage("uuid2", data) 
+		wmMsg2 := message.NewMessage("uuid2", data)
 
 		msgChan := make(chan *message.Message, 3)
 		msgChan <- wmMsg1
@@ -59,21 +59,21 @@ func TestConsumer_DLQ(t *testing.T) {
 		gomock.InOrder(
 			// Attempt 1: wmMsg1. Fails. retries[uuid1]=1. Nack.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			
+
 			// Attempt 2: wmMsg2. Combined batch {wmMsg1, wmMsg2} fails.
-			// retries[uuid1]=2, retries[uuid2]=1. 
+			// retries[uuid1]=2, retries[uuid2]=1.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			
+
 			// Attempt 3: wmMsg1 redelivery. Combined batch {wmMsg1, wmMsg2} fails.
 			// retries[uuid1]=3, retries[uuid2]=2.
 			// 3 > 2 is TRUE -> ISOLATE.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			
+
 			// Isolation Mode for {wmMsg1, wmMsg2}:
 			// 1. wmMsg1: attempts=3 >= 2. route to DLQ.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
 			mockPub.EXPECT().Publish("cdc_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
-			
+
 			// 2. wmMsg2: attempts=2 >= 2 is TRUE.
 			// So wmMsg2 also to DLQ.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),

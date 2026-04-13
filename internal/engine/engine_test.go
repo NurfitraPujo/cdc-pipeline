@@ -22,11 +22,11 @@ func TestConsumer_LoadStats(t *testing.T) {
 
 	mockSub := mocks.NewMockSubscriber(ctrl)
 	mockKV := mocks.NewMockKeyValue(ctrl)
-	c := NewConsumer("p1", mockSub, nil, nil, nil, mockKV, 10, time.Second, protocol.RetryConfig{MaxRetries: 3})
+	c := NewConsumer("p1", "sink1", mockSub, nil, nil, nil, mockKV, 10, time.Second, protocol.RetryConfig{MaxRetries: 3}, nil, nil)
 
 	st := protocol.TableStats{Status: "ACTIVE", TotalSynced: 100}
 	data, _ := json.Marshal(st)
-	key := protocol.TableStatsKey("p1", "s1", "t1")
+	key := protocol.TableStatsKey("p1", "s1", "sink1", "t1")
 	mockKV.EXPECT().Get(key).Return(mockEntry{value: data}, nil)
 
 	c.LoadStats("s1", []string{"t1"})
@@ -73,7 +73,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 	mockSink := mocks.NewMockSink(ctrl)
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
-	c := NewConsumer("p1", mockSub, nil, mockSink, nil, mockKV, 10, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3})
+	c := NewConsumer("p1", "sink1", mockSub, nil, mockSink, nil, mockKV, 10, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3}, nil, nil)
 
 	t.Run("Sink BatchUpload Failure", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -86,13 +86,13 @@ func TestConsumer_FailurePaths(t *testing.T) {
 		m := protocol.Message{SourceID: "s1", Table: "t1", Op: "insert"}
 		batch := []protocol.Message{m}
 		data, _ := protocol.MessageBatch(batch).MarshalMsg(nil)
-		
+
 		wmMsg := message.NewMessage("1", data)
 		msgChan <- wmMsg
 
 		// Expect failure
 		mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink down"))
-		
+
 		// In flush on error, we update stats to ERROR
 		mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil).AnyTimes()
 
@@ -104,7 +104,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 
 		// Give it time to process
 		time.Sleep(200 * time.Millisecond)
-		
+
 		cancel()
 		err := <-errChan
 		assert.Error(t, err) // ctx canceled
@@ -120,7 +120,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 		m := protocol.Message{SourceID: "s1", Table: "t1", Op: "schema_change", Schema: &protocol.SchemaMetadata{Table: "t1"}}
 		batch := []protocol.Message{m}
 		data, _ := protocol.MessageBatch(batch).MarshalMsg(nil)
-		
+
 		wmMsg := message.NewMessage("2", data)
 		msgChan <- wmMsg
 
@@ -153,7 +153,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 
 	t.Run("Source Start Failure", func(t *testing.T) {
 		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil, errors.New("pg failed"))
-		
+
 		_, err := p.Run(context.Background(), srcCfg, cp)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "pg failed")
@@ -171,7 +171,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 
 		// Publish fails
 		mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(errors.New("nats down"))
-		
+
 		// Circuit breaker logic: Get stats, update status to CIRCUIT_OPEN
 		mockKV.EXPECT().Get(gomock.Any()).Return(mockEntry{value: []byte("{}")}, nil)
 		mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil)
@@ -194,10 +194,10 @@ type mockEntry struct {
 	value []byte
 }
 
-func (m mockEntry) Key() string { return m.key }
-func (m mockEntry) Value() []byte { return m.value }
-func (m mockEntry) Revision() uint64 { return 0 }
-func (m mockEntry) Created() time.Time { return time.Now() }
-func (m mockEntry) Delta() uint64 { return 0 }
+func (m mockEntry) Key() string                { return m.key }
+func (m mockEntry) Value() []byte              { return m.value }
+func (m mockEntry) Revision() uint64           { return 0 }
+func (m mockEntry) Created() time.Time         { return time.Now() }
+func (m mockEntry) Delta() uint64              { return 0 }
 func (m mockEntry) Operation() nats.KeyValueOp { return 0 }
-func (m mockEntry) Bucket() string { return "" }
+func (m mockEntry) Bucket() string             { return "" }

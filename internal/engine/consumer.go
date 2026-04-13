@@ -21,10 +21,12 @@ const retryCleanupInterval = 5 * time.Minute
 
 type Consumer struct {
 	pipelineID      string
+	sinkID          string
 	subscriber      stream.Subscriber
 	publisher       stream.Publisher // for DLQ
 	sink            sink.Sink
 	transformers    []transformer.Transformer
+	transformerNames []string // NEW: pre-computed names for audit trail
 	kv              nats.KeyValue
 	batchSize       int
 	batchWait       time.Duration
@@ -34,6 +36,10 @@ type Consumer struct {
 	stats           map[string]*protocol.TableStats
 	statsMu         sync.Mutex
 	lastCleanupTime time.Time
+
+	// Hooks for debug sink capture (nil for regular consumers)
+	preTransformHook  sink.PreTransformHook
+	postTransformHook sink.PostTransformHook
 
 	// Drain control
 	mu         sync.RWMutex
@@ -46,20 +52,29 @@ type retryEntry struct {
 	lastRetry time.Time
 }
 
-func NewConsumer(pipelineID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig) *Consumer {
+func NewConsumer(pipelineID, sinkID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig, preHook sink.PreTransformHook, postHook sink.PostTransformHook) *Consumer {
+	names := make([]string, len(transformers))
+	for i, t := range transformers {
+		names[i] = t.Name()
+	}
+
 	return &Consumer{
-		pipelineID:      pipelineID,
-		subscriber:      sub,
-		publisher:       pub,
-		sink:            snk,
-		transformers:    transformers,
-		kv:              kv,
-		batchSize:       batchSize,
-		batchWait:       batchWait,
-		retryConfig:     retry,
-		retries:         make(map[string]retryEntry),
-		stats:           make(map[string]*protocol.TableStats),
-		lastCleanupTime: time.Now(),
+		pipelineID:        pipelineID,
+		sinkID:            sinkID,
+		subscriber:        sub,
+		publisher:         pub,
+		sink:              snk,
+		transformers:      transformers,
+		transformerNames:  names,
+		kv:                kv,
+		batchSize:         batchSize,
+		batchWait:         batchWait,
+		retryConfig:       retry,
+		retries:           make(map[string]retryEntry),
+		stats:             make(map[string]*protocol.TableStats),
+		lastCleanupTime:   time.Now(),
+		preTransformHook:  preHook,
+		postTransformHook: postHook,
 	}
 }
 
@@ -68,7 +83,7 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 	defer c.statsMu.Unlock()
 
 	for _, table := range tables {
-		key := protocol.TableStatsKey(c.pipelineID, sourceID, table)
+		key := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
 		entry, err := c.kv.Get(key)
 		if err == nil {
 			var st protocol.TableStats
@@ -80,12 +95,24 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 }
 
 func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message) []protocol.Message {
+	// Call pre-transform hook (captures "before" state for debug sink)
+	var correlationIDs []string
+	if c.preTransformHook != nil {
+		correlationIDs = c.preTransformHook(ctx, c.pipelineID, c.transformerNames, msgs)
+	}
+
 	if len(c.transformers) == 0 {
+		// No transformers, call post-transform hook with same messages
+		if c.postTransformHook != nil {
+			c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, msgs, nil)
+		}
 		return msgs
 	}
 
 	processed := make([]protocol.Message, 0, len(msgs))
-	for _, m := range msgs {
+	filteredIndices := make([]int, 0)
+
+	for i, m := range msgs {
 		current := &m
 		keep := true
 		var err error
@@ -100,10 +127,19 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 			}
 		}
 
+		if !keep || current == nil {
+			filteredIndices = append(filteredIndices, i)
+		}
 		if keep && current != nil {
 			processed = append(processed, *current)
 		}
 	}
+
+	// Call post-transform hook (captures "after" state for debug sink)
+	if c.postTransformHook != nil {
+		c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, processed, filteredIndices)
+	}
+
 	return processed
 }
 
@@ -154,7 +190,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
 				statsData, err := s.MarshalMsg(nil)
 				if err == nil {
-					statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+					statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
 					if _, err := c.kv.Put(statsKey, statsData); err != nil {
 						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
 					}
@@ -252,7 +288,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			}
 			cpData, err := checkpoint.MarshalMsg(nil)
 			if err == nil {
-				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, m.Table)
+				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
 				if _, err := c.kv.Put(cpKey, cpData); err != nil {
 					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
 				}
@@ -279,7 +315,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			statsData, err := s.MarshalMsg(nil)
 			if err == nil {
-				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, m.Table)
+				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
 				if _, err := c.kv.Put(statsKey, statsData); err != nil {
 					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating table stats")
 				}
@@ -344,6 +380,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				if m.Op == "schema_change" && m.Schema != nil {
 					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
 						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
+						c.updateTableError(m.SourceID, m.Table)
 						wmMsg.Nack()
 						return fmt.Errorf("failed to apply schema change: %w", err)
 					}
@@ -452,6 +489,27 @@ func (c *Consumer) routeToDLQ(msg *message.Message) {
 }
 
 // cleanupOldRetries removes retry entries older than 1 hour to prevent unbounded growth
+func (c *Consumer) updateTableError(sourceID, table string) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+
+	key := sourceID + "." + table
+	s, ok := c.stats[key]
+	if !ok {
+		s = &protocol.TableStats{Status: "ERROR"}
+		c.stats[key] = s
+	}
+	s.ErrorCount++
+	s.Status = "ERROR"
+	s.UpdatedAt = time.Now()
+
+	statsData, err := s.MarshalMsg(nil)
+	if err == nil {
+		statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
+		_, _ = c.kv.Put(statsKey, statsData)
+	}
+}
+
 func (c *Consumer) cleanupOldRetries() {
 	c.retryMu.Lock()
 	defer c.retryMu.Unlock()

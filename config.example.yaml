@@ -25,17 +25,32 @@ sources:
     batch_size: 100
 
 # Sink Configurations (Stored in NATS KV as 'cdc.config.sinks.{id}')
+# Each sink gets its own consumer with independent NATS subscription and checkpoint tracking
 sinks:
   - id: "databend-analytics"
     type: "databend"
     dsn: "http://root:@localhost:8000"
+  
+  - id: "postgres-debug"
+    type: "postgres_debug"
+    dsn: "postgres://cdc_user:password@localhost:5432/debug_db"
+    # Options can include:
+    #   retention:
+    #     mode: "age"
+    #     max_age: "168h"  # 7 days in hours
+    #   filters:
+    #     include_tables: ["orders", "users"]
+    #   sampling:
+    #     mode: "percentage"
+    #     value: 10  # capture 10% of rows
 
 # Pipeline Configurations (Stored in NATS KV as 'cdc.config.pipelines.{id}')
+# Supports multiple sinks - each sink runs in its own consumer goroutine
 pipelines:
   - id: "pipe-01"
-    name: "Main Data Sync"
+    name: "Main Data Sync with Debug"
     sources: ["postgres-primary"]
-    sinks: ["databend-analytics"]
+    sinks: ["databend-analytics", "postgres-debug"]
     tables:
       - "users"
       - "orders"

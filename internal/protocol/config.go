@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -54,7 +55,32 @@ func WorkerHeartbeatKey(id string) string {
 	return fmt.Sprintf("%s%s.heartbeat", PrefixWorkerState, id)
 }
 
-func TableStatsKey(pid, sid, table string) string {
+func TableStatsKey(pid, sid, sinkID, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.stats", PrefixPipelineState, pid, sid, sinkID, table)
+}
+
+type TableStatsKeyInfo struct {
+	PipelineID string
+	SourceID   string
+	SinkID     string
+	Table      string
+}
+
+func ParseTableStatsKey(key string) *TableStatsKeyInfo {
+	// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
+	parts := strings.Split(key, ".")
+	if len(parts) < 10 || parts[0] != "cdc" || parts[1] != "pipeline" || parts[3] != "sources" || parts[5] != "sinks" || parts[7] != "tables" || parts[9] != "stats" {
+		return nil
+	}
+	return &TableStatsKeyInfo{
+		PipelineID: parts[2],
+		SourceID:   parts[4],
+		SinkID:     parts[6],
+		Table:      parts[8],
+	}
+}
+
+func ProducerTableStatsKey(pid, sid, table string) string {
 	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table)
 }
 
@@ -62,8 +88,8 @@ func IngressCheckpointKey(pid, sid, table string) string {
 	return fmt.Sprintf("%s%s.sources.%s.tables.%s.ingress_checkpoint", PrefixPipelineState, pid, sid, table)
 }
 
-func EgressCheckpointKey(pid, sid, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, table)
+func EgressCheckpointKey(pid, sid, sinkID, table string) string {
+	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, sinkID, table)
 }
 
 func DLQTopic(pid string) string {
@@ -212,15 +238,16 @@ func (s SourceConfig) Validate() error {
 }
 
 type SinkConfig struct {
-	ID   string `msg:"id" yaml:"id" json:"id"`
-	Type string `msg:"type" yaml:"type" json:"type"` // e.g., "databend"
-	DSN  string `msg:"dsn" yaml:"dsn" json:"dsn"`    // Data Source Name
+	ID      string                 `msg:"id" yaml:"id" json:"id"`
+	Type    string                 `msg:"type" yaml:"type" json:"type"` // e.g., "databend", "postgres_debug"
+	DSN     string                 `msg:"dsn" yaml:"dsn" json:"dsn"`    // Data Source Name
+	Options map[string]interface{} `msg:"options" yaml:"options" json:"options"`
 }
 
 func (s SinkConfig) Validate() error {
 	return validation.ValidateStruct(&s,
 		validation.Field(&s.ID, validation.Required, is.Alphanumeric),
-		validation.Field(&s.Type, validation.Required, validation.In("databend")),
+		validation.Field(&s.Type, validation.Required, validation.In("databend", "postgres_debug")),
 		validation.Field(&s.DSN, validation.Required),
 	)
 }

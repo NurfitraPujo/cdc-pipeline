@@ -20,7 +20,9 @@ type ChaosSink struct {
 	FailCount    int
 }
 
-func (s *ChaosSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error { return nil }
+func (s *ChaosSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
+	return nil
+}
 func (s *ChaosSink) BatchUpload(ctx context.Context, batch []protocol.Message) error {
 	for _, m := range batch {
 		if string(m.Payload) == `{"val":"poison"}` {
@@ -69,13 +71,13 @@ func TestE2E_DLQ(t *testing.T) {
 		MaxInterval:     100 * time.Millisecond,
 		EnableDLQ:       true,
 	}
-	
+
 	sub, err := nats.NewNatsSubscriber(env.NatsURL, "worker-1", 100, 1*time.Second)
 	require.NoError(t, err)
 	defer sub.Close()
 
 	sink := &ChaosSink{}
-	cons := engine.NewConsumer(pipelineID, sub, pub, sink, nil, env.GetKV(), 10, 100*time.Millisecond, retryCfg)
+	cons := engine.NewConsumer(pipelineID, "sink1", sub, pub, sink, nil, env.GetKV(), 10, 100*time.Millisecond, retryCfg, nil, nil)
 
 	go func() {
 		_ = cons.Run(ctx, topic)
@@ -87,7 +89,7 @@ func TestE2E_DLQ(t *testing.T) {
 		{SourceID: "s1", Table: "t1", Op: "insert", Payload: []byte(`{"val":"poison"}`), UUID: "u2"},
 		{SourceID: "s1", Table: "t1", Op: "insert", Payload: []byte(`{"val":"good2"}`), UUID: "u3"},
 	}
-	
+
 	// We must publish them as a single batch to simulate the bulk failure
 	batchData, _ := protocol.MessageBatch(msgs).MarshalMsg(nil)
 	wmMsg := message.NewMessage("batch-1", batchData)
@@ -111,10 +113,10 @@ func TestE2E_DLQ(t *testing.T) {
 
 	// 7. Verify Sink Counts
 	// In this simple test, if one wmMsg fails, we isolate it.
-	// Since all 3 protocol.Messages were in ONE wmMsg, the isolation mode 
+	// Since all 3 protocol.Messages were in ONE wmMsg, the isolation mode
 	// will try to upload that ONE wmMsg individually, fail, and route to DLQ.
 	// So SuccessCount will be 0 if they are all in one batch.
 	// If we want to test partial success, we should publish them as separate Watermill messages.
-	
+
 	t.Logf("Test Complete. Sink Success: %d, Sink Failures: %d", sink.SuccessCount, sink.FailCount)
 }

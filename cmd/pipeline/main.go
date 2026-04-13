@@ -16,7 +16,9 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/postgresdebug"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
@@ -75,12 +77,12 @@ func main() {
 	}
 
 	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		log.Info().Str("pipeline_id", id).Msg("Factory creating worker for pipeline")
+		log.Info().Str("pipeline_id", id).Int("num_sinks", len(cfg.Sinks)).Msg("Factory creating worker for pipeline")
 
 		var success bool
 		var pub *nats.NatsPublisher
-		var sub *nats.NatsSubscriber
-		var snk *databend.DatabendSink
+		var subscribers []*nats.NatsSubscriber
+		var snks []sink.Sink
 
 		// Cleanup on failure
 		defer func() {
@@ -88,10 +90,10 @@ func main() {
 				if pub != nil {
 					pub.Close()
 				}
-				if sub != nil {
+				for _, sub := range subscribers {
 					sub.Close()
 				}
-				if snk != nil {
+				for _, snk := range snks {
 					snk.Stop()
 				}
 			}
@@ -114,23 +116,6 @@ func main() {
 
 		src := postgres.NewPostgresSource(sourceID)
 
-		sinkID := cfg.Sinks[0]
-		sinkKey := protocol.SinkConfigKey(sinkID)
-		sinkEntry, err := kv.Get(sinkKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get sink config: %w", err)
-		}
-
-		var snkCfg protocol.SinkConfig
-		if err := json.Unmarshal(sinkEntry.Value(), &snkCfg); err != nil {
-			return nil, err
-		}
-
-		snk, err = databend.NewDatabendSink(sinkID, snkCfg.DSN)
-		if err != nil {
-			return nil, err
-		}
-
 		pub, err = nats.NewNatsPublisher(natsURL)
 		if err != nil {
 			return nil, err
@@ -141,9 +126,70 @@ func main() {
 			maxAckPending = 1000
 		}
 
-		sub, err = nats.NewNatsSubscriber(natsURL, fmt.Sprintf("cdc-worker-%s", id), maxAckPending, 30*time.Second)
-		if err != nil {
-			return nil, err
+		// Create a sink and subscriber for each configured sink
+		var activeSinkIDs []string
+		var preHooks []sink.PreTransformHook
+		var postHooks []sink.PostTransformHook
+		for _, sinkID := range cfg.Sinks {
+			sinkKey := protocol.SinkConfigKey(sinkID)
+			sinkEntry, err := kv.Get(sinkKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get sink config for sink %s: %w", sinkID, err)
+			}
+
+			var snkCfg protocol.SinkConfig
+			if err := json.Unmarshal(sinkEntry.Value(), &snkCfg); err != nil {
+				return nil, err
+			}
+
+			// Create sink based on type
+			var snk sink.Sink
+			var preHook sink.PreTransformHook
+			var postHook sink.PostTransformHook
+			switch snkCfg.Type {
+			case "databend":
+				snk, err = databend.NewDatabendSink(sinkID, snkCfg.DSN)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create databend sink %s: %w", sinkID, err)
+				}
+			case "postgres_debug":
+				debugOpts, err := postgresdebug.ParseOptions(snkCfg.Options)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse debug sink options for %s: %w", sinkID, err)
+				}
+				snk, err = postgresdebug.NewDebugSink(sinkID, snkCfg.DSN, debugOpts)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create postgres_debug sink %s: %w", sinkID, err)
+				}
+				capturer := snk.(sink.DebugCapturer)
+				preHook = capturer.CaptureBefore
+				postHook = capturer.CaptureAfter
+			default:
+				return nil, fmt.Errorf("unknown sink type: %s", snkCfg.Type)
+			}
+			snks = append(snks, snk)
+			activeSinkIDs = append(activeSinkIDs, sinkID)
+
+			// Store hooks for this sink
+			preHooks = append(preHooks, preHook)
+			postHooks = append(postHooks, postHook)
+
+			// Create a unique subscriber for this sink
+			// Durable name format: cdc-worker-{pipelineID}-sink-{sinkID}
+			sub, err := nats.NewNatsSubscriber(
+				natsURL,
+				fmt.Sprintf("cdc-worker-%s-sink-%s", id, sinkID),
+				maxAckPending,
+				30*time.Second,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create subscriber for sink %s: %w", sinkID, err)
+			}
+			subscribers = append(subscribers, sub)
+		}
+
+		if len(snks) == 0 {
+			return nil, fmt.Errorf("no valid sinks configured for pipeline %s", id)
 		}
 
 		retry := protocol.RetryConfig{MaxRetries: 3} // Default
@@ -152,24 +198,52 @@ func main() {
 		}
 
 		prod := engine.NewProducer(id, cfg, src, pub, kv)
-		var transformers []transformer.Transformer
-		for _, pCfg := range cfg.Processors {
-			f, ok := transformer.GetTransformer(pCfg.Type)
-			if !ok {
-				log.Warn().Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Transformer type not registered")
-				continue
+
+		// Create a consumer for each sink
+		// Index should match: snks[i] corresponds to preHooks[i], etc.
+		var consumers []*engine.Consumer
+		for i, snk := range snks {
+			sinkID := activeSinkIDs[i]
+			sub := subscribers[i]
+
+			// Use preHooks[i] and postHooks[i] for this sink's consumer
+			preHook := preHooks[i]
+			postHook := postHooks[i]
+
+			// Build fresh transformer instances for this consumer
+			var consumerTransformers []transformer.Transformer
+			for _, pCfg := range cfg.Processors {
+				f, ok := transformer.GetTransformer(pCfg.Type)
+				if !ok {
+					log.Warn().Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Transformer type not registered")
+					continue
+				}
+				t, err := f(pCfg.Options)
+				if err != nil {
+					log.Error().Err(err).Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Failed to create transformer")
+					continue
+				}
+				consumerTransformers = append(consumerTransformers, t)
 			}
-			t, err := f(pCfg.Options)
-			if err != nil {
-				log.Error().Err(err).Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Failed to create transformer")
-				continue
-			}
-			transformers = append(transformers, t)
+
+			cons := engine.NewConsumer(
+				id,
+				sinkID,
+				sub,
+				pub,
+				snk,
+				consumerTransformers,
+				kv,
+				cfg.BatchSize,
+				cfg.BatchWait,
+				retry,
+				preHook,
+				postHook,
+			)
+			consumers = append(consumers, cons)
 		}
 
-		cons := engine.NewConsumer(id, sub, pub, snk, transformers, kv, cfg.BatchSize, cfg.BatchWait, retry)
-
-		pipe := engine.NewPipeline(id, prod, cons, cfg)
+		pipe := engine.NewPipeline(id, prod, consumers, cfg)
 		pipe.Start(workerCtx)
 
 		success = true

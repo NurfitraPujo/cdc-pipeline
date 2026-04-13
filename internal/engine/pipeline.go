@@ -11,26 +11,26 @@ import (
 )
 
 type Pipeline struct {
-	id       string
-	producer *Producer
-	consumer *Consumer
-	config   protocol.PipelineConfig
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	finished chan struct{}
+	id        string
+	producer  *Producer
+	consumers []*Consumer
+	config    protocol.PipelineConfig
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	finished  chan struct{}
 }
 
-func NewPipeline(id string, prod *Producer, cons *Consumer, cfg protocol.PipelineConfig) *Pipeline {
+func NewPipeline(id string, prod *Producer, consumers []*Consumer, cfg protocol.PipelineConfig) *Pipeline {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
-		id:       id,
-		producer: prod,
-		consumer: cons,
-		config:   cfg,
-		ctx:      ctx,
-		cancel:   cancel,
-		finished: make(chan struct{}),
+		id:        id,
+		producer:  prod,
+		consumers: consumers,
+		config:    cfg,
+		ctx:       ctx,
+		cancel:    cancel,
+		finished:  make(chan struct{}),
 	}
 }
 
@@ -39,17 +39,22 @@ func (p *Pipeline) ID() string {
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
-	log.Info().Str("pipeline_id", p.id).Msg("Starting pipeline")
+	log.Info().Str("pipeline_id", p.id).Int("num_consumers", len(p.consumers)).Msg("Starting pipeline")
 
-	p.wg.Add(2)
-	go func() {
-		defer p.wg.Done()
-		topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.id)
-		if err := p.consumer.Run(p.ctx, topic); err != nil && err != context.Canceled {
-			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Consumer failed")
-		}
-	}()
+	// Start all consumers
+	for _, cons := range p.consumers {
+		p.wg.Add(1)
+		go func(c *Consumer) {
+			defer p.wg.Done()
+			topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.id)
+			if err := c.Run(p.ctx, topic); err != nil && err != context.Canceled {
+				log.Error().Err(err).Str("pipeline_id", p.id).Str("sink_id", c.sinkID).Msg("Consumer failed")
+			}
+		}(cons)
+	}
 
+	// Start producer goroutine
+	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 
@@ -103,8 +108,10 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		initialCP := protocol.Checkpoint{IngressLSN: minLSN}
 
-		// 3. Load Egress Stats for the consumer
-		p.consumer.LoadStats(sourceID, p.config.Tables)
+		// 3. Load Egress Stats for all consumers
+		for _, cons := range p.consumers {
+			cons.LoadStats(sourceID, p.config.Tables)
+		}
 
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
@@ -112,9 +119,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 
 		// In a drain scenario, the producer finishes.
-		// We should tell the consumer to drain until this LSN.
-		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling consumer drain.")
-		p.consumer.Drain(lsn)
+		// We should tell all consumers to drain until this LSN.
+		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling all consumers to drain.")
+		for _, cons := range p.consumers {
+			cons.Drain(lsn)
+		}
 	}()
 
 	// Background waiter to close finished channel
