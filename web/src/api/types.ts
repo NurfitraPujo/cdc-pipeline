@@ -59,12 +59,28 @@ export interface Transformation {
 
 export interface TableStats {
 	tableName: string;
-	eventsInserted: number;
-	eventsUpdated: number;
-	eventsDeleted: number;
-	eventsTotal: number;
-	lagMs: number;
-	lastEventAt?: string;
+	status: string;
+	rps: number;
+	total_synced: number;
+	error_count: number;
+	last_source_ts: string;
+	last_processed_ts: string;
+	lag_ms: number;
+	updated_at: string;
+}
+
+export interface PipelineStatusResponse {
+	pipeline_id: string;
+	status: Record<string, any>;
+	tables: Record<string, TableStats>;
+	sinks: Record<string, Record<string, TableStats>>;
+}
+
+export interface SSEMessage {
+	key: string;
+	data: any;
+	sink_id?: string;
+	is_debug?: boolean;
 }
 
 export interface Source {

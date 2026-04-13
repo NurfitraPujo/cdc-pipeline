@@ -151,6 +151,55 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 		return summary
 	}
 
+	// 1. Identify debug sinks to exclude them from production metrics
+	debugSinks := make(map[string]bool)
+	for _, key := range keys {
+		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
+			if entry, err := h.kv.Get(key); err == nil {
+				var sc protocol.SinkConfig
+				if err := json.Unmarshal(entry.Value(), &sc); err == nil && sc.Type == "postgres_debug" {
+					debugSinks[sc.ID] = true
+				}
+			}
+		}
+	}
+
+	// 2. Group production stats by pipeline and table to deduplicate counts
+	// pipelineID -> tableName -> max stats found across production sinks
+	aggStats := make(map[string]map[string]protocol.TableStats)
+
+	for _, key := range keys {
+		info := protocol.ParseTableStatsKey(key)
+		if info == nil {
+			continue
+		}
+
+		// Exclude debug sinks from production summary
+		if debugSinks[info.SinkID] {
+			continue
+		}
+
+		if entry, err := h.kv.Get(key); err == nil {
+			var st protocol.TableStats
+			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+				if _, ok := aggStats[info.PipelineID]; !ok {
+					aggStats[info.PipelineID] = make(map[string]protocol.TableStats)
+				}
+
+				current := aggStats[info.PipelineID][info.Table]
+				// Aggregate: Max for count and lag
+				if st.TotalSynced > current.TotalSynced {
+					current.TotalSynced = st.TotalSynced
+				}
+				if st.LagMS > current.LagMS {
+					current.LagMS = st.LagMS
+				}
+				aggStats[info.PipelineID][info.Table] = current
+			}
+		}
+	}
+
+	// 3. Compute final summary using aggregated data
 	var totalLag int64
 	var lagCount int64
 
@@ -184,18 +233,12 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 				summary.ErrorCount++
 			}
 
-			// Aggregate stats
-			prefix := protocol.PipelineStatusPrefix(id)
-			for _, k := range keys {
-				if strings.HasPrefix(k, prefix) && strings.HasSuffix(k, ".stats") {
-					if entry, err := h.kv.Get(k); err == nil {
-						var st protocol.TableStats
-						if err := json.Unmarshal(entry.Value(), &st); err == nil {
-							summary.TotalRowsSynchronized += st.TotalSynced
-							totalLag += st.LagMS
-							lagCount++
-						}
-					}
+			// Add this pipeline's aggregated production stats
+			if pStats, ok := aggStats[id]; ok {
+				for _, st := range pStats {
+					summary.TotalRowsSynchronized += st.TotalSynced
+					totalLag += st.LagMS
+					lagCount++
 				}
 			}
 		}
@@ -539,7 +582,23 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 		return
 	}
 
+	// 1. Identify debug sinks for this pipeline
+	debugSinks := make(map[string]bool)
+	for _, key := range keys {
+		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
+			if entry, err := h.kv.Get(key); err == nil {
+				var sc protocol.SinkConfig
+				if err := json.Unmarshal(entry.Value(), &sc); err == nil && sc.Type == "postgres_debug" {
+					debugSinks[sc.ID] = true
+				}
+			}
+		}
+	}
+
 	statusMap := make(map[string]any)
+	tableStats := make(map[string]protocol.TableStats) // aggregated by table
+	sinkStats := make(map[string]map[string]protocol.TableStats) // sinkID -> tableName -> stats
+
 	prefix := protocol.PipelineStatusPrefix(id)
 	for _, key := range keys {
 		if strings.HasPrefix(key, prefix) {
@@ -554,15 +613,47 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 					statusMap[key] = cp
 				}
 			} else if strings.HasSuffix(key, ".stats") {
+				info := protocol.ParseTableStatsKey(key)
 				var st protocol.TableStats
 				if err := json.Unmarshal(entry.Value(), &st); err == nil {
+					// Raw map for backward compatibility
 					statusMap[key] = st
+
+					if info != nil {
+						// Per-sink stats
+						if _, ok := sinkStats[info.SinkID]; !ok {
+							sinkStats[info.SinkID] = make(map[string]protocol.TableStats)
+						}
+						sinkStats[info.SinkID][info.Table] = st
+
+						// Aggregated table stats (exclude debug sinks)
+						if !debugSinks[info.SinkID] {
+							current := tableStats[info.Table]
+							if st.TotalSynced > current.TotalSynced {
+								current.TotalSynced = st.TotalSynced
+							}
+							if st.LagMS > current.LagMS {
+								current.LagMS = st.LagMS
+							}
+							// Keep most recent update time
+							if st.UpdatedAt.After(current.UpdatedAt) {
+								current.UpdatedAt = st.UpdatedAt
+								current.Status = st.Status
+							}
+							tableStats[info.Table] = current
+						}
+					}
 				}
 			}
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"pipeline_id": id, "status": statusMap})
+	c.JSON(http.StatusOK, gin.H{
+		"pipeline_id": id,
+		"status":      statusMap,  // Backward compatibility
+		"tables":      tableStats, // Aggregated production stats
+		"sinks":       sinkStats,  // Per-sink detailed stats
+	})
 }
 
 // --- Sources ---
@@ -1085,6 +1176,20 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 
+	// 1. Identify debug sinks for this pipeline to help frontend filter
+	keys, _ := h.kv.Keys()
+	debugSinks := make(map[string]bool)
+	for _, key := range keys {
+		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
+			if entry, err := h.kv.Get(key); err == nil {
+				var sc protocol.SinkConfig
+				if err := json.Unmarshal(entry.Value(), &sc); err == nil && sc.Type == "postgres_debug" {
+					debugSinks[sc.ID] = true
+				}
+			}
+		}
+	}
+
 	pattern := protocol.PipelineStatusPrefix(pipelineID) + "*"
 	watcher, err := h.kv.Watch(pattern)
 	if err != nil {
@@ -1104,6 +1209,8 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 
 			var data any
 			key := entry.Key()
+			sinkID := ""
+			isDebug := false
 
 			if strings.HasSuffix(key, "_checkpoint") {
 				var cp protocol.Checkpoint
@@ -1117,6 +1224,11 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 					continue
 				}
 				data = st
+
+				if info := protocol.ParseTableStatsKey(key); info != nil {
+					sinkID = info.SinkID
+					isDebug = debugSinks[sinkID]
+				}
 			} else if strings.HasSuffix(key, ".transition") {
 				var ts protocol.PipelineTransitionState
 				if err := json.Unmarshal(entry.Value(), &ts); err != nil {
@@ -1128,8 +1240,10 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 			}
 
 			c.SSEvent("message", map[string]any{
-				"key":  key,
-				"data": data,
+				"key":      key,
+				"data":     data,
+				"sink_id":  sinkID,
+				"is_debug": isDebug,
 			})
 			c.Writer.Flush()
 		}

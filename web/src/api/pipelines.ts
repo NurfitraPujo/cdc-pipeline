@@ -93,6 +93,10 @@ export const pipelinesApi = {
 		return apiClient.get<Pipeline>(`/pipelines/${id}`);
 	},
 
+	async getStatus(id: string): Promise<any> {
+		return apiClient.get<any>(`/pipelines/${id}/status`);
+	},
+
 	async create(data: CreatePipelineRequest): Promise<Pipeline> {
 		return apiClient.post<Pipeline>("/pipelines", data);
 	},
