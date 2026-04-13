@@ -73,9 +73,8 @@ func (s *DebugSink) ensureTable() error {
 		return nil
 	}
 
-	// Always quote table name to handle invalid characters/keywords
+	// 1. Create main messages table
 	quotedTable := pq.QuoteIdentifier(s.config.TableName)
-
 	createTable := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			id BIGSERIAL PRIMARY KEY,
@@ -97,19 +96,45 @@ func (s *DebugSink) ensureTable() error {
 			processing_latency_ms INTEGER,
 			captured_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 			message_timestamp TIMESTAMP WITH TIME ZONE,
-			CONSTRAINT valid_stage CHECK (capture_stage IN ('before', 'after', 'schema_change'))
+			CONSTRAINT valid_stage CHECK (capture_stage IN ('before', 'after'))
 		);
 	`, quotedTable)
 
 	if _, err := s.db.Exec(createTable); err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
+		return fmt.Errorf("failed to create messages table: %w", err)
 	}
 
+	// 2. Create schema changes table
+	quotedSchemaTable := pq.QuoteIdentifier(s.config.SchemaTableName)
+	createSchemaTable := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id BIGSERIAL PRIMARY KEY,
+			correlation_id UUID NOT NULL,
+			pipeline_id VARCHAR(255) NOT NULL,
+			source_id VARCHAR(255) NOT NULL,
+			sink_id VARCHAR(255) NOT NULL,
+			table_name VARCHAR(255) NOT NULL,
+			schema_name VARCHAR(255),
+			operation_type VARCHAR(20) NOT NULL,
+			payload JSONB NOT NULL,
+			captured_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			message_timestamp TIMESTAMP WITH TIME ZONE
+		);
+	`, quotedSchemaTable)
+
+	if _, err := s.db.Exec(createSchemaTable); err != nil {
+		return fmt.Errorf("failed to create schema changes table: %w", err)
+	}
+
+	// 3. Create indexes
 	indexBase := s.config.TableName
 	indexes := []string{
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(captured_at DESC)", pq.QuoteIdentifier("idx_"+indexBase+"_captured_at"), quotedTable),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(correlation_id)", pq.QuoteIdentifier("idx_"+indexBase+"_correlation"), quotedTable),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(pipeline_id, sink_id, table_name, captured_at DESC)", pq.QuoteIdentifier("idx_"+indexBase+"_pipeline_lookup"), quotedTable),
+		
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(captured_at DESC)", pq.QuoteIdentifier("idx_"+s.config.SchemaTableName+"_captured_at"), quotedSchemaTable),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(pipeline_id, sink_id, table_name)", pq.QuoteIdentifier("idx_"+s.config.SchemaTableName+"_lookup"), quotedSchemaTable),
 	}
 
 	for _, idx := range indexes {
@@ -119,7 +144,7 @@ func (s *DebugSink) ensureTable() error {
 	}
 
 	s.tableCreated = true
-	log.Info().Str("table", s.config.TableName).Msg("Debug sink table created")
+	log.Info().Str("table", s.config.TableName).Str("schema_table", s.config.SchemaTableName).Msg("Debug sink tables initialized")
 	return nil
 }
 
@@ -164,26 +189,24 @@ func (s *DebugSink) captureSchemaChange(ctx context.Context, msg protocol.Messag
 		schemaName = msg.Schema.Schema
 	}
 
-	quotedTable := pq.QuoteIdentifier(s.config.TableName)
+	quotedTable := pq.QuoteIdentifier(s.config.SchemaTableName)
 	query := fmt.Sprintf(`
 		INSERT INTO %s (
 			correlation_id, pipeline_id, source_id, sink_id, table_name, schema_name,
-			operation_type, capture_stage, payload, message_timestamp, transformer_names
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			operation_type, payload, message_timestamp
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, quotedTable)
 
 	_, err = s.db.ExecContext(ctx, query,
 		correlationID,
-		msg.SourceID, // pipeline_id (best effort)
+		msg.SourceID, // pipeline_id (best effort in E2E, usually should be passed from worker)
 		msg.SourceID,
 		s.name,
 		msg.Table,
 		schemaName,
 		msg.Op,
-		"schema_change",
 		payloadJSON,
 		msg.Timestamp,
-		pq.Array([]string{}), // Use pq.Array for TEXT[]
 	)
 
 	return err
@@ -213,31 +236,32 @@ func (s *DebugSink) runCleanup() {
 }
 
 func (s *DebugSink) cleanupByAge() {
-	quotedTable := pq.QuoteIdentifier(s.config.TableName)
-	// Use interval syntax for PostgreSQL
-	query := fmt.Sprintf(`
-		DELETE FROM %s WHERE captured_at < NOW() - ($1 || ' hours')::INTERVAL
-	`, quotedTable)
-
 	maxAgeHours := int(s.config.Retention.MaxAge.Hours())
-	_, err := s.db.Exec(query, fmt.Sprintf("%d", maxAgeHours))
-	if err != nil {
-		log.Error().Err(err).Msg("Debug sink: cleanup by age failed")
+	ageStr := fmt.Sprintf("%d", maxAgeHours)
+
+	tables := []string{s.config.TableName, s.config.SchemaTableName}
+	for _, t := range tables {
+		quotedTable := pq.QuoteIdentifier(t)
+		query := fmt.Sprintf(`DELETE FROM %s WHERE captured_at < NOW() - ($1 || ' hours')::INTERVAL`, quotedTable)
+		if _, err := s.db.Exec(query, ageStr); err != nil {
+			log.Error().Err(err).Str("table", t).Msg("Debug sink: cleanup by age failed")
+		}
 	}
 }
 
 func (s *DebugSink) cleanupByCount() {
-	quotedTable := pq.QuoteIdentifier(s.config.TableName)
-	// More efficient count-based cleanup
-	query := fmt.Sprintf(`
-		DELETE FROM %s WHERE id IN (
-			SELECT id FROM %s ORDER BY captured_at DESC OFFSET $1
-		)
-	`, quotedTable, quotedTable)
+	tables := []string{s.config.TableName, s.config.SchemaTableName}
+	for _, t := range tables {
+		quotedTable := pq.QuoteIdentifier(t)
+		query := fmt.Sprintf(`
+			DELETE FROM %s WHERE id IN (
+				SELECT id FROM %s ORDER BY captured_at DESC OFFSET $1
+			)
+		`, quotedTable, quotedTable)
 
-	_, err := s.db.Exec(query, s.config.Retention.MaxCount)
-	if err != nil {
-		log.Error().Err(err).Msg("Debug sink: cleanup by count failed")
+		if _, err := s.db.Exec(query, s.config.Retention.MaxCount); err != nil {
+			log.Error().Err(err).Str("table", t).Msg("Debug sink: cleanup by count failed")
+		}
 	}
 }
 

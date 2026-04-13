@@ -6,7 +6,8 @@ import (
 )
 
 type Config struct {
-	TableName string
+	TableName       string
+	SchemaTableName string
 
 	Retention RetentionConfig
 	Filters   FiltersConfig
@@ -60,7 +61,8 @@ type IndexesConfig struct {
 
 func ParseOptions(opts map[string]interface{}) (*Config, error) {
 	cfg := &Config{
-		TableName: "cdc_debug_messages",
+		TableName:       "cdc_debug_messages",
+		SchemaTableName: "cdc_debug_schema_changes",
 		Retention: RetentionConfig{
 			Mode:            "age",
 			MaxAge:          7 * 24 * time.Hour,
@@ -87,6 +89,10 @@ func ParseOptions(opts map[string]interface{}) (*Config, error) {
 
 	if v, ok := opts["table_name"].(string); ok && v != "" {
 		cfg.TableName = v
+	}
+
+	if v, ok := opts["schema_table_name"].(string); ok && v != "" {
+		cfg.SchemaTableName = v
 	}
 
 	if retention, ok := opts["retention"].(map[string]interface{}); ok {

@@ -30,7 +30,8 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 		Type: "postgres_debug",
 		DSN:  debugDSN,
 		Options: map[string]interface{}{
-			"table_name": "cdc_debug_e2e",
+			"table_name":        "cdc_debug_e2e",
+			"schema_table_name": "cdc_debug_schema_changes",
 		},
 	}
 	debugData, _ := json.Marshal(debugSinkCfg)
@@ -109,6 +110,13 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 	assert.NotEqual(t, userName, afterData["name"], "After stage should have masked name")
 	assert.Equal(t, float64(25), beforeData["age"])
 	assert.Equal(t, float64(25), afterData["age"])
+
+	// 8. Assert schema change was captured in its own table
+	require.Eventually(t, func() bool {
+		var count int
+		err := env.Postgres.QueryRow("SELECT count(*) FROM cdc_debug_schema_changes WHERE table_name = 'multi_test'").Scan(&count)
+		return err == nil && count > 0
+	}, 30*time.Second, 1*time.Second, "Debug sink should capture schema change in separate table")
 }
 
 func TestE2E_SinkIsolation(t *testing.T) {
