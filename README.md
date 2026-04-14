@@ -6,39 +6,74 @@ A high-performance, modular CDC (Change Data Capture) data pipeline from Postgre
 - **🛡️ Zero-Crash Architecture**: Robust first-principle lifecycle management (Cancel->Sleep->Close) and dual-layer panic recovery.
 - **⚡ Resilience First**: Built-in **Circuit Breaker** (Producer) and **Isolation Mode** (Consumer) to handle transient failures and "poison-pill" batches.
 - **🤖 Autonomous Supervision**: Recursive worker supervisor that detects unplanned crashes and automatically reboots pipelines with exponential backoff.
+- **🔗 Per-Sink Consumer Architecture**: Complete isolation between egress targets. A failure or slowdown in one sink (e.g., Debug DB) never blocks production data flow to others (e.g., Databend).
 - **🧬 Auto-Schema Evolution**: Automatic DDL application to the sink (`CREATE/ALTER TABLE`) when source schemas change.
 - **📦 Heterogeneous Batching**: Sophisticated grouping of CDC messages by column-set within a single batch, preventing SQL mismatches during live schema changes.
 - **🔄 Graceful Transitions**: Two-phase "Drain -> Shutdown -> Restart" protocol for zero-downtime, LSN-consistent configuration reloads.
 - **📊 Live Observability**: Real-time SSE (Server-Sent Events) metrics stream and full Prometheus integration for the "Four Golden Signals."
-- **🔌 Plug-and-Play (PnP)**: Fully interface-driven architecture for Sources, Sinks, Transformers, and Messaging backends.
+- **🔍 Deep Debugging**: Integrated PostgreSQL Debug Sink for full data lineage, capturing "before" and "after" transformation states with correlation IDs.
 
 ---
 
 ## 🏗️ Architecture Overview
 
-The pipeline operates as a reactive distributed system:
+The pipeline operates as a reactive distributed system with a **Fan-Out Consumer Model**:
 
 1.  **Control Plane (API)**: Hardened REST API (Go/Gin) for managing configurations, authentication (JWT), and live monitoring.
-2.  **Stateful Worker (Pipeline)**: Orchestrates Producers and Consumers. It is self-bootstrapping, self-healing, and reacts to configuration triggers in real-time.
-3.  **NATS JetStream**: The high-performance messaging backbone and persistent state store (`cdc-dp-config` bucket).
-4.  **LSN Checkpointing**: "At-least-once" delivery guarantee using NATS-persisted checkpoints for both Ingress (Postgres) and Egress (Databend).
+2.  **Stateful Worker (Pipeline)**: Orchestrates Producers and Consumers. It is self-bootstrapping and self-healing.
+3.  **Per-Sink Isolation**: For every configured sink, the worker spawns a dedicated **Consumer Goroutine** with its own:
+    - Unique NATS JetStream durable subscription.
+    - Independent egress checkpoint (LSN).
+    - Isolated retry logic and Dead Letter Queue (DLQ).
+4.  **NATS JetStream**: The high-performance messaging backbone and persistent state store.
 
 ### 🔄 At-Least-Once Delivery Flow
 1.  **Ingress**: Producer reads from Postgres LSN -> Persists Ingress LSN to NATS KV.
 2.  **Transport**: Batch published to NATS JetStream (Circuit Breaker protected).
-3.  **Consumption**: Consumer pulls batch -> Applies **Transformers** (Masking/Filtering).
-4.  **Egress**: Consumer uploads to Databend (Upsert/Replace) -> Persists Egress LSN to NATS KV -> Acks NATS.
+3.  **Consumption (N-Sinks)**: Each Sink's Consumer pulls the same batch independently.
+4.  **Transformation**: Consumer applies **Transformers** (Masking/Filtering).
+5.  **Egress**: Consumer uploads to target -> Persists Egress LSN to NATS KV -> Acks NATS.
+
+---
+
+## 🔍 PostgreSQL Debug Sink
+
+The Debug Sink acts as a high-fidelity data logger for data engineers. It captures the state of data at different stages of the pipeline to aid in debugging transformation logic and data quality issues.
+
+### Key Capabilities
+- **Correlation ID**: Links "before" and "after" records using a unique UUID, even across complex transformer chains.
+- **Transformation Audit**: Records the names of all transformers applied to a message and the processing latency.
+- **Filtering Visibility**: Messages dropped by transformers are still recorded in the "before" stage but marked as `filtered=TRUE`.
+- **Separated Storage**: 
+    - **Row Debug Data**: Stored in `cdc_debug_messages` (default) for ephemeral troubleshooting.
+    - **Schema Changes**: Stored in `cdc_debug_schema_changes` (default) for long-term schema evolution tracking.
+- **Smart Retention**: Configurable age-based (e.g., "7 days") or count-based (e.g., "last 1M rows") automatic cleanup.
+
+### Configuration Example
+```yaml
+sinks:
+  - id: debug-storage
+    type: postgres_debug
+    dsn: "postgres://user:pass@localhost:5432/debug_db"
+    options:
+      table_name: "my_debug_rows"
+      schema_table_name: "my_debug_schemas"
+      retention:
+        mode: "age"
+        max_age: "168h" # 7 days
+      sampling:
+        mode: "percentage"
+        value: 10 # Capture 10% of traffic
+```
 
 ---
 
 ## ⚡ Resilience & Reliability
 
-- **Circuit Breaker**: The Producer wraps NATS publishing in a circuit breaker. If NATS is unreachable, it trips to prevent head-of-line blocking and enters a retry/wait state.
-- **Isolation Mode**: If a batch fails repeatedly (poison-pill), the Consumer automatically switches to "Isolation Mode," processing messages individually to identify and route failing messages to the **DLQ (Dead Letter Queue)** while allowing the rest of the stream to continue.
-- **Autonomous Self-Healing**: 
-    1. **Panic Recovery**: Library-level panics are caught by `recover()` blocks.
-    2. **Termination**: The worker signals an "Unexpected Exit" to the supervisor.
-    3. **Reboot**: The supervisor re-fetches the latest config and restarts the pipeline from the last checkpoint.
+- **Fail-Fast Orchestration**: If the Producer fails (e.g., lost Postgres connection), the pipeline immediately signals all sibling Consumers to stop, preventing inconsistent "zombie" states.
+- **Circuit Breaker**: The Producer wraps NATS publishing in a circuit breaker. If NATS is unreachable, it trips to prevent head-of-line blocking.
+- **Isolation Mode**: If a batch fails repeatedly (poison-pill), the Consumer automatically identifies and routes failing messages to the **DLQ (Dead Letter Queue)** while allowing the rest of the stream to continue.
+- **Worker Group Isolation**: Use the `WORKER_GROUP` environment variable to ensure durable consumer names don't collide across logical environments (prod/staging) sharing a NATS cluster.
 
 ---
 
@@ -47,6 +82,7 @@ The pipeline operates as a reactive distributed system:
 - **MessagePack (`msgp`)**: High-performance, zero-allocation serialization format. 5-10x faster and significantly smaller than JSON.
 - **NATS JetStream**: Provides durable, persistent streams and a distributed Key-Value store for configuration and state.
 - **Watermill**: Used for building event-driven applications with a clean, pluggable messaging API.
+- **Google UUID**: RFC 4122 compliant unique identifiers for robust data correlation.
 - **Testcontainers-go**: Powers the E2E suite by orchestrating real infrastructure (Postgres, NATS, Databend) in Docker.
 
 ---
@@ -75,94 +111,13 @@ func (t *DecryptTransformer) Transform(ctx context.Context, m *protocol.Message)
 ```
 
 ### 2. Register the Factory
-In `internal/transformer/provider.go`, register your factory function:
+In `internal/transformer/builtin.go` or your init logic:
 
 ```go
 RegisterTransformer("decrypt", func(options map[string]any) (Transformer, error) {
     key := options["key"].(string)
     return &DecryptTransformer{Key: []byte(key)}, nil
 })
-```
-
-### 3. Configure in YAML
-Add your new transformer to the pipeline configuration:
-
-```yaml
-pipelines:
-  - id: "secure-pipeline"
-    processors:
-      - name: "decrypt-secrets"
-        type: "decrypt"
-        options:
-          key: "base64-encoded-key..."
-```
-
----
-
-## 🔌 Adding a New Source
-
-To support a new database (e.g., MySQL, MongoDB), implement the `Source` interface.
-
-### 1. Implement the Interface
-```go
-type MySource struct { /* ... */ }
-
-func (s *MySource) Name() string { return "mysource" }
-
-func (s *MySource) Start(ctx context.Context, config protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
-    out := make(chan []protocol.Message)
-    ack := make(chan struct{})
-    
-    go func() {
-        // Fetch data and send to 'out'
-        // Wait for 'ack' before sending next batch
-    }()
-    
-    return out, ack, nil
-}
-
-func (s *MySource) Stop() error { /* Cleanup */ }
-```
-
-### 2. Register in Worker Factory
-In `cmd/pipeline/main.go`, add your source to the factory logic:
-```go
-if srcCfg.Type == "mysource" {
-    src = mysource.NewMySource(sourceID)
-}
-```
-
----
-
-## 🔌 Adding a New Sink
-
-To support a new analytical store (e.g., BigQuery, ClickHouse), implement the `Sink` interface.
-
-### 1. Implement the Interface
-```go
-type MySink struct { /* ... */ }
-
-func (s *MySink) Name() string { return "mysink" }
-
-func (s *MySink) BatchUpload(ctx context.Context, messages []protocol.Message) error {
-    // Perform bulk upsert/replace to ensure idempotency
-    return nil
-}
-
-func (s *MySink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
-    // Execute DDL (CREATE/ALTER TABLE)
-    return nil
-}
-
-func (s *MySink) Stop() error { /* Cleanup */ }
-```
-
-### 2. Register in Worker Factory
-In `cmd/pipeline/main.go`, add your sink to the factory logic:
-```go
-if snkCfg.Type == "mysink" {
-    snk = mysink.NewMySink(sinkID, snkCfg.DSN)
-}
 ```
 
 ---
@@ -174,71 +129,27 @@ Once the API server is running, access the interactive Swagger UI:
 
 ---
 
-## ⚡ API Quickstart
-
-### 1. Authenticate
-```bash
-curl -X POST http://localhost:8080/api/v1/login \
-     -H "Content-Type: application/json" \
-     -d '{"username": "admin", "password": "admin"}'
-```
-*Returns a JWT token.*
-
-### 2. Stream Live Metrics (SSE)
-Receive a real-time stream of LSN progress and table stats:
-```bash
-curl -N -H "Authorization: Bearer <TOKEN>" http://localhost:8080/api/v1/pipelines/sync-01/metrics
-```
-
----
-
 ## 🛠️ Development & Testing
 
 ### Prerequisites
-Before running the pipeline or its tests, ensure you have the following installed:
-- **Go 1.26+**: For the backend services.
-- **Node.js & pnpm**: For the frontend dashboard.
-- **Container Runtime**: Docker or Podman (with the Docker socket enabled). This is **required** for the E2E integration tests as they use [Testcontainers](https://testcontainers.com/).
+- **Go 1.26+**
+- **Node.js & pnpm** (for dashboard)
+- **Docker/Podman** (for E2E tests)
 
-### 1. Backend Setup
-```bash
-# Install dependencies
-go mod tidy
-
-# (Optional) Generate MessagePack encoders if you modify internal/protocol
-go generate ./internal/protocol/...
-```
-
-### 2. Running the Full E2E Suite
-The integration tests orchestrate real NATS, Postgres, and Databend instances. Ensure your Docker/Podman daemon is running:
+### 1. Running the Full E2E Suite
+The integration tests orchestrate real NATS, Postgres, and Databend instances. 
 ```bash
 go test -v -timeout 10m ./internal/test/e2e/...
 ```
 
-### 3. Running the Components Locally
-```bash
-# Terminal 1: Start the Stateful Worker
-# It will automatically bootstrap NATS KV if not present
-export NATS_URL="nats://localhost:4222"
-go run ./cmd/pipeline
-
-# Terminal 2: Start the Control Plane API
-export NATS_URL="nats://localhost:4222"
-export JWT_SECRET="your-dev-secret"
-go run ./cmd/api
+### 2. Tuning Throughput
+You can tune NATS backpressure per-sink using `max_ack_pending` in the Sink configuration:
+```yaml
+sinks:
+  - id: high-volume-sink
+    type: databend
+    max_ack_pending: 5000 # Default is BatchSize * 2
 ```
-
-### 4. Frontend Setup
-```bash
-cd web
-pnpm install
-pnpm dev
-```
-
----
-
-## 🛡️ Stability Note
-This project includes a critical patch for `go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. This patch replaces an aggressive `panic` with an error log during connection EOF on shutdown. This is linked via a `replace` directive in `go.mod`. Combined with the **Cancel->Sleep->Close** sequence in `internal/source/postgres`, this ensures your production process never crashes during routine reloads.
 
 ---
 

@@ -238,10 +238,11 @@ func (s SourceConfig) Validate() error {
 }
 
 type SinkConfig struct {
-	ID      string                 `msg:"id" yaml:"id" json:"id"`
-	Type    string                 `msg:"type" yaml:"type" json:"type"` // e.g., "databend", "postgres_debug"
-	DSN     string                 `msg:"dsn" yaml:"dsn" json:"dsn"`    // Data Source Name
-	Options map[string]interface{} `msg:"options" yaml:"options" json:"options"`
+	ID            string                 `msg:"id" yaml:"id" json:"id"`
+	Type          string                 `msg:"type" yaml:"type" json:"type"` // e.g., "databend", "postgres_debug"
+	DSN           string                 `msg:"dsn" yaml:"dsn" json:"dsn"`    // Data Source Name
+	MaxAckPending int                    `msg:"max_ack" yaml:"max_ack_pending" json:"max_ack_pending"`
+	Options       map[string]interface{} `msg:"options" yaml:"options" json:"options"`
 }
 
 func (s SinkConfig) Validate() error {

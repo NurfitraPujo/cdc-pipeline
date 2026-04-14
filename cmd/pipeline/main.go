@@ -76,20 +76,32 @@ func main() {
 		log.Warn().Err(err).Msg("Failed to bootstrap KV")
 	}
 
+	// 2. Resource Management: Shared Publisher
+	sharedPub, err := nats.NewNatsPublisher(natsURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create shared NATS publisher")
+	}
+	defer sharedPub.Close()
+
+	// 3. Robustness: Unique Worker ID
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown-worker"
+	}
+	// Add random suffix to ensure uniqueness in container environments
+	workerID := fmt.Sprintf("%s-%s", hostname, time.Now().Format("05.000"))
+	workerGroup := os.Getenv("WORKER_GROUP")
+
 	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
 		log.Info().Str("pipeline_id", id).Int("num_sinks", len(cfg.Sinks)).Msg("Factory creating worker for pipeline")
 
 		var success bool
-		var pub *nats.NatsPublisher
 		var subscribers []*nats.NatsSubscriber
 		var snks []sink.Sink
 
-		// Cleanup on failure
+		// Cleanup on failure (Subscribers and Sinks are still per-pipeline)
 		defer func() {
 			if !success {
-				if pub != nil {
-					pub.Close()
-				}
 				for _, sub := range subscribers {
 					sub.Close()
 				}
@@ -115,16 +127,6 @@ func main() {
 		}
 
 		src := postgres.NewPostgresSource(sourceID)
-
-		pub, err = nats.NewNatsPublisher(natsURL)
-		if err != nil {
-			return nil, err
-		}
-
-		maxAckPending := cfg.BatchSize * 2
-		if maxAckPending < 1000 {
-			maxAckPending = 1000
-		}
 
 		// Create a sink and subscriber for each configured sink
 		var activeSinkIDs []string
@@ -174,11 +176,24 @@ func main() {
 			preHooks = append(preHooks, preHook)
 			postHooks = append(postHooks, postHook)
 
-			// Create a unique subscriber for this sink
-			// Durable name format: cdc-worker-{pipelineID}-sink-{sinkID}
+			// Throughput Tuning: MaxAckPending
+			maxAckPending := snkCfg.MaxAckPending
+			if maxAckPending <= 0 {
+				maxAckPending = cfg.BatchSize * 2
+				if maxAckPending < 1000 {
+					maxAckPending = 1000
+				}
+			}
+
+			// Durable Consumer Isolation: WORKER_GROUP prefix
+			durableName := fmt.Sprintf("cdc-worker-%s-sink-%s", id, sinkID)
+			if workerGroup != "" {
+				durableName = fmt.Sprintf("%s-%s", workerGroup, durableName)
+			}
+
 			sub, err := nats.NewNatsSubscriber(
 				natsURL,
-				fmt.Sprintf("cdc-worker-%s-sink-%s", id, sinkID),
+				durableName,
 				maxAckPending,
 				30*time.Second,
 			)
@@ -197,16 +212,13 @@ func main() {
 			retry = *cfg.Retry
 		}
 
-		prod := engine.NewProducer(id, cfg, src, pub, kv)
+		prod := engine.NewProducer(id, cfg, src, sharedPub, kv)
 
 		// Create a consumer for each sink
-		// Index should match: snks[i] corresponds to preHooks[i], etc.
 		var consumers []*engine.Consumer
 		for i, snk := range snks {
 			sinkID := activeSinkIDs[i]
 			sub := subscribers[i]
-
-			// Use preHooks[i] and postHooks[i] for this sink's consumer
 			preHook := preHooks[i]
 			postHook := postHooks[i]
 
@@ -230,7 +242,7 @@ func main() {
 				id,
 				sinkID,
 				sub,
-				pub,
+				sharedPub,
 				snk,
 				consumerTransformers,
 				kv,
@@ -255,10 +267,6 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start config watcher")
 	}
 
-	workerID, _ := os.Hostname()
-	if workerID == "" {
-		workerID = "unknown-worker"
-	}
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -283,6 +291,7 @@ func main() {
 		}
 	}()
 
+	// 4. Observability: Health & Metrics Server
 	healthPort := os.Getenv("HEALTH_PORT")
 	if healthPort == "" {
 		healthPort = "8081"
@@ -304,13 +313,15 @@ func main() {
 	mux.Handle("/metrics", promhttp.Handler())
 
 	healthSrv := &http.Server{
-		Addr: ":" + healthPort, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
+		Addr:              ":" + healthPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
 		log.Info().Str("port", healthPort).Msg("Health check server started")
 		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error().Err(err).Msg("Health check server failed")
+			log.Fatal().Err(err).Msg("Health check server failed to start")
 		}
 	}()
 

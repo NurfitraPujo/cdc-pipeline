@@ -115,10 +115,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
-			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed")
+			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed. Shutting down pipeline (fail-fast).")
+			p.cancel() // Stop all consumers
+			return
 		}
 
-		// In a drain scenario, the producer finishes.
+		// In a drain scenario, the producer finishes normally.
 		// We should tell all consumers to drain until this LSN.
 		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling all consumers to drain.")
 		for _, cons := range p.consumers {
