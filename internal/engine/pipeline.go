@@ -22,14 +22,11 @@ type Pipeline struct {
 }
 
 func NewPipeline(id string, prod *Producer, consumers []*Consumer, cfg protocol.PipelineConfig) *Pipeline {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
 		id:        id,
 		producer:  prod,
 		consumers: consumers,
 		config:    cfg,
-		ctx:       ctx,
-		cancel:    cancel,
 		finished:  make(chan struct{}),
 	}
 }
@@ -39,6 +36,9 @@ func (p *Pipeline) ID() string {
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
+	// Link the pipeline lifecycle to the provided context
+	p.ctx, p.cancel = context.WithCancel(ctx)
+	
 	log.Info().Str("pipeline_id", p.id).Int("num_consumers", len(p.consumers)).Msg("Starting pipeline")
 
 	// Start all consumers
@@ -147,7 +147,9 @@ func (p *Pipeline) Finished() <-chan struct{} {
 }
 
 func (p *Pipeline) Shutdown(ctx context.Context) error {
-	p.cancel()
+	if p.cancel != nil {
+		p.cancel()
+	}
 
 	select {
 	case <-ctx.Done():

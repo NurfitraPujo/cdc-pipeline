@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/api"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/infra"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	_ "github.com/NurfitraPujo/cdc-pipeline/docs"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
@@ -49,31 +49,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 2. Initialize Infrastructure
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		natsURL = nats.DefaultURL
 	}
 
-	nc, err := nats.Connect(natsURL)
+	nc, kv, err := infra.InitNATS(infra.NATSConfig{URL: natsURL})
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to connect to NATS")
+		log.Fatal().Err(err).Msg("Failed to initialize infrastructure")
 	}
 	defer nc.Close()
-
-	js, err := nc.JetStream()
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to get JetStream context")
-	}
-
-	kv, err := js.KeyValue(protocol.KVBucketName)
-	if err != nil {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket: protocol.KVBucketName,
-		})
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to get or create KV bucket")
-		}
-	}
 
 	h := api.NewHandler(kv)
 

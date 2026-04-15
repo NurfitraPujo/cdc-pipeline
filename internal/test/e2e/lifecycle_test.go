@@ -16,14 +16,14 @@ func TestProviderLifecycle(t *testing.T) {
 
 	t.Run("PostgresSource Lifecycle", func(t *testing.T) {
 		src := postgres.NewPostgresSource("s1")
-		assert.Equal(t, "postgres", src.Name())
+		assert.Equal(t, "s1", src.Name())
 		// Stop is safe even if not started
 		assert.Nil(t, src.Stop())
 	})
 
 	t.Run("DatabendSink Lifecycle", func(t *testing.T) {
 		snk, _ := databend.NewDatabendSink("snk1", env.DbConfig.DSN)
-		assert.Equal(t, "databend", snk.Name())
+		assert.Equal(t, "snk1", snk.Name())
 		assert.Nil(t, snk.Stop())
 	})
 

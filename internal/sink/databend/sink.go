@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	_ "github.com/datafuselabs/databend-go"
 	"github.com/rs/zerolog/log"
 	"github.com/vmihailenco/msgpack/v5"
@@ -39,6 +40,12 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 		db:      db,
 		pkCache: make(map[string][]string),
 	}, nil
+}
+
+func init() {
+	sink.Register("databend", func(sinkID string, dsn string, options map[string]interface{}) (sink.Sink, error) {
+		return NewDatabendSink(sinkID, dsn)
+	})
 }
 
 func (s *DatabendSink) Name() string {
@@ -318,6 +325,8 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 		}
 
 		query += strings.Join(valueStrings, ", ")
+
+		log.Debug().Str("table", table).Str("query", query).Int("num_records", len(records)).Msg("DatabendSink: Executing Upsert")
 
 		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
 			return fmt.Errorf("uploadTableBatch for group %s failed: %w", key, err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ type ConfigManager struct {
 	kv             nats.KeyValue
 	factory        WorkerFactory
 	workers        map[string]engine.PipelineWorker
+	configs        map[string]protocol.PipelineConfig // Track current configs for comparison
+	revisions      map[string]uint64                  // Track last seen revision
 	workersMu      sync.RWMutex
 	globalConfig   protocol.GlobalConfig
 	globalConfigMu sync.RWMutex
@@ -40,6 +43,8 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 		kv:           kv,
 		factory:      factory,
 		workers:      make(map[string]engine.PipelineWorker),
+		configs:      make(map[string]protocol.PipelineConfig),
+		revisions:    make(map[string]uint64),
 		globalConfig: cfg,
 	}
 }
@@ -138,6 +143,13 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 		}
 
 		m.applyHierarchy(&cfg)
+
+		// Update cache during global reload
+		m.workersMu.Lock()
+		m.configs[id] = cfg
+		m.revisions[id] = entry.Revision()
+		m.workersMu.Unlock()
+
 		m.transitionWorker(ctx, id, cfg)
 	}
 }
@@ -152,14 +164,9 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			if entry == nil {
 				continue
 			}
-			log.Info().
-				Str("key", entry.Key()).
-				Str("operation", entry.Operation().String()).
-				Msg("Pipeline update received")
 
 			pipelineID := extractPipelineID(entry.Key())
 			if pipelineID == "" {
-				log.Error().Str("key", entry.Key()).Msg("Failed to extract pipeline ID from key")
 				continue
 			}
 
@@ -179,6 +186,35 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			}
 
 			m.applyHierarchy(&cfg)
+
+			// Idempotency check: Skip if revision is older than what we have
+			// or if the configuration is semantically identical.
+			m.workersMu.Lock()
+			lastRev := m.revisions[pipelineID]
+			currentCfg, exists := m.configs[pipelineID]
+
+			if exists && entry.Revision() <= lastRev {
+				m.workersMu.Unlock()
+				continue
+			}
+
+			if exists && reflect.DeepEqual(currentCfg, cfg) {
+				m.revisions[pipelineID] = entry.Revision()
+				m.workersMu.Unlock()
+				log.Debug().Str("pipeline_id", pipelineID).Uint64("rev", entry.Revision()).Msg("Config unchanged, skipping restart")
+				continue
+			}
+
+			// Update cache and proceed with transition
+			m.configs[pipelineID] = cfg
+			m.revisions[pipelineID] = entry.Revision()
+			m.workersMu.Unlock()
+
+			log.Info().
+				Str("pipeline_id", pipelineID).
+				Uint64("revision", entry.Revision()).
+				Msg("Pipeline configuration changed, triggering transition")
+
 			m.transitionWorker(ctx, pipelineID, cfg)
 		}
 	}
@@ -307,6 +343,13 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 					return
 				}
 				m.applyHierarchy(&latestCfg)
+
+				// Synchronize cache so Watch events don't re-trigger
+				m.workersMu.Lock()
+				m.configs[pid] = latestCfg
+				m.revisions[pid] = entry.Revision()
+				m.workersMu.Unlock()
+
 				m.startNewWorker(ctx, pid, latestCfg)
 			}
 		}
@@ -318,6 +361,8 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	w, ok := m.workers[id]
 	if ok {
 		delete(m.workers, id)
+		delete(m.configs, id)
+		delete(m.revisions, id)
 	}
 	m.workersMu.Unlock()
 

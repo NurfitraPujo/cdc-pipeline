@@ -40,15 +40,21 @@ func TestE2E_DynamicDiscovery(t *testing.T) {
 	_, err := env.Postgres.Exec("CREATE TABLE table_dynamic (id SERIAL PRIMARY KEY, name TEXT)")
 	require.NoError(t, err)
 
+	time.Sleep(5 * time.Second)
+
 	// 3. Wait for discovery reload to COMPLETE
 	log.Printf("Waiting for discovery reload to start...")
 	require.Eventually(t, func() bool {
 		entry, err := env.KV.Get(protocol.PipelineConfigKey(pipeCfg.ID))
-		if err != nil { return false }
+		if err != nil {
+			return false
+		}
 		var cfg protocol.PipelineConfig
 		json.Unmarshal(entry.Value(), &cfg)
 		for _, tbl := range cfg.Tables {
-			if tbl == "table_dynamic" { return true }
+			if tbl == "table_dynamic" {
+				return true
+			}
 		}
 		return false
 	}, 60*time.Second, 1*time.Second, "Table should be discovered in config")
@@ -61,7 +67,7 @@ func TestE2E_DynamicDiscovery(t *testing.T) {
 
 	// Extra buffer for worker startup
 	log.Printf("Reload complete. Waiting for new worker to settle...")
-	time.Sleep(15 * time.Second)
+	// time.Sleep(30 * time.Second)
 
 	// 4. Now perform inserts into the dynamic table
 	log.Printf("Performing inserts into dynamic table...")

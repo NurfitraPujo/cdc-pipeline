@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
@@ -59,6 +60,16 @@ func NewDebugSink(name string, dsn string, config *Config) (*DebugSink, error) {
 	go s.runCleanup()
 
 	return s, nil
+}
+
+func init() {
+	sink.Register("postgres_debug", func(sinkID string, dsn string, options map[string]interface{}) (sink.Sink, error) {
+		opts, err := ParseOptions(options)
+		if err != nil {
+			return nil, err
+		}
+		return NewDebugSink(sinkID, dsn, opts)
+	})
 }
 
 func (s *DebugSink) Name() string {

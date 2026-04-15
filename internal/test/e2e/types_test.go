@@ -88,6 +88,7 @@ func TestE2E_PostgresTypes(t *testing.T) {
 		"c_bool":      1,
 	}
 
+
 	env.EventuallyCountDatabend(tableName, 1, 60*time.Second)
-	env.EventuallyMatchDatabend(tableName, 1, expected, 60*time.Second)
+	env.EventuallyMatchDatabendRow(tableName, "", nil, expected, 60*time.Second)
 }

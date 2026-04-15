@@ -1,7 +1,9 @@
 package logger
 
 import (
+	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -9,24 +11,56 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Init initializes the global logger with the specified level.
-// If isDevelopment is true, it uses console-friendly output.
 func Init(level string, isDevelopment bool) {
-	// 1. Set global time format to UNIX for speed and machine readability
 	zerolog.TimeFieldFormat = time.RFC3339
 
-	// 2. Set log level
 	lvl, err := zerolog.ParseLevel(level)
 	if err != nil {
 		lvl = zerolog.InfoLevel
 	}
 	zerolog.SetGlobalLevel(lvl)
 
-	// 3. Configure output
+	env := os.Getenv("ENV")
+	doubleLog := env != "production" && env != "staging"
+
 	if isDevelopment {
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+		if doubleLog {
+			logFile := filepath.Join("logs", "app.log")
+			if err := os.MkdirAll("logs", 0755); err != nil {
+				log.Warn().Err(err).Msg("Failed to create logs directory, file logging disabled")
+				log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+			} else {
+				file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err != nil {
+					log.Warn().Err(err).Msg("Failed to open log file, file logging disabled")
+					log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+				} else {
+					multi := io.MultiWriter(os.Stderr, file)
+					log.Logger = zerolog.New(multi).With().Timestamp().Logger().Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+				}
+			}
+		} else {
+			log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+		}
 	} else {
-		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+		if doubleLog {
+			logFile := filepath.Join("logs", "app.log")
+			if err := os.MkdirAll("logs", 0755); err != nil {
+				log.Warn().Err(err).Msg("Failed to create logs directory, file logging disabled")
+				log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+			} else {
+				file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err != nil {
+					log.Warn().Err(err).Msg("Failed to open log file, file logging disabled")
+					log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+				} else {
+					multi := io.MultiWriter(os.Stderr, file)
+					log.Logger = zerolog.New(multi).With().Timestamp().Logger()
+				}
+			}
+		} else {
+			log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+		}
 	}
 }
 

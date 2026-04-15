@@ -40,7 +40,8 @@ func TestDebugSink_Integration(t *testing.T) {
 
 	// Create debug sink config
 	cfg := &Config{
-		TableName: "cdc_debug_test",
+		TableName:       "cdc_debug_test",
+		SchemaTableName: "cdc_debug_schema_test",
 		Retention: RetentionConfig{
 			Mode:            "disabled",
 			CleanupInterval: time.Hour,
@@ -95,7 +96,7 @@ func TestDebugSink_Integration(t *testing.T) {
 		// Verify it was captured
 		var rowCount int
 		err = sink.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM cdc_debug_test WHERE capture_stage = 'schema_change'",
+			"SELECT COUNT(*) FROM cdc_debug_schema_test",
 		).Scan(&rowCount)
 		require.NoError(t, err)
 		assert.Equal(t, 1, rowCount)
@@ -168,7 +169,8 @@ func TestDebugSink_Integration(t *testing.T) {
 	t.Run("Filter by Operation Type", func(t *testing.T) {
 		// Create sink with only insert operation
 		cfg := &Config{
-			TableName: "cdc_debug_filtered",
+			TableName:       "cdc_debug_filtered",
+			SchemaTableName: "cdc_debug_schema_filtered",
 			Retention: RetentionConfig{
 				Mode: "disabled",
 			},
@@ -216,7 +218,8 @@ func TestDebugSink_Integration(t *testing.T) {
 
 	t.Run("Table Filtering", func(t *testing.T) {
 		cfg := &Config{
-			TableName: "cdc_debug_table_filter",
+			TableName:       "cdc_debug_table_filter",
+			SchemaTableName: "cdc_debug_schema_table_filter",
 			Retention: RetentionConfig{
 				Mode: "disabled",
 			},

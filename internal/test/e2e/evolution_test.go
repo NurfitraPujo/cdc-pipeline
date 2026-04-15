@@ -45,5 +45,5 @@ func TestE2E_SchemaEvolution(t *testing.T) {
 
 	// 4. Assert DDL propagated and data synced
 	env.EventuallyCountDatabend("users_evo", 2, 30*time.Second)
-	env.EventuallyMatchDatabend("users_evo", 2, map[string]any{"phone": "123-456"}, 30*time.Second)
+	env.EventuallyMatchDatabendRow("users_evo", "name", "evo-user", map[string]any{"phone": "123-456"}, 30*time.Second)
 }

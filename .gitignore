@@ -10,3 +10,5 @@ web/node_modules/
 bin/
 vendor/
 !internal/vendor/go-pq-cdc/
+
+logs

@@ -31,7 +31,7 @@ type Producer struct {
 
 func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
 	settings := gobreaker.Settings{
-		Name:        "nats-publisher",
+		Name:        "nats-publisher-" + pipelineID,
 		MaxRequests: 3,
 		Interval:    5 * time.Second,
 		Timeout:     10 * time.Second,
@@ -117,6 +117,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					batch := protocol.MessageBatch(msgs)
 					payload, err := batch.MarshalMsg(nil)
 					if err != nil {
+						log.Error().Err(err).Msg("Failed to marshal batch payload")
 						return nil, err
 					}
 

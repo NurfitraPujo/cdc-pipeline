@@ -1,10 +1,13 @@
 package nats
 
 import (
+	"time"
+
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	go_nats "github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 type NatsPublisher struct {
@@ -22,6 +25,8 @@ func NewNatsPublisher(url string) (*NatsPublisher, error) {
 			},
 			NatsOptions: []go_nats.Option{
 				go_nats.Name("cdc-data-pipeline-publisher"),
+				go_nats.MaxReconnects(-1),
+				go_nats.ReconnectWait(1 * time.Second),
 			},
 		},
 		logger.NewWatermillLogger(),
@@ -33,7 +38,11 @@ func NewNatsPublisher(url string) (*NatsPublisher, error) {
 }
 
 func (p *NatsPublisher) Publish(topic string, messages ...*message.Message) error {
-	return p.publisher.Publish(topic, messages...)
+	err := p.publisher.Publish(topic, messages...)
+	if err != nil {
+		log.Error().Err(err).Str("topic", topic).Msg("NatsPublisher: Publish failed")
+	}
+	return err
 }
 
 func (p *NatsPublisher) Close() error {

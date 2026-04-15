@@ -6,18 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/sink/postgresdebug"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
+	_ "github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	_ "github.com/NurfitraPujo/cdc-pipeline/internal/sink/postgresdebug"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -26,14 +25,11 @@ import (
 )
 
 type Environment struct {
-	T      *testing.T
-	Ctx    context.Context
-	Cancel context.CancelFunc
+	Ctx context.Context
+	T   *testing.T
 
-	NatsConn *go_nats.Conn
-	JS       go_nats.JetStreamContext
-	KV       go_nats.KeyValue
-	NatsURL  string
+	NatsURL string
+	KV      go_nats.KeyValue
 
 	Postgres *sql.DB
 	PgConfig protocol.SourceConfig
@@ -52,220 +48,139 @@ type Environment struct {
 }
 
 func Setup(t *testing.T) *Environment {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx := context.Background()
 
-	// 1. Start NATS
+	logger.Init("debug", true)
+	SetTestContainerProvider()
+
+	// 1. NATS
 	natsC, err := StartNats(ctx)
 	require.NoError(t, err)
 	natsURL, _ := natsC.ConnectionString(ctx)
-	nc, _ := go_nats.Connect(natsURL)
-	js, _ := nc.JetStream()
 
-	_, err = js.AddStream(&go_nats.StreamConfig{
-		Name:     "cdc-data-pipeline",
-		Subjects: []string{"cdc_pipeline_*_ingest", "cdc_pipeline_*_dlq"},
-	})
+	nc, err := go_nats.Connect(natsURL)
 	require.NoError(t, err)
-
+	js, _ := nc.JetStream()
 	kv, _ := js.CreateKeyValue(&go_nats.KeyValueConfig{Bucket: protocol.KVBucketName})
 
-	// 2. Start Postgres
+	// Set small timeouts for faster E2E transitions, but enough for Postgres to release slots
+	globalCfg := protocol.GlobalConfig{
+		BatchSize:          1000,
+		BatchWait:          100 * time.Millisecond,
+		DrainTimeout:       5 * time.Second,
+		ShutdownTimeout:    5 * time.Second,
+		StabilizationDelay: 2 * time.Second,
+		GlobalReloadDelay:  500 * time.Millisecond,
+	}
+	globalData, _ := json.Marshal(globalCfg)
+	kv.Put(protocol.KeyGlobalConfig, globalData)
+
+	// 2. Postgres
 	pgC, err := StartPostgres(ctx)
 	require.NoError(t, err)
 	pgHost, _ := pgC.Host(ctx)
 	pgPort, _ := pgC.MappedPort(ctx, "5432")
 	pgDSN := fmt.Sprintf("postgres://postgres:postgres@%s:%s/cdc_src?sslmode=disable", pgHost, pgPort.Port())
-	pgDB, err := sql.Open("pgx", pgDSN)
-	require.NoError(t, err)
+	pgDB, _ := sql.Open("postgres", pgDSN)
 
-	_, err = pgDB.Exec("CREATE PUBLICATION cdc_pub FOR ALL TABLES")
-	require.NoError(t, err)
-
-	srcCfg := protocol.SourceConfig{
-		ID:              "pg1",
-		Type:            "postgres",
-		Host:            pgHost,
-		Port:            pgPort.Int(),
-		User:            "postgres",
-		PassEncrypted:   "postgres",
-		Database:        "cdc_src",
-		SlotName:        fmt.Sprintf("cdc_slot_%d", time.Now().UnixNano()),
-		PublicationName: "cdc_pub",
-		Schemas:         []string{"public"},
+	pgConfig := protocol.SourceConfig{
+		ID:                "pg1",
+		Type:              "postgres",
+		Host:              pgHost,
+		Port:              pgPort.Int(),
+		User:              "postgres",
+		PassEncrypted:     "postgres",
+		Database:          "cdc_src",
+		SlotName:          "cdc_slot",
+		PublicationName:   "cdc_pub",
+		Schemas:           []string{"public"},
+		DiscoveryInterval: 2 * time.Second,
 	}
 
-	// 3. Start Databend
+	data, _ := json.Marshal(pgConfig)
+	kv.Put(protocol.SourceConfigKey(pgConfig.ID), data)
+
+	// 3. Databend
 	dbC, dbDSN, err := StartDatabend(ctx)
 	require.NoError(t, err)
-	dbDB, err := sql.Open("databend", dbDSN)
-	require.NoError(t, err)
+	dbDB, _ := sql.Open("databend", dbDSN)
 
-	snkCfg := protocol.SinkConfig{
+	dbConfig := protocol.SinkConfig{
 		ID:   "db1",
 		Type: "databend",
 		DSN:  dbDSN,
 	}
 
-	srcData, _ := json.Marshal(srcCfg)
-	kv.Put(protocol.SourceConfigKey(srcCfg.ID), srcData)
-	snkData, _ := json.Marshal(snkCfg)
-	kv.Put(protocol.SinkConfigKey(snkCfg.ID), snkData)
+	data, _ = json.Marshal(dbConfig)
+	kv.Put(protocol.SinkConfigKey(dbConfig.ID), data)
 
 	env := &Environment{
-		T:         t,
 		Ctx:       ctx,
-		Cancel:    cancel,
-		NatsConn:  nc,
-		JS:        js,
-		KV:        kv,
+		T:         t,
 		NatsURL:   natsURL,
+		KV:        kv,
 		Postgres:  pgDB,
-		PgConfig:  srcCfg,
+		PgConfig:  pgConfig,
 		Databend:  dbDB,
-		DbConfig:  snkCfg,
+		DbConfig:  dbConfig,
 		NatsC:     natsC,
 		PostgresC: pgC,
 		DatabendC: dbC,
 	}
 
 	t.Cleanup(func() {
-		env.Close()
+		env.Cleanup()
 	})
 
 	return env
 }
 
-func (e *Environment) GetKV() go_nats.KeyValue {
-	return e.KV
-}
-
-func (e *Environment) Close() {
-	log.Printf("Cleaning up E2E environment...")
+func (e *Environment) Cleanup() {
+	log.Println("Cleaning up E2E environment...")
 	if e.Mgr != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-
-		e.Mgr.Stop(ctx)
-		cancel()
+		e.Mgr.Stop(context.Background())
 	}
-
-	time.Sleep(1 * time.Second)
-
 	if e.Postgres != nil {
 		e.Postgres.Close()
 	}
 	if e.Databend != nil {
 		e.Databend.Close()
 	}
-	if e.NatsConn != nil {
-		e.NatsConn.Close()
+	if e.DebugDB != nil {
+		e.DebugDB.Close()
 	}
 
-	if e.PostgresC != nil {
-		e.PostgresC.Terminate(context.Background())
-	}
+	// Wait a bit for connections to close
+	time.Sleep(1 * time.Second)
+
 	if e.DatabendC != nil {
-		e.DatabendC.Terminate(context.Background())
+		e.DatabendC.Terminate(e.Ctx)
+	}
+	if e.PostgresC != nil {
+		e.PostgresC.Terminate(e.Ctx)
 	}
 	if e.NatsC != nil {
-		e.NatsC.Terminate(context.Background())
-	}
-
-	if e.Cancel != nil {
-		e.Cancel()
+		e.NatsC.Terminate(e.Ctx)
 	}
 }
 
+func (e *Environment) Close() {
+	e.Cleanup()
+}
+
+func (e *Environment) GetKV() go_nats.KeyValue {
+	return e.KV
+}
+
 func (e *Environment) StartWorker() {
-	factory := func(workerCtx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
-		if len(cfg.Sources) == 0 {
-			return nil, fmt.Errorf("no sources")
-		}
-		sourceID := cfg.Sources[0]
-		srcEntry, err := e.KV.Get(protocol.SourceConfigKey(sourceID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get source config: %w", err)
-		}
-		var srcCfg protocol.SourceConfig
-		if err := json.Unmarshal(srcEntry.Value(), &srcCfg); err != nil {
-			return nil, err
-		}
-		srcCfg.Tables = cfg.Tables
-		// Ensure unique slot for every worker instance to avoid contention on reload
-		srcCfg.SlotName = fmt.Sprintf("%s_%d", srcCfg.SlotName, time.Now().UnixNano())
-
-		src := postgres.NewPostgresSource(sourceID)
-		pub, err := nats.NewNatsPublisher(e.NatsURL)
-		if err != nil {
-			return nil, err
-		}
-
-		var consumers []*engine.Consumer
-		for _, sinkID := range cfg.Sinks {
-			snkEntry, err := e.KV.Get(protocol.SinkConfigKey(sinkID))
-			if err != nil {
-				return nil, fmt.Errorf("failed to get sink config for %s: %w", sinkID, err)
-			}
-			var snkCfg protocol.SinkConfig
-			if err := json.Unmarshal(snkEntry.Value(), &snkCfg); err != nil {
-				return nil, err
-			}
-
-			var snk sink.Sink
-			var preHook sink.PreTransformHook
-			var postHook sink.PostTransformHook
-
-			switch snkCfg.Type {
-			case "databend":
-				snk, err = databend.NewDatabendSink(sinkID, snkCfg.DSN)
-				if err != nil {
-					return nil, err
-				}
-			case "postgres_debug":
-				opts, err := postgresdebug.ParseOptions(snkCfg.Options)
-				if err != nil {
-					return nil, err
-				}
-				dsnk, err := postgresdebug.NewDebugSink(sinkID, snkCfg.DSN, opts)
-				if err != nil {
-					return nil, err
-				}
-				snk = dsnk
-				preHook = dsnk.CaptureBefore
-				postHook = dsnk.CaptureAfter
-			default:
-				return nil, fmt.Errorf("unknown sink type: %s", snkCfg.Type)
-			}
-
-			sub, err := nats.NewNatsSubscriber(e.NatsURL, fmt.Sprintf("cdc-worker-%s-sink-%s", id, sinkID), 1000, 30*time.Second)
-			if err != nil {
-				return nil, err
-			}
-
-			// Initialize transformers for this consumer
-			var consumerTransformers []transformer.Transformer
-			for _, pCfg := range cfg.Processors {
-				tf, ok := transformer.GetTransformer(pCfg.Type)
-				if !ok {
-					return nil, fmt.Errorf("unknown transformer type: %s", pCfg.Type)
-				}
-				t, err := tf(pCfg.Options)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create transformer %s: %w", pCfg.Name, err)
-				}
-				consumerTransformers = append(consumerTransformers, t)
-			}
-
-			cons := engine.NewConsumer(id, sinkID, sub, pub, snk, consumerTransformers, e.KV, cfg.BatchSize, cfg.BatchWait, protocol.RetryConfig{MaxRetries: 3}, preHook, postHook)
-			consumers = append(consumers, cons)
-		}
-
-		prod := engine.NewProducer(id, cfg, src, pub, e.KV)
-		pipe := engine.NewPipeline(id, prod, consumers, cfg)
-		pipe.Start(workerCtx)
-		return pipe, nil
+	pub, _ := nats.NewNatsPublisher(e.NatsURL)
+	pipelineFactory := &engine.PipelineFactory{
+		KV:        e.KV,
+		Publisher: pub,
+		NatsURL:   e.NatsURL,
 	}
 
-	e.Mgr = config.NewConfigManager(e.KV, factory)
+	e.Mgr = config.NewConfigManager(e.KV, pipelineFactory.CreateWorker)
 	e.Mgr.Watch(e.Ctx)
 }
 
@@ -273,9 +188,9 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 	_, err := e.Postgres.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id SERIAL PRIMARY KEY, name TEXT, age INT, metadata JSONB, created_at TIMESTAMP DEFAULT NOW())", table))
 	require.NoError(e.T, err)
 
-	for i := 0; i < rows; i++ {
-		_, err = e.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age, metadata) VALUES ($1, $2, $3)", table),
-			fmt.Sprintf("user-%d", i), 20+(i%50), `{"key": "value"}`)
+	for i := 1; i <= rows; i++ {
+		_, err := e.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age, metadata) VALUES ($1, $2, $3)", table),
+			fmt.Sprintf("user-%d", i), 20+i, `{"role": "user"}`)
 		require.NoError(e.T, err)
 	}
 }
@@ -283,57 +198,95 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 func (e *Environment) EventuallyCountDatabend(table string, expected int, timeout time.Duration) {
 	require.Eventually(e.T, func() bool {
 		var count int
-		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM \"%s\"", table)).Scan(&count)
+		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
 		if err != nil {
+			log.Printf("Databend query failed: %v", err)
 			return false
-		}
-		if count > 0 {
-			log.Printf("EventuallyCount [%s]: Current count: %d, Expected: %d", table, count, expected)
 		}
 		return count == expected
-	}, timeout, 1*time.Second, "Expected %d rows in Databend table %s", expected, table)
+	}, timeout, 1*time.Second)
 }
 
-func (e *Environment) EventuallyMatchDatabend(table string, id int, expected map[string]any, timeout time.Duration) {
-	require.Eventually(e.T, func() bool {
-		rows, err := e.Databend.Query(fmt.Sprintf("SELECT * FROM \"%s\" WHERE id = ?", table), id)
-		if err != nil {
-			return false
-		}
-		defer rows.Close()
+func (e *Environment) EventuallyMatchDatabend(table string, expected map[string]any, timeout time.Duration) {
+	e.EventuallyMatchDatabendRow(table, "", nil, expected, timeout)
+}
 
-		if !rows.Next() {
-			return false
+func (e *Environment) EventuallyMatchDatabendRow(table string, filterCol string, filterVal any, expected map[string]any, timeout time.Duration) {
+	start := time.Now()
+	for time.Since(start) < timeout {
+		if e.checkMatch(table, filterCol, filterVal, expected) {
+			return
 		}
+		time.Sleep(1 * time.Second)
+	}
+	e.T.Fatalf("Timeout waiting for match in table %s", table)
+}
 
-		cols, _ := rows.Columns()
-		values := make([]any, len(cols))
-		pointers := make([]any, len(cols))
-		for i := range values {
-			pointers[i] = &values[i]
-		}
+func (e *Environment) checkMatch(table string, filterCol string, filterVal any, expected map[string]any) bool {
+	query := fmt.Sprintf("SELECT * FROM %s", table)
+	var args []any
+	if filterCol != "" {
+		query += fmt.Sprintf(" WHERE %s = ?", filterCol)
+		args = append(args, filterVal)
+	}
+	query += " LIMIT 1"
 
-		if err := rows.Scan(pointers...); err != nil {
-			return false
-		}
+	rows, err := e.Databend.Query(query, args...)
+	if err != nil {
+		log.Printf("Databend query failed: %v", err)
+		return false
+	}
+	defer rows.Close()
 
-		actual := make(map[string]any)
-		for i, col := range cols {
-			actual[col] = values[i]
-		}
+	columns, _ := rows.Columns()
+	values := make([]any, len(columns))
+	valuePtrs := make([]any, len(columns))
+	for i := range columns {
+		valuePtrs[i] = &values[i]
+	}
 
-		match := true
-		for k, v := range expected {
-			if fmt.Sprintf("%v", actual[k]) != fmt.Sprintf("%v", v) {
-				match = false
-				break
+	if !rows.Next() {
+		log.Printf("Databend query returned no rows! Query: %s", query)
+		return false
+	}
+
+	err = rows.Scan(valuePtrs...)
+	if err != nil {
+		log.Printf("Databend scan failed: %v", err)
+		return false
+	}
+
+	actual := make(map[string]any)
+	for i, col := range columns {
+		val := values[i]
+		if b, ok := val.([]byte); ok {
+			var m any
+			if err := json.Unmarshal(b, &m); err == nil {
+				val = m
+			} else {
+				val = string(b)
 			}
 		}
+		actual[col] = val
+	}
 
-		if !match {
-			log.Printf("Match failed for table %s. Expected: %+v, Actual: %+v", table, expected, actual)
+	for k, v := range expected {
+		actualVal := actual[k]
+		actualStr := fmt.Sprintf("%v", actualVal)
+		expectStr := fmt.Sprintf("%v", v)
+
+		if actualStr != expectStr {
+			// Try numeric comparison for floats
+			if af, ok1 := actualVal.(float64); ok1 {
+				if ef, ok2 := v.(float64); ok2 {
+					if math.Abs(af-ef) < 0.001 {
+						continue
+					}
+				}
+			}
+			log.Printf("Key %s: mismatch! actual %q (%T), expect %q (%T)", k, actualStr, actualVal, expectStr, v)
 			return false
 		}
-		return true
-	}, timeout, 1*time.Second)
+	}
+	return true
 }

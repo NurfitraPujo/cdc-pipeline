@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -10,6 +11,16 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+var (
+	testContainerProvider = testcontainers.ProviderDocker
+)
+
+func SetTestContainerProvider() {
+	if os.Getenv("TESTCONTAINER_PROVIDER") == "podman" {
+		testContainerProvider = testcontainers.ProviderPodman
+	}
+}
 
 func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 	return postgres.Run(ctx,
@@ -25,6 +36,7 @@ func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 			ContainerRequest: testcontainers.ContainerRequest{
 				Cmd: []string{"-c", "wal_level=logical"},
 			},
+			ProviderType: testContainerProvider,
 		}),
 	)
 }
@@ -36,6 +48,7 @@ func StartNats(ctx context.Context) (*nats.NATSContainer, error) {
 			ContainerRequest: testcontainers.ContainerRequest{
 				Cmd: []string{"-js"},
 			},
+			ProviderType: testContainerProvider,
 		}),
 	)
 }
@@ -47,7 +60,8 @@ func StartDatabend(ctx context.Context) (testcontainers.Container, string, error
 			ExposedPorts: []string{"8000/tcp"},
 			WaitingFor:   wait.ForListeningPort("8000/tcp").WithStartupTimeout(2 * time.Minute),
 		},
-		Started: true,
+		Started:      true,
+		ProviderType: testContainerProvider,
 	}
 	c, err := testcontainers.GenericContainer(ctx, req)
 	if err != nil {

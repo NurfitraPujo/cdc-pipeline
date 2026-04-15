@@ -9,12 +9,18 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 	"github.com/testcontainers/testcontainers-go"
 	tc_nats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
+
+func TestMain(m *testing.M) {
+	logger.Init("debug", true)
+	m.Run()
+}
 
 type MockWorker struct {
 	id        string
@@ -140,7 +146,7 @@ func TestConfigManager_Transitions(t *testing.T) {
 
 	// Wait for transition
 	time.Sleep(4000 * time.Millisecond)
-	
+
 	// Verify override applied
 	mgr.workersMu.RLock()
 	w2, ok := mgr.workers["p1"].(*MockWorker)
@@ -156,7 +162,7 @@ func TestConfigManager_Transitions(t *testing.T) {
 	// 4. Test Stop
 	log.Info().Msg("Test: Stopping manager")
 	mgr.Stop(ctx)
-	
+
 	mgr.workersMu.RLock()
 	if len(mgr.workers) != 0 {
 		t.Errorf("Expected 0 workers after Stop, got %d", len(mgr.workers))
