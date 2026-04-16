@@ -155,6 +155,17 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, nil
 			}
 
+			// Heavy Debug Log: show every table in the batch
+			tablesInBatch := make(map[string]int)
+			for _, m := range msgs {
+				tablesInBatch[m.Table]++
+			}
+			log.Debug().
+				Str("pipeline_id", p.pipelineID).
+				Int("total_count", len(msgs)).
+				Interface("tables", tablesInBatch).
+				Msg("Producer: Processing batch from msgChan")
+
 			// Debug Log
 			if len(msgs) > 0 {
 				log.Debug().
@@ -192,24 +203,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 
 				if diff, changed := p.detectSchemaChange(m); changed {
 					log.Info().Str("table", m.Table).Msg("Schema change detected, freezing table and emitting OpSchemaChange")
-					// Emit OpSchemaChange
-					scm := protocol.Message{
-						SourceID:      m.SourceID,
-						Table:         m.Table,
-						Op:            protocol.OpSchemaChange,
-						LSN:           m.LSN,
-						Timestamp:     time.Now(),
-						Diff:          diff,
-						CorrelationID: diff.CorrelationID,
-					}
-
-					// Publish OpSchemaChange to ingest topic with retries
-					scBatch := protocol.MessageBatch{scm}
-					scPayload, _ := scBatch.MarshalMsg(nil)
-					topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
-					wmMsg := message.NewMessage(watermill.NewUUID(), scPayload)
-
-					if err := p.publishWithRetry(ctx, topic, wmMsg, maxPublishRetries); err != nil {
+					if err := p.emitSchemaChange(ctx, m.SourceID, m.Table, m.LSN, diff); err != nil {
 						return lastLSN, fmt.Errorf("failed to publish OpSchemaChange for %s: %w", m.Table, err)
 					}
 
@@ -443,6 +437,72 @@ func (p *Producer) flushBuffer(ctx context.Context, table string) {
 	}
 }
 
+func (p *Producer) emitSchemaChange(ctx context.Context, sourceID, table string, lsn uint64, diff *protocol.SchemaDiff) error {
+	scm := protocol.Message{
+		SourceID:      sourceID,
+		Table:         table,
+		Op:            protocol.OpSchemaChange,
+		LSN:           lsn,
+		Timestamp:     time.Now(),
+		Diff:          diff,
+		CorrelationID: diff.CorrelationID,
+	}
+
+	scBatch := protocol.MessageBatch{scm}
+	scPayload, _ := scBatch.MarshalMsg(nil)
+	topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
+	wmMsg := message.NewMessage(watermill.NewUUID(), scPayload)
+
+	return p.publishWithRetry(ctx, topic, wmMsg, 10)
+}
+
+func (p *Producer) performSchemaEvolution(table, sourceID string, added map[string]string) (*protocol.SchemaDiff, bool) {
+	// Assumption: muEvo is held by caller
+	state, ok := p.evoStates[table]
+	if !ok {
+		return nil, false
+	}
+
+	if state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining || state.Status == protocol.SchemaStatusSuspended {
+		return nil, false
+	}
+
+	// Circuit Breaker logic
+	now := time.Now()
+	if now.Sub(state.LastChangeAt) > time.Minute {
+		state.ChangesThisMin = 0
+		state.LastChangeAt = now
+	}
+	state.ChangesThisMin++
+
+	if state.ChangesThisMin > 5 {
+		log.Warn().Str("table", table).Msg("Schema change limit exceeded, SUSPENDING table evolution")
+		state.Status = protocol.SchemaStatusSuspended
+		p.persistEvoState(table, state)
+		return nil, false
+	}
+
+	diff := &protocol.SchemaDiff{
+		Table:         table,
+		Timestamp:     time.Now(),
+		Source:        sourceID,
+		Added:         added,
+		CorrelationID: uuid.New().String(),
+	}
+
+	// Transition to FROZEN
+	state.Status = protocol.SchemaStatusFrozen
+	state.CorrelationID = diff.CorrelationID
+	for k, v := range added {
+		state.CachedSchema[k] = v
+	}
+
+	// Persist state to KV
+	p.persistEvoState(table, state)
+
+	return diff, true
+}
+
 func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDiff, bool) {
 	// HACK: Ignore tables created by the snapshot engine
 	if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
@@ -473,52 +533,29 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 		return nil, false // Return early to avoid false-positive evolution detection on initialization
 	}
 
-	if state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining || state.Status == protocol.SchemaStatusSuspended {
-		return nil, false
-	}
-
 	added := make(map[string]string)
+	msgKeys := make([]string, 0, len(msg.Data))
 	for k := range msg.Data {
+		msgKeys = append(msgKeys, k)
 		if _, exists := state.CachedSchema[k]; !exists {
 			added[k] = "unknown"
 		}
 	}
 
+	cachedKeys := make([]string, 0, len(state.CachedSchema))
+	for k := range state.CachedSchema {
+		cachedKeys = append(cachedKeys, k)
+	}
+
+	log.Debug().
+		Str("table", msg.Table).
+		Strs("msg_keys", msgKeys).
+		Strs("cached_keys", cachedKeys).
+		Int("added_count", len(added)).
+		Msg("detectSchemaChange: Comparing keys")
+
 	if len(added) > 0 {
-		// Circuit Breaker logic
-		now := time.Now()
-		if now.Sub(state.LastChangeAt) > time.Minute {
-			state.ChangesThisMin = 0
-			state.LastChangeAt = now
-		}
-		state.ChangesThisMin++
-
-		if state.ChangesThisMin > 5 {
-			log.Warn().Str("table", msg.Table).Msg("Schema change limit exceeded, SUSPENDING table evolution")
-			state.Status = protocol.SchemaStatusSuspended
-			p.persistEvoState(msg.Table, state)
-			return nil, false
-		}
-
-		diff := &protocol.SchemaDiff{
-			Table:         msg.Table,
-			Timestamp:     time.Now(),
-			Source:        msg.SourceID,
-			Added:         added,
-			CorrelationID: uuid.New().String(),
-		}
-
-		// Transition to FROZEN
-		state.Status = protocol.SchemaStatusFrozen
-		state.CorrelationID = diff.CorrelationID
-		for k, v := range added {
-			state.CachedSchema[k] = v
-		}
-
-		// Persist state to KV
-		p.persistEvoState(msg.Table, state)
-
-		return diff, true
+		return p.performSchemaEvolution(msg.Table, msg.SourceID, added)
 	}
 
 	return nil, false
@@ -552,7 +589,8 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 	// ALWAYS warm the schema evolution cache to prevent freeze on first data message
 	// This covers both newly discovered tables and known tables after a worker restart (cold cache)
 	p.muEvo.Lock()
-	if _, exists := p.evoStates[m.Schema.Table]; !exists {
+	state, exists := p.evoStates[m.Schema.Table]
+	if !exists {
 		log.Info().Str("table", m.Schema.Table).Msg("Warming evolution cache for table")
 		cols := make(map[string]string)
 		for k, v := range m.Schema.Columns {
@@ -562,6 +600,25 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 			Status:       protocol.SchemaStatusStable,
 			CachedSchema: cols,
 			LastCheckAt:  time.Now(),
+		}
+	} else {
+		// Table exists, check for schema change
+		added := make(map[string]string)
+		for k, v := range m.Schema.Columns {
+			if _, ok := state.CachedSchema[k]; !ok {
+				added[k] = v
+			}
+		}
+
+		if len(added) > 0 {
+			if diff, changed := p.performSchemaEvolution(m.Schema.Table, m.SourceID, added); changed {
+				log.Info().Str("table", m.Schema.Table).Int("new_cols", len(added)).Msg("Schema change detected via discovery, freezing table and emitting OpSchemaChange")
+				p.muEvo.Unlock()
+				if err := p.emitSchemaChange(ctx, m.SourceID, m.Schema.Table, m.LSN, diff); err != nil {
+					log.Error().Err(err).Str("table", m.Schema.Table).Msg("Failed to publish OpSchemaChange from discovery")
+				}
+				p.muEvo.Lock()
+			}
 		}
 	}
 	p.muEvo.Unlock()
