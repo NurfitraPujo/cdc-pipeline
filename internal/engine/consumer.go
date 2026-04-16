@@ -20,22 +20,22 @@ import (
 const retryCleanupInterval = 5 * time.Minute
 
 type Consumer struct {
-	pipelineID      string
-	sinkID          string
-	subscriber      stream.Subscriber
-	publisher       stream.Publisher // for DLQ
-	sink            sink.Sink
-	transformers    []transformer.Transformer
+	pipelineID       string
+	sinkID           string
+	subscriber       stream.Subscriber
+	publisher        stream.Publisher // for DLQ
+	sink             sink.Sink
+	transformers     []transformer.Transformer
 	transformerNames []string // NEW: pre-computed names for audit trail
-	kv              nats.KeyValue
-	batchSize       int
-	batchWait       time.Duration
-	retryConfig     protocol.RetryConfig
-	retries         map[string]retryEntry // UUID -> retry info with timestamp
-	retryMu         sync.Mutex
-	stats           map[string]*protocol.TableStats
-	statsMu         sync.Mutex
-	lastCleanupTime time.Time
+	kv               nats.KeyValue
+	batchSize        int
+	batchWait        time.Duration
+	retryConfig      protocol.RetryConfig
+	retries          map[string]retryEntry // UUID -> retry info with timestamp
+	retryMu          sync.Mutex
+	stats            map[string]*protocol.TableStats
+	statsMu          sync.Mutex
+	lastCleanupTime  time.Time
 
 	// Hooks for debug sink capture (nil for regular consumers)
 	preTransformHook  sink.PreTransformHook
@@ -95,14 +95,12 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 }
 
 func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message) []protocol.Message {
-	// Call pre-transform hook (captures "before" state for debug sink)
 	var correlationIDs []string
 	if c.preTransformHook != nil {
 		correlationIDs = c.preTransformHook(ctx, c.pipelineID, c.transformerNames, msgs)
 	}
 
 	if len(c.transformers) == 0 {
-		// No transformers, call post-transform hook with same messages
 		if c.postTransformHook != nil {
 			c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, msgs, nil)
 		}
@@ -135,7 +133,6 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 		}
 	}
 
-	// Call post-transform hook (captures "after" state for debug sink)
 	if c.postTransformHook != nil {
 		c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, processed, filteredIndices)
 	}
@@ -152,205 +149,38 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 	var batch []protocol.Message
 	var wmMsgs []*message.Message
 	timer := time.NewTimer(c.batchWait)
-	defer timer.Stop()
-
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
-
-		// Apply transformations
-		toUpload := c.processMessages(ctx, batch)
-		if len(toUpload) == 0 {
-			// All messages were filtered out
-			for _, m := range wmMsgs {
-				m.Ack()
-				c.retryMu.Lock()
-				delete(c.retries, m.UUID)
-				c.retryMu.Unlock()
-			}
-			batch = nil
-			wmMsgs = nil
-			return nil
-		}
-
-		if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
-			c.statsMu.Lock()
-			for _, m := range batch {
-				key := m.SourceID + "." + m.Table
-				s, ok := c.stats[key]
-				if !ok {
-					s = &protocol.TableStats{Status: "ERROR"}
-					c.stats[key] = s
-				}
-				s.ErrorCount++
-				s.Status = "ERROR"
-				s.UpdatedAt = time.Now()
-
-				metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
-				statsData, err := s.MarshalMsg(nil)
-				if err == nil {
-					statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
-					if _, err := c.kv.Put(statsKey, statsData); err != nil {
-						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
-					}
-				}
-			}
-			c.statsMu.Unlock()
-
-			// Check if any message in this batch should be isolated
-			shouldIsolate := false
-			c.retryMu.Lock()
-			now := time.Now()
-			for _, m := range wmMsgs {
-				entry := c.retries[m.UUID]
-				entry.count++
-				entry.lastRetry = now
-				c.retries[m.UUID] = entry
-				if entry.count > c.retryConfig.MaxRetries {
-					shouldIsolate = true
-				}
-			}
-			c.retryMu.Unlock()
-
-			if shouldIsolate {
-				log.Warn().Str("pipeline_id", c.pipelineID).Msg("Batch failed repeatedly, switching to Isolation Mode")
-				c.isolatePoisonBatch(ctx, wmMsgs)
-				batch = nil
-				wmMsgs = nil
-				return nil
-			}
-
-			// Nack all messages in the batch to trigger NATS JetStream redelivery.
-			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
-
-			// Exponential backoff sleep
-			backoff := c.retryConfig.InitialInterval
-			maxAttempts := 0
-			c.retryMu.Lock()
-			for _, m := range wmMsgs {
-				if c.retries[m.UUID].count > maxAttempts {
-					maxAttempts = c.retries[m.UUID].count
-				}
-			}
-			c.retryMu.Unlock()
-
-			log.Info().Str("pipeline_id", c.pipelineID).Int("max_attempts", maxAttempts).Msg("Max attempts for batch so far")
-
-			for i := 1; i < maxAttempts; i++ {
-				backoff *= 2
-				if backoff > c.retryConfig.MaxInterval {
-					backoff = c.retryConfig.MaxInterval
-					break
-				}
-			}
-
-			for _, m := range wmMsgs {
-				m.Nack()
-			}
-
-			batch = nil
-			wmMsgs = nil
-
-			if backoff > 0 {
-				time.Sleep(backoff)
-			} else {
-				time.Sleep(5 * time.Second)
-			}
-			return nil
-		}
-
-		for _, m := range wmMsgs {
-			m.Ack()
-			c.retryMu.Lock()
-			delete(c.retries, m.UUID)
-			c.retryMu.Unlock()
-		}
-
-		c.statsMu.Lock()
-		defer c.statsMu.Unlock()
-
-		latestByTable := make(map[string]protocol.Message)
-		countsByTable := make(map[string]int)
-		for _, m := range batch {
-			key := m.SourceID + "." + m.Table
-			latestByTable[key] = m
-			countsByTable[key]++
-		}
-
-		now := time.Now()
-		for key, m := range latestByTable {
-			checkpoint := protocol.Checkpoint{
-				EgressLSN: m.LSN,
-				LastPK:    m.PK,
-				Status:    "ACTIVE",
-				UpdatedAt: now,
-			}
-			cpData, err := checkpoint.MarshalMsg(nil)
-			if err == nil {
-				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
-				if _, err := c.kv.Put(cpKey, cpData); err != nil {
-					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
-				}
-			}
-
-			s, ok := c.stats[key]
-			if !ok {
-				s = &protocol.TableStats{Status: "ACTIVE"}
-				c.stats[key] = s
-			}
-			s.Status = "ACTIVE"
-			// #nosec G115 -- counts are within uint64 range
-			count := uint64(countsByTable[key])
-			if count > 0 {
-				s.TotalSynced += count
-				metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Add(float64(count))
-			}
-			s.LastSourceTS = m.Timestamp
-			s.LastProcessedTS = now
-			s.LagMS = now.Sub(m.Timestamp).Milliseconds()
-			s.UpdatedAt = now
-
-			metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
-
-			statsData, err := s.MarshalMsg(nil)
-			if err == nil {
-				statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
-				if _, err := c.kv.Put(statsKey, statsData); err != nil {
-					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating table stats")
-				}
-			}
-		}
-
-		batch = nil
-		wmMsgs = nil
-		// Stop current timer and create new one to avoid race conditions
-		timer.Stop()
-		timer = time.NewTimer(c.batchWait)
-
-		// Periodic cleanup of old retry entries (every 5 minutes)
-		if time.Since(c.lastCleanupTime) > retryCleanupInterval {
-			c.cleanupOldRetries()
-			c.lastCleanupTime = time.Now()
-		}
-
-		return nil
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			if len(batch) > 0 {
+				c.flush(ctx, batch, wmMsgs)
+			}
 			return ctx.Err()
+
 		case <-timer.C:
-			if err := flush(); err != nil {
-				return err
+			if len(batch) > 0 {
+				c.flush(ctx, batch, wmMsgs)
+				batch = nil
+				wmMsgs = nil
 			}
-			if c.checkDrained(0) {
-				return nil
-			}
+
 		case wmMsg, ok := <-msgChan:
 			if !ok {
+				if len(batch) > 0 {
+					c.flush(ctx, batch, wmMsgs)
+				}
 				return nil
+			}
+
+			if len(batch) == 0 {
+				timer.Reset(c.batchWait)
 			}
 
 			var batchFromNats []protocol.Message
@@ -360,49 +190,276 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				continue
 			}
 
-			for _, m := range batchFromNats {
+			log.Debug().Str("pipeline_id", c.pipelineID).Any("data", wmMsg).Msg("Received message from NATS")
+
+			wmMsgs = append(wmMsgs, wmMsg)
+
+			for i := range batchFromNats {
+				m := &batchFromNats[i]
 				if m.Op == "drain_marker" {
-					if err := flush(); err != nil {
-						return err
+					if len(batch) > 0 {
+						c.flush(ctx, batch, wmMsgs)
+						batch = nil
+						wmMsgs = nil
 					}
 					wmMsg.Ack()
 					return nil
 				}
 
-				// If it's a schema change or delete, flush current batch FIRST
-				if m.Op == "schema_change" || m.Op == "delete" {
-					if err := flush(); err != nil {
-						wmMsg.Nack()
-						return err
+				if m.Op == protocol.OpSchemaChange {
+					if len(batch) > 0 {
+						c.flush(ctx, batch, wmMsgs)
+						batch = nil
+						// wmMsg is still needed for the schema change itself if we want to ack it here
+						wmMsgs = []*message.Message{wmMsg}
 					}
-				}
 
-				if m.Op == "schema_change" && m.Schema != nil {
-					if err := c.sink.ApplySchema(ctx, *m.Schema); err != nil {
-						log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
-						c.updateTableError(m.SourceID, m.Table)
-						wmMsg.Nack()
-						return fmt.Errorf("failed to apply schema change: %w", err)
+					schema := m.Schema
+					if schema == nil && m.Diff != nil {
+						log.Info().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Interface("added_cols", m.Diff.Added).Msg("Constructing schema from diff")
+						schema = &protocol.SchemaMetadata{
+							Table:   m.Table,
+							Columns: m.Diff.Added,
+						}
 					}
-					// Flush schema change immediately as its own "batch" if needed,
-					// but here we just append and flush below.
-				}
 
-				batch = append(batch, m)
-				if len(batch) >= c.batchSize || m.Op == "schema_change" || m.Op == "delete" {
-					wmMsgs = append(wmMsgs, wmMsg)
-					if err := flush(); err != nil {
-						return err
+					if schema != nil {
+						if err := c.sink.ApplySchema(ctx, *schema); err != nil {
+							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
+							c.updateTableError(m.SourceID, m.Table)
+							wmMsg.Nack()
+							return fmt.Errorf("failed to apply schema change: %w", err)
+						}
 					}
-					if c.checkDrained(m.LSN) {
-						return nil
+
+					// Emit Ack only if CorrelationID is present (indicates proactive evolution)
+					if m.CorrelationID != "" {
+						ack := protocol.Message{
+							Op:            protocol.OpSchemaChangeAck,
+							CorrelationID: m.CorrelationID,
+							Table:         m.Table,
+							SourceID:      m.SourceID,
+							Timestamp:     time.Now(),
+						}
+						ackData, _ := ack.MarshalMsg(nil)
+						ackTopic := protocol.AcksTopic(c.pipelineID)
+						if err := c.publisher.Publish(ackTopic, message.NewMessage(m.UUID, ackData)); err != nil {
+							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to publish schema change ack")
+						}
 					}
-					wmMsgs = nil
+
+					if len(batchFromNats) == 1 {
+						wmMsg.Ack()
+						wmMsgs = nil
+					}
 					continue
 				}
+
+				batch = append(batch, *m)
 			}
-			if wmMsg != nil {
-				wmMsgs = append(wmMsgs, wmMsg)
+
+			// If batch is full, flush now
+			if len(batch) >= c.batchSize {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				c.flush(ctx, batch, wmMsgs)
+				batch = nil
+				wmMsgs = nil
+			}
+		}
+	}
+}
+
+
+func (c *Consumer) updateTableError(sourceID, table string) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+
+	key := sourceID + "." + table
+	s, ok := c.stats[key]
+	if !ok {
+		s = &protocol.TableStats{Status: "ERROR"}
+		c.stats[key] = s
+	}
+	s.ErrorCount++
+	s.Status = "ERROR"
+	s.UpdatedAt = time.Now()
+
+	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, table).Inc()
+	statsData, _ := json.Marshal(s)
+	statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
+	if _, err := c.kv.Put(statsKey, statsData); err != nil {
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", table).Msg("Failed to update table stats")
+	}
+}
+
+func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message) {
+	if len(batch) == 0 {
+		return
+	}
+	toUpload := c.processMessages(ctx, batch)
+	if len(toUpload) == 0 {
+		for _, m := range wmMsgs {
+			m.Ack()
+			c.retryMu.Lock()
+			delete(c.retries, m.UUID)
+			c.retryMu.Unlock()
+		}
+		return
+	}
+
+	if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
+		c.handleSinkError(ctx, batch, wmMsgs, err)
+		return
+	}
+
+	for _, m := range wmMsgs {
+		m.Ack()
+		c.retryMu.Lock()
+		delete(c.retries, m.UUID)
+		c.retryMu.Unlock()
+	}
+	c.updateStats(toUpload)
+	if time.Since(c.lastCleanupTime) > retryCleanupInterval {
+		c.cleanupOldRetries()
+		c.lastCleanupTime = time.Now()
+	}
+}
+
+func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message, err error) {
+	c.statsMu.Lock()
+	for _, m := range batch {
+		key := m.SourceID + "." + m.Table
+		s, ok := c.stats[key]
+		if !ok {
+			s = &protocol.TableStats{Status: "ERROR"}
+			c.stats[key] = s
+		}
+		s.ErrorCount++
+		s.Status = "ERROR"
+		s.UpdatedAt = time.Now()
+
+		metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
+		statsData, _ := s.MarshalMsg(nil)
+		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+		if _, err := c.kv.Put(statsKey, statsData); err != nil {
+			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
+		}
+	}
+	c.statsMu.Unlock()
+
+	shouldIsolate := false
+	c.retryMu.Lock()
+	now := time.Now()
+	for _, m := range wmMsgs {
+		entry := c.retries[m.UUID]
+		entry.count++
+		entry.lastRetry = now
+		c.retries[m.UUID] = entry
+		if entry.count > c.retryConfig.MaxRetries {
+			shouldIsolate = true
+		}
+	}
+	c.retryMu.Unlock()
+
+	if shouldIsolate {
+		log.Warn().Str("pipeline_id", c.pipelineID).Msg("Batch failed repeatedly, switching to Isolation Mode")
+		c.isolatePoisonBatch(ctx, wmMsgs)
+		return
+	}
+
+	log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
+
+	backoff := c.retryConfig.InitialInterval
+	maxAttempts := 0
+	c.retryMu.Lock()
+	for _, m := range wmMsgs {
+		if c.retries[m.UUID].count > maxAttempts {
+			maxAttempts = c.retries[m.UUID].count
+		}
+	}
+	c.retryMu.Unlock()
+
+	for i := 1; i < maxAttempts; i++ {
+		backoff *= 2
+		if backoff > c.retryConfig.MaxInterval {
+			backoff = c.retryConfig.MaxInterval
+			break
+		}
+	}
+
+	for _, m := range wmMsgs {
+		m.Nack()
+	}
+
+	if backoff > 0 {
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoff):
+		}
+	} else {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func (c *Consumer) updateStats(batch []protocol.Message) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+
+	latestByTable := make(map[string]protocol.Message)
+	countsByTable := make(map[string]int)
+	for _, m := range batch {
+		key := m.SourceID + "." + m.Table
+		latestByTable[key] = m
+		countsByTable[key]++
+	}
+
+	now := time.Now()
+	for key, m := range latestByTable {
+		checkpoint := protocol.Checkpoint{
+			EgressLSN: m.LSN,
+			LastPK:    m.PK,
+			Status:    "ACTIVE",
+			UpdatedAt: now,
+		}
+		cpData, err := checkpoint.MarshalMsg(nil)
+		if err == nil {
+			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+			if _, err := c.kv.Put(cpKey, cpData); err != nil {
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
+			}
+		}
+
+		s, ok := c.stats[key]
+		if !ok {
+			s = &protocol.TableStats{Status: "ACTIVE"}
+			c.stats[key] = s
+		}
+		s.Status = "ACTIVE"
+		count := uint64(countsByTable[key])
+		if count > 0 {
+			s.TotalSynced += count
+			metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Add(float64(count))
+		}
+		s.LastSourceTS = m.Timestamp
+		s.LastProcessedTS = now
+		s.LagMS = now.Sub(m.Timestamp).Milliseconds()
+		s.UpdatedAt = now
+
+		metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
+
+		statsData, err := s.MarshalMsg(nil)
+		if err == nil {
+			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+			if _, err := c.kv.Put(statsKey, statsData); err != nil {
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating table stats")
 			}
 		}
 	}
@@ -436,7 +493,6 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 			continue
 		}
 
-		// Apply transformations
 		toUpload := c.processMessages(ctx, msgs)
 		if len(toUpload) == 0 {
 			wmMsg.Ack()
@@ -446,7 +502,6 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 			continue
 		}
 
-		// Try uploading this single Watermill message (which might be a sub-batch)
 		if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message failed in isolation")
 
@@ -459,11 +514,9 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 				log.Warn().Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message exceeded MaxRetries, routing to DLQ")
 				c.routeToDLQ(wmMsg)
 			} else {
-				// Still within retry limits or DLQ disabled, Nack to try again later
 				wmMsg.Nack()
 			}
 		} else {
-			// Success in isolation!
 			wmMsg.Ack()
 			c.retryMu.Lock()
 			delete(c.retries, wmMsg.UUID)
@@ -476,38 +529,13 @@ func (c *Consumer) routeToDLQ(msg *message.Message) {
 	dlqTopic := protocol.DLQTopic(c.pipelineID)
 	if err := c.publisher.Publish(dlqTopic, msg); err != nil {
 		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("CRITICAL - Failed to route message to DLQ")
-		// If we can't even send to DLQ, we MUST Nack to avoid data loss,
-		// even if it causes Head-of-Line blocking.
 		msg.Nack()
 		return
 	}
-	// Successfully routed to DLQ, so we can Ack the original
 	msg.Ack()
 	c.retryMu.Lock()
 	delete(c.retries, msg.UUID)
 	c.retryMu.Unlock()
-}
-
-// cleanupOldRetries removes retry entries older than 1 hour to prevent unbounded growth
-func (c *Consumer) updateTableError(sourceID, table string) {
-	c.statsMu.Lock()
-	defer c.statsMu.Unlock()
-
-	key := sourceID + "." + table
-	s, ok := c.stats[key]
-	if !ok {
-		s = &protocol.TableStats{Status: "ERROR"}
-		c.stats[key] = s
-	}
-	s.ErrorCount++
-	s.Status = "ERROR"
-	s.UpdatedAt = time.Now()
-
-	statsData, err := s.MarshalMsg(nil)
-	if err == nil {
-		statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
-		_, _ = c.kv.Put(statsKey, statsData)
-	}
 }
 
 func (c *Consumer) cleanupOldRetries() {

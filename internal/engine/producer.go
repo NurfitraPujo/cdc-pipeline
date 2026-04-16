@@ -155,6 +155,16 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, nil
 			}
 
+			// Debug Log
+			if len(msgs) > 0 {
+				log.Debug().
+					Str("pipeline_id", p.pipelineID).
+					Int("count", len(msgs)).
+					Str("first_op", msgs[0].Op).
+					Str("last_op", msgs[len(msgs)-1].Op).
+					Msg("Producer received message batch from source")
+			}
+
 			// 1. Process Discovery & Schema Evolution
 			discoveredTables := make([]protocol.Message, 0, 10)
 			mainBatch := make(protocol.MessageBatch, 0, len(msgs))
@@ -455,6 +465,7 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 			LastCheckAt:  time.Now(),
 		}
 		p.evoStates[msg.Table] = state
+		return nil, false // Return early to avoid false-positive evolution detection on initialization
 	}
 
 	if state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining || state.Status == protocol.SchemaStatusSuspended {
@@ -556,6 +567,21 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		p.mu.Lock()
 		p.config.Tables = append(p.config.Tables, m.Schema.Table)
 		p.mu.Unlock()
+
+		// Warm the schema evolution cache to prevent freeze on first data message
+		p.muEvo.Lock()
+		if _, exists := p.evoStates[m.Schema.Table]; !exists {
+			cols := make(map[string]string)
+			for k, v := range m.Schema.Columns {
+				cols[k] = v
+			}
+			p.evoStates[m.Schema.Table] = &tableEvolution{
+				Status:       protocol.SchemaStatusStable,
+				CachedSchema: cols,
+				LastCheckAt:  time.Now(),
+			}
+		}
+		p.muEvo.Unlock()
 
 		metaKey := fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
 		metaData, err := json.Marshal(m.Schema)
