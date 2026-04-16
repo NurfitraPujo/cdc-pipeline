@@ -12,6 +12,7 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
+	stream_nats "github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/google/uuid"
@@ -22,18 +23,22 @@ import (
 )
 
 type tableEvolution struct {
-	status        string
-	revision      uint64
-	correlationID string
-	cachedSchema  map[string]string
-	lastCheckAt   time.Time
+	Status         string            `json:"status"`
+	Revision       uint64            `json:"revision"`
+	CorrelationID  string            `json:"correlation_id"`
+	CachedSchema   map[string]string `json:"cached_schema"`
+	LastCheckAt    time.Time         `json:"last_check_at"`
+	ChangesThisMin int               `json:"changes_this_min"`
+	LastChangeAt   time.Time         `json:"last_change_at"`
 }
 
 type Producer struct {
 	pipelineID   string
+	natsURL      string // NEW: for buffer draining
 	config       protocol.PipelineConfig
 	source       source.Source
 	publisher    stream.Publisher
+	subscriber   stream.Subscriber // NEW: for schema acks
 	kv           nats.KeyValue
 	mu           sync.RWMutex
 	cancelSource context.CancelFunc
@@ -48,7 +53,7 @@ type Producer struct {
 	evoStates map[string]*tableEvolution // table name -> evolution state
 }
 
-func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, kv nats.KeyValue) *Producer {
+func NewProducer(pipelineID, natsURL string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, sub stream.Subscriber, kv nats.KeyValue) *Producer {
 	settings := gobreaker.Settings{
 		Name:        "nats-publisher-" + pipelineID,
 		MaxRequests: 3,
@@ -75,9 +80,11 @@ func NewProducer(pipelineID string, cfg protocol.PipelineConfig, src source.Sour
 
 	return &Producer{
 		pipelineID:         pipelineID,
+		natsURL:            natsURL,
 		config:             cfg,
 		source:             src,
 		publisher:          pub,
+		subscriber:         sub,
 		kv:                 kv,
 		cb:                 gobreaker.NewCircuitBreaker(settings),
 		snapshotInProgress: make(map[string]bool),
@@ -92,9 +99,19 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	p.cancelSource = cancel
 	p.mu.Unlock()
 
+	// 0. Recovery: Check KV for frozen tables and restore state
+	p.recoverEvoStates(ctx)
+
 	msgChan, ackChan, err := p.source.Start(sourceCtx, srcConfig, checkpoint)
 	if err != nil {
 		return 0, fmt.Errorf("failed to start source: %w", err)
+	}
+
+	// Subscribe to acks topic
+	ackTopic := protocol.AcksTopic(p.pipelineID)
+	ackMsgChan, err := p.subscriber.Subscribe(ctx, ackTopic)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to subscribe to schema acks topic")
 	}
 
 	var lastLSN uint64
@@ -103,6 +120,22 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 		select {
 		case <-ctx.Done():
 			return lastLSN, ctx.Err()
+		case ackMsg, ok := <-ackMsgChan:
+			if !ok {
+				log.Warn().Msg("Schema acks channel closed")
+				continue
+			}
+			var ack protocol.Message
+			if _, err := ack.UnmarshalMsg(ackMsg.Payload); err != nil {
+				log.Error().Err(err).Msg("Failed to unmarshal schema ack")
+				ackMsg.Nack()
+				continue
+			}
+			if ack.Op == protocol.OpSchemaChangeAck {
+				p.handleSchemaAck(ctx, ack)
+			}
+			ackMsg.Ack()
+
 		case msgs, ok := <-msgChan:
 			if !ok {
 				marker := protocol.Message{
@@ -125,6 +158,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			// 1. Process Discovery & Schema Evolution
 			discoveredTables := make([]protocol.Message, 0, 10)
 			mainBatch := make(protocol.MessageBatch, 0, len(msgs))
+			tableToBuffer := make(map[string]protocol.MessageBatch)
 
 			for _, m := range msgs {
 				if m.Op == "schema_change" && m.Schema != nil {
@@ -137,13 +171,12 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				// Schema Evolution Check
 				p.muEvo.RLock()
 				state, exists := p.evoStates[m.Table]
-				isFrozen := exists && state.status == "FROZEN"
+				// Buffer if FROZEN or currently DRAINING
+				shouldBuffer := exists && (state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining)
 				p.muEvo.RUnlock()
 
-				if isFrozen {
-					if err := p.bufferToJetStream(m.Table, m); err != nil {
-						log.Error().Err(err).Str("table", m.Table).Msg("Failed to buffer message")
-					}
+				if shouldBuffer {
+					tableToBuffer[m.Table] = append(tableToBuffer[m.Table], m)
 					continue
 				}
 
@@ -160,97 +193,45 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						CorrelationID: diff.CorrelationID,
 					}
 
-					// Publish OpSchemaChange to ingest topic
+					// Publish OpSchemaChange to ingest topic with retries
 					scBatch := protocol.MessageBatch{scm}
 					scPayload, _ := scBatch.MarshalMsg(nil)
 					topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
 					wmMsg := message.NewMessage(watermill.NewUUID(), scPayload)
-					if err := p.publisher.Publish(topic, wmMsg); err != nil {
-						log.Error().Err(err).Msg("Failed to publish OpSchemaChange")
+
+					if err := p.publishWithRetry(ctx, topic, wmMsg, maxPublishRetries); err != nil {
+						return lastLSN, fmt.Errorf("failed to publish OpSchemaChange for %s: %w", m.Table, err)
 					}
 
-					// Buffer the current message
-					if err := p.bufferToJetStream(m.Table, m); err != nil {
-						log.Error().Err(err).Str("table", m.Table).Msg("Failed to buffer message")
-					}
+					// Current message and all subsequent for this table must be buffered
+					tableToBuffer[m.Table] = append(tableToBuffer[m.Table], m)
 					continue
 				}
 
 				mainBatch = append(mainBatch, m)
 			}
 
-			if len(mainBatch) == 0 {
-				if len(discoveredTables) > 0 {
-					for _, t := range discoveredTables {
-						p.handleDiscovery(ctx, t)
-					}
-				}
-				// Signal acknowledgment back to the source handler
-				select {
-				case ackChan <- struct{}{}:
-				case <-ctx.Done():
-					return lastLSN, ctx.Err()
-				}
-				continue
-			}
-
-			// Wrap NATS publishing in a circuit breaker with retry limit
-			var publishErr error
-			for attempt := 0; attempt < maxPublishRetries; attempt++ {
-				_, publishErr = p.cb.Execute(func() (interface{}, error) {
-					payload, err := mainBatch.MarshalMsg(nil)
-					if err != nil {
-						log.Error().Err(err).Msg("Failed to marshal batch payload")
-						return nil, err
-					}
-
-					topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
-					wmMsg := message.NewMessage(watermill.NewUUID(), payload)
-
-					if err := p.publisher.Publish(topic, wmMsg); err != nil {
-						return nil, err
-					}
-
-					log.Debug().Any("data", mainBatch).Msg("Published messages to NATS")
-					return nil, nil
-				})
-
-				if publishErr == nil {
-					break
-				}
-
-				// Update circuit breaker status on first failure
-				if attempt == 0 && len(mainBatch) > 0 {
-					m := mainBatch[0]
-					stKey := protocol.ProducerTableStatsKey(p.pipelineID, m.SourceID, m.Table)
-					if entry, err := p.kv.Get(stKey); err == nil {
-						var st protocol.TableStats
-						if err := json.Unmarshal(entry.Value(), &st); err == nil {
-							st.Status = "CIRCUIT_OPEN"
-							stData, err := st.MarshalMsg(nil)
-							if err == nil {
-								if _, err := p.kv.Put(stKey, stData); err != nil {
-									log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating circuit breaker status")
-								}
-							}
-						}
-					}
-				}
-
-				select {
-				case <-time.After(2 * time.Second):
-					// Continue to next retry
-				case <-ctx.Done():
-					return lastLSN, ctx.Err()
+			// 2. Publish Buffered Batches
+			for table, batch := range tableToBuffer {
+				if err := p.publishBufferBatch(ctx, table, batch, maxPublishRetries); err != nil {
+					return lastLSN, fmt.Errorf("failed to buffer messages for %s: %w", table, err)
 				}
 			}
 
-			if publishErr != nil {
-				return lastLSN, fmt.Errorf("failed to publish after %d attempts: %w", maxPublishRetries, publishErr)
-			}
-
-			// Success! Update checkpoints
+			// 3. Publish Main Ingest Batch
 			if len(mainBatch) > 0 {
+				topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
+				payload, err := mainBatch.MarshalMsg(nil)
+				if err != nil {
+					return lastLSN, fmt.Errorf("failed to marshal main batch: %w", err)
+				}
+				wmMsg := message.NewMessage(watermill.NewUUID(), payload)
+
+				if err := p.publishWithRetry(ctx, topic, wmMsg, maxPublishRetries); err != nil {
+					return lastLSN, fmt.Errorf("failed to publish main batch: %w", err)
+				}
+
+				// Success! Update checkpoints
 				latestByTable := make(map[string]protocol.Message)
 				for _, m := range mainBatch {
 					latestByTable[m.SourceID+"."+m.Table] = m
@@ -264,17 +245,16 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						UpdatedAt:  time.Now(),
 					}
 					cpData, err := cp.MarshalMsg(nil)
-					if err != nil {
-						log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error marshaling checkpoint")
-						continue
-					}
-					key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
-					if _, err := p.kv.Put(key, cpData); err != nil {
-						log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating ingress checkpoint")
+					if err == nil {
+						key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
+						if _, err := p.kv.Put(key, cpData); err != nil {
+							log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating ingress checkpoint")
+						}
 					}
 				}
 			}
 
+			// Discovery handling
 			if len(discoveredTables) > 0 {
 				for _, t := range discoveredTables {
 					p.handleDiscovery(ctx, t)
@@ -291,52 +271,219 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	}
 }
 
+func (p *Producer) publishWithRetry(ctx context.Context, topic string, msg *message.Message, maxRetries int) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, lastErr = p.cb.Execute(func() (interface{}, error) {
+			return nil, p.publisher.Publish(topic, msg)
+		})
+
+		if lastErr == nil {
+			return nil
+		}
+
+		log.Warn().Err(lastErr).Str("topic", topic).Int("attempt", attempt+1).Msg("Publish failed, retrying...")
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("exhausted retries for topic %s: %w", topic, lastErr)
+}
+
+func (p *Producer) publishBufferBatch(ctx context.Context, table string, batch protocol.MessageBatch, maxRetries int) error {
+	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
+	payload, err := batch.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	wmMsg := message.NewMessage(watermill.NewUUID(), payload)
+	return p.publishWithRetry(ctx, topic, wmMsg, maxRetries)
+}
+
+func (p *Producer) recoverEvoStates(ctx context.Context) {
+	// Simple recovery: find all evolution keys in KV
+	p.mu.RLock()
+	tables := p.config.Tables
+	p.mu.RUnlock()
+
+	for _, table := range tables {
+		key := protocol.SchemaEvolutionKey(p.pipelineID, table)
+		entry, err := p.kv.Get(key)
+		if err == nil {
+			var st tableEvolution
+			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+				st.Revision = entry.Revision()
+				p.muEvo.Lock()
+				p.evoStates[table] = &st
+				p.muEvo.Unlock()
+
+				if st.Status == protocol.SchemaStatusFrozen || st.Status == protocol.SchemaStatusDraining {
+					log.Info().Str("table", table).Str("status", st.Status).Msg("Recovered table evolution state")
+					if st.Status == protocol.SchemaStatusDraining {
+						go p.flushBuffer(ctx, table)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
+	p.muEvo.Lock()
+	state, ok := p.evoStates[ack.Table]
+	if !ok || state.Status != protocol.SchemaStatusFrozen {
+		p.muEvo.Unlock()
+		return
+	}
+
+	if state.CorrelationID != ack.CorrelationID {
+		log.Warn().Str("expected", state.CorrelationID).Str("got", ack.CorrelationID).Msg("CorrelationID mismatch on schema ack")
+		p.muEvo.Unlock()
+		return
+	}
+
+	// Ack matches! Transition to DRAINING and start background flush
+	log.Info().Str("table", ack.Table).Msg("Schema ack received, draining buffer")
+	state.Status = protocol.SchemaStatusDraining
+
+	// Flush buffer in background
+	go p.flushBuffer(ctx, ack.Table)
+
+	p.persistEvoState(ack.Table, state)
+	p.muEvo.Unlock()
+}
+
+func (p *Producer) flushBuffer(ctx context.Context, table string) {
+	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
+	// Create a temporary subscriber to drain the buffer
+	sub, err := stream_nats.NewNatsSubscriber(p.natsURL, "drainer-"+uuid.New().String(), 100, 30*time.Second)
+	if err != nil {
+		log.Error().Err(err).Str("table", table).Msg("Failed to create subscriber to drain buffer")
+		return
+	}
+	defer sub.Close()
+
+	msgChan, err := sub.Subscribe(ctx, topic)
+	if err != nil {
+		log.Error().Err(err).Str("table", table).Msg("Failed to subscribe to buffer topic")
+		return
+	}
+
+	mainTopic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
+	// Drain everything currently in the buffer.
+	// We use a short timeout to detect when the buffer is truly empty.
+	mainLoop:
+	for {
+		timer := time.NewTimer(1 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case m, ok := <-msgChan:
+			timer.Stop()
+			if !ok {
+				break mainLoop
+			}
+			log.Info().Str("table", table).Msg("Republishing buffered message")
+			if err := p.publisher.Publish(mainTopic, m); err != nil {
+				log.Error().Err(err).Msg("Failed to republish buffered message")
+				m.Nack()
+				return
+			}
+			m.Ack()
+		case <-timer.C:
+			// No messages for 1 second, assume buffer is empty
+			break mainLoop
+		}
+	}
+
+	// Transition back to STABLE
+	p.muEvo.Lock()
+	defer p.muEvo.Unlock()
+
+	state, ok := p.evoStates[table]
+	if ok && state.Status == protocol.SchemaStatusDraining {
+		// One final non-blocking drain to catch messages buffered just before the status change
+		for {
+			select {
+			case m, ok := <-msgChan:
+				if !ok {
+					goto finalized
+				}
+				log.Info().Str("table", table).Msg("Republishing final buffered message")
+				if err := p.publisher.Publish(mainTopic, m); err != nil {
+					log.Error().Err(err).Msg("Failed to republish final buffered message")
+					m.Nack()
+					return
+				}
+				m.Ack()
+			default:
+				goto finalized
+			}
+		}
+
+	finalized:
+		log.Info().Str("table", table).Msg("Buffer flush complete, table is now ACTIVE")
+		state.Status = protocol.SchemaStatusStable
+		state.CorrelationID = ""
+		p.persistEvoState(table, state)
+	}
+}
+
 func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDiff, bool) {
+	// HACK: Ignore tables created by the snapshot engine
+	if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
+		return nil, false
+	}
+
 	p.muEvo.Lock()
 	defer p.muEvo.Unlock()
 
 	state, ok := p.evoStates[msg.Table]
 	if !ok {
-		// Try to load from KV first
-		key := protocol.SchemaEvolutionKey(p.pipelineID, msg.Table)
-		entry, err := p.kv.Get(key)
-		if err == nil {
-			var st tableEvolution
-			if err := json.Unmarshal(entry.Value(), &st); err == nil {
-				st.revision = entry.Revision()
-				p.evoStates[msg.Table] = &st
-				state = &st
-				ok = true
-			}
-		}
-	}
-
-	if !ok {
 		// Initialize with current columns
 		cols := make(map[string]string)
 		for k := range msg.Data {
-			cols[k] = "unknown" // We don't know the type from Data easily, but we can track names
+			cols[k] = "unknown"
 		}
 		state = &tableEvolution{
-			status:       "ACTIVE",
-			cachedSchema: cols,
-			lastCheckAt:  time.Now(),
+			Status:       protocol.SchemaStatusStable,
+			CachedSchema: cols,
+			LastCheckAt:  time.Now(),
 		}
 		p.evoStates[msg.Table] = state
 	}
 
-	if state.status == "FROZEN" {
-		return nil, false // Already frozen, wait for resolution
+	if state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining || state.Status == protocol.SchemaStatusSuspended {
+		return nil, false
 	}
 
 	added := make(map[string]string)
 	for k := range msg.Data {
-		if _, exists := state.cachedSchema[k]; !exists {
+		if _, exists := state.CachedSchema[k]; !exists {
 			added[k] = "unknown"
 		}
 	}
 
 	if len(added) > 0 {
+		// Circuit Breaker logic
+		now := time.Now()
+		if now.Sub(state.LastChangeAt) > time.Minute {
+			state.ChangesThisMin = 0
+			state.LastChangeAt = now
+		}
+		state.ChangesThisMin++
+
+		if state.ChangesThisMin > 5 {
+			log.Warn().Str("table", msg.Table).Msg("Schema change limit exceeded, SUSPENDING table evolution")
+			state.Status = protocol.SchemaStatusSuspended
+			p.persistEvoState(msg.Table, state)
+			return nil, false
+		}
+
 		diff := &protocol.SchemaDiff{
 			Table:         msg.Table,
 			Timestamp:     time.Now(),
@@ -346,10 +493,10 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 		}
 
 		// Transition to FROZEN
-		state.status = "FROZEN"
-		state.correlationID = diff.CorrelationID
+		state.Status = protocol.SchemaStatusFrozen
+		state.CorrelationID = diff.CorrelationID
 		for k, v := range added {
-			state.cachedSchema[k] = v
+			state.CachedSchema[k] = v
 		}
 
 		// Persist state to KV
@@ -366,29 +513,18 @@ func (p *Producer) persistEvoState(table string, state *tableEvolution) {
 	data, _ := json.Marshal(state)
 	var err error
 	var rev uint64
-	if state.revision == 0 {
+	if state.Revision == 0 {
 		rev, err = p.kv.Put(key, data)
 	} else {
-		rev, err = p.kv.Update(key, data, state.revision)
+		rev, err = p.kv.Update(key, data, state.Revision)
 	}
 
 	if err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to persist evolution state")
+		// If revision mismatch, we might need to reload, but for now we just log
 	} else {
-		state.revision = rev
+		state.Revision = rev
 	}
-}
-
-func (p *Producer) bufferToJetStream(table string, msg protocol.Message) error {
-	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
-	batch := protocol.MessageBatch{msg}
-	payload, err := batch.MarshalMsg(nil)
-	if err != nil {
-		return err
-	}
-
-	wmMsg := message.NewMessage(watermill.NewUUID(), payload)
-	return p.publisher.Publish(topic, wmMsg)
 }
 
 func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
@@ -421,9 +557,6 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		p.config.Tables = append(p.config.Tables, m.Schema.Table)
 		p.mu.Unlock()
 
-		// DO NOT write back to KV. The source's job is to discover and report.
-		// The ConfigManager is responsible for persisting config changes.
-		// For now, we just update the metadata for observability.
 		metaKey := fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
 		metaData, err := json.Marshal(m.Schema)
 		if err == nil {
