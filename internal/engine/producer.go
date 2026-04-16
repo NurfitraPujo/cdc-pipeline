@@ -449,6 +449,11 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 		return nil, false
 	}
 
+	// Ignore discovery messages themselves to prevent initializing cache with empty Data
+	if msg.Op == protocol.OpSchemaChange {
+		return nil, false
+	}
+
 	p.muEvo.Lock()
 	defer p.muEvo.Unlock()
 
@@ -544,6 +549,23 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		return
 	}
 
+	// ALWAYS warm the schema evolution cache to prevent freeze on first data message
+	// This covers both newly discovered tables and known tables after a worker restart (cold cache)
+	p.muEvo.Lock()
+	if _, exists := p.evoStates[m.Schema.Table]; !exists {
+		log.Info().Str("table", m.Schema.Table).Msg("Warming evolution cache for table")
+		cols := make(map[string]string)
+		for k, v := range m.Schema.Columns {
+			cols[k] = v
+		}
+		p.evoStates[m.Schema.Table] = &tableEvolution{
+			Status:       protocol.SchemaStatusStable,
+			CachedSchema: cols,
+			LastCheckAt:  time.Now(),
+		}
+	}
+	p.muEvo.Unlock()
+
 	isNew := true
 	p.mu.RLock()
 	for _, t := range p.config.Tables {
@@ -567,21 +589,6 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		p.mu.Lock()
 		p.config.Tables = append(p.config.Tables, m.Schema.Table)
 		p.mu.Unlock()
-
-		// Warm the schema evolution cache to prevent freeze on first data message
-		p.muEvo.Lock()
-		if _, exists := p.evoStates[m.Schema.Table]; !exists {
-			cols := make(map[string]string)
-			for k, v := range m.Schema.Columns {
-				cols[k] = v
-			}
-			p.evoStates[m.Schema.Table] = &tableEvolution{
-				Status:       protocol.SchemaStatusStable,
-				CachedSchema: cols,
-				LastCheckAt:  time.Now(),
-			}
-		}
-		p.muEvo.Unlock()
 
 		metaKey := fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
 		metaData, err := json.Marshal(m.Schema)
