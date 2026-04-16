@@ -1,6 +1,9 @@
 package protocol
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 //go:generate msgp
 
@@ -45,16 +48,46 @@ type WorkerHeartbeat struct {
 }
 
 type StatsSummary struct {
-	TotalPipelines      int     `json:"total_pipelines"`
-	HealthyCount        int     `json:"healthy_count"`
-	ErrorCount          int     `json:"error_count"`
-	TransitioningCount  int     `json:"transitioning_count"`
-	TotalRowsSynchronized uint64  `json:"total_rows_synced"`
-	AvgLagMS            int64   `json:"avg_lag_ms"`
+	TotalPipelines        int    `json:"total_pipelines"`
+	HealthyCount          int    `json:"healthy_count"`
+	ErrorCount            int    `json:"error_count"`
+	TransitioningCount    int    `json:"transitioning_count"`
+	TotalRowsSynchronized uint64 `json:"total_rows_synced"`
+	AvgLagMS              int64  `json:"avg_lag_ms"`
 }
 
 type HistoryPoint struct {
 	Timestamp time.Time `json:"timestamp"`
 	RPS       float64   `json:"rps"`
 	LagMS     int64     `json:"lag_ms"`
+}
+
+const (
+	PrefixTableState       = "cdc.table.state."
+	TableStateSnapshotting = "Snapshotting"
+	TableStateCDC          = "CDC"
+	TableStateFailed       = "Failed"
+
+	SchemaStatusStable       = "stable"
+	SchemaStatusFrozen       = "frozen"
+	SchemaStatusTypeConflict = "type_conflict"
+	SchemaStatusSuspended    = "suspended"
+)
+
+type SchemaEvolutionState struct {
+	Status         string            `msg:"status" json:"status"`
+	FrozenAt       time.Time         `msg:"f_at" json:"frozen_at"`
+	Columns        map[string]string `msg:"cols" json:"columns"`
+	BufferedCount  int               `msg:"b_cnt" json:"buffered_count"`
+	CorrelationID  string            `msg:"c_id" json:"correlation_id"`
+	ChangesThisMin int               `msg:"c_min" json:"changes_this_min"`
+	LastChangeAt   time.Time         `msg:"l_at" json:"last_change_at"`
+}
+
+func TableStateKey(pipelineID, sourceID, table string) string {
+	return fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.state", pipelineID, sourceID, table)
+}
+
+func SchemaEvolutionKey(pipelineID, table string) string {
+	return fmt.Sprintf("cdc.pipeline.%s.schema_evolution.%s", pipelineID, table)
 }

@@ -42,6 +42,36 @@ func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "Retry")
 				return
 			}
+		case "drain_timeout":
+			z.DrainTimeout, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "DrainTimeout")
+				return
+			}
+		case "shutdown_timeout":
+			z.ShutdownTimeout, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "ShutdownTimeout")
+				return
+			}
+		case "stabilization_delay":
+			z.StabilizationDelay, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "StabilizationDelay")
+				return
+			}
+		case "crash_recovery_delay":
+			z.CrashRecoveryDelay, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "CrashRecoveryDelay")
+				return
+			}
+		case "global_reload_delay":
+			z.GlobalReloadDelay, err = dc.ReadDuration()
+			if err != nil {
+				err = msgp.WrapError(err, "GlobalReloadDelay")
+				return
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -55,9 +85,9 @@ func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 3
+	// map header, size 8
 	// write "batch_size"
-	err = en.Append(0x83, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	err = en.Append(0x88, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	if err != nil {
 		return
 	}
@@ -86,15 +116,65 @@ func (z *GlobalConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "Retry")
 		return
 	}
+	// write "drain_timeout"
+	err = en.Append(0xad, 0x64, 0x72, 0x61, 0x69, 0x6e, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x6f, 0x75, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.DrainTimeout)
+	if err != nil {
+		err = msgp.WrapError(err, "DrainTimeout")
+		return
+	}
+	// write "shutdown_timeout"
+	err = en.Append(0xb0, 0x73, 0x68, 0x75, 0x74, 0x64, 0x6f, 0x77, 0x6e, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x6f, 0x75, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.ShutdownTimeout)
+	if err != nil {
+		err = msgp.WrapError(err, "ShutdownTimeout")
+		return
+	}
+	// write "stabilization_delay"
+	err = en.Append(0xb3, 0x73, 0x74, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x7a, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.StabilizationDelay)
+	if err != nil {
+		err = msgp.WrapError(err, "StabilizationDelay")
+		return
+	}
+	// write "crash_recovery_delay"
+	err = en.Append(0xb4, 0x63, 0x72, 0x61, 0x73, 0x68, 0x5f, 0x72, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.CrashRecoveryDelay)
+	if err != nil {
+		err = msgp.WrapError(err, "CrashRecoveryDelay")
+		return
+	}
+	// write "global_reload_delay"
+	err = en.Append(0xb3, 0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x5f, 0x72, 0x65, 0x6c, 0x6f, 0x61, 0x64, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	if err != nil {
+		return
+	}
+	err = en.WriteDuration(z.GlobalReloadDelay)
+	if err != nil {
+		err = msgp.WrapError(err, "GlobalReloadDelay")
+		return
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *GlobalConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 3
+	// map header, size 8
 	// string "batch_size"
-	o = append(o, 0x83, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
+	o = append(o, 0x88, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	o = msgp.AppendInt(o, z.BatchSize)
 	// string "batch_wait"
 	o = append(o, 0xaa, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x77, 0x61, 0x69, 0x74)
@@ -106,6 +186,21 @@ func (z *GlobalConfig) MarshalMsg(b []byte) (o []byte, err error) {
 		err = msgp.WrapError(err, "Retry")
 		return
 	}
+	// string "drain_timeout"
+	o = append(o, 0xad, 0x64, 0x72, 0x61, 0x69, 0x6e, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x6f, 0x75, 0x74)
+	o = msgp.AppendDuration(o, z.DrainTimeout)
+	// string "shutdown_timeout"
+	o = append(o, 0xb0, 0x73, 0x68, 0x75, 0x74, 0x64, 0x6f, 0x77, 0x6e, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x6f, 0x75, 0x74)
+	o = msgp.AppendDuration(o, z.ShutdownTimeout)
+	// string "stabilization_delay"
+	o = append(o, 0xb3, 0x73, 0x74, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x7a, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	o = msgp.AppendDuration(o, z.StabilizationDelay)
+	// string "crash_recovery_delay"
+	o = append(o, 0xb4, 0x63, 0x72, 0x61, 0x73, 0x68, 0x5f, 0x72, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	o = msgp.AppendDuration(o, z.CrashRecoveryDelay)
+	// string "global_reload_delay"
+	o = append(o, 0xb3, 0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x5f, 0x72, 0x65, 0x6c, 0x6f, 0x61, 0x64, 0x5f, 0x64, 0x65, 0x6c, 0x61, 0x79)
+	o = msgp.AppendDuration(o, z.GlobalReloadDelay)
 	return
 }
 
@@ -145,6 +240,36 @@ func (z *GlobalConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "Retry")
 				return
 			}
+		case "drain_timeout":
+			z.DrainTimeout, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "DrainTimeout")
+				return
+			}
+		case "shutdown_timeout":
+			z.ShutdownTimeout, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "ShutdownTimeout")
+				return
+			}
+		case "stabilization_delay":
+			z.StabilizationDelay, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "StabilizationDelay")
+				return
+			}
+		case "crash_recovery_delay":
+			z.CrashRecoveryDelay, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "CrashRecoveryDelay")
+				return
+			}
+		case "global_reload_delay":
+			z.GlobalReloadDelay, bts, err = msgp.ReadDurationBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "GlobalReloadDelay")
+				return
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -159,7 +284,7 @@ func (z *GlobalConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *GlobalConfig) Msgsize() (s int) {
-	s = 1 + 11 + msgp.IntSize + 11 + msgp.DurationSize + 6 + z.Retry.Msgsize()
+	s = 1 + 11 + msgp.IntSize + 11 + msgp.DurationSize + 6 + z.Retry.Msgsize() + 14 + msgp.DurationSize + 17 + msgp.DurationSize + 20 + msgp.DurationSize + 21 + msgp.DurationSize + 20 + msgp.DurationSize
 	return
 }
 
@@ -1110,6 +1235,40 @@ func (z *SinkConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "DSN")
 				return
 			}
+		case "max_ack":
+			z.MaxAckPending, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "MaxAckPending")
+				return
+			}
+		case "options":
+			var zb0002 uint32
+			zb0002, err = dc.ReadMapHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Options")
+				return
+			}
+			if z.Options == nil {
+				z.Options = make(map[string]interface{}, zb0002)
+			} else if len(z.Options) > 0 {
+				clear(z.Options)
+			}
+			for zb0002 > 0 {
+				zb0002--
+				var za0001 string
+				za0001, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Options")
+					return
+				}
+				var za0002 interface{}
+				za0002, err = dc.ReadIntf()
+				if err != nil {
+					err = msgp.WrapError(err, "Options", za0001)
+					return
+				}
+				z.Options[za0001] = za0002
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -1122,10 +1281,10 @@ func (z *SinkConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 }
 
 // EncodeMsg implements msgp.Encodable
-func (z SinkConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 3
+func (z *SinkConfig) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 5
 	// write "id"
-	err = en.Append(0x83, 0xa2, 0x69, 0x64)
+	err = en.Append(0x85, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -1154,15 +1313,47 @@ func (z SinkConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "DSN")
 		return
 	}
+	// write "max_ack"
+	err = en.Append(0xa7, 0x6d, 0x61, 0x78, 0x5f, 0x61, 0x63, 0x6b)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.MaxAckPending)
+	if err != nil {
+		err = msgp.WrapError(err, "MaxAckPending")
+		return
+	}
+	// write "options"
+	err = en.Append(0xa7, 0x6f, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteMapHeader(uint32(len(z.Options)))
+	if err != nil {
+		err = msgp.WrapError(err, "Options")
+		return
+	}
+	for za0001, za0002 := range z.Options {
+		err = en.WriteString(za0001)
+		if err != nil {
+			err = msgp.WrapError(err, "Options")
+			return
+		}
+		err = en.WriteIntf(za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Options", za0001)
+			return
+		}
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
-func (z SinkConfig) MarshalMsg(b []byte) (o []byte, err error) {
+func (z *SinkConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 3
+	// map header, size 5
 	// string "id"
-	o = append(o, 0x83, 0xa2, 0x69, 0x64)
+	o = append(o, 0x85, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -1170,6 +1361,20 @@ func (z SinkConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "dsn"
 	o = append(o, 0xa3, 0x64, 0x73, 0x6e)
 	o = msgp.AppendString(o, z.DSN)
+	// string "max_ack"
+	o = append(o, 0xa7, 0x6d, 0x61, 0x78, 0x5f, 0x61, 0x63, 0x6b)
+	o = msgp.AppendInt(o, z.MaxAckPending)
+	// string "options"
+	o = append(o, 0xa7, 0x6f, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x73)
+	o = msgp.AppendMapHeader(o, uint32(len(z.Options)))
+	for za0001, za0002 := range z.Options {
+		o = msgp.AppendString(o, za0001)
+		o, err = msgp.AppendIntf(o, za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Options", za0001)
+			return
+		}
+	}
 	return
 }
 
@@ -1209,6 +1414,40 @@ func (z *SinkConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "DSN")
 				return
 			}
+		case "max_ack":
+			z.MaxAckPending, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "MaxAckPending")
+				return
+			}
+		case "options":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadMapHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Options")
+				return
+			}
+			if z.Options == nil {
+				z.Options = make(map[string]interface{}, zb0002)
+			} else if len(z.Options) > 0 {
+				clear(z.Options)
+			}
+			for zb0002 > 0 {
+				var za0002 interface{}
+				zb0002--
+				var za0001 string
+				za0001, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Options")
+					return
+				}
+				za0002, bts, err = msgp.ReadIntfBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Options", za0001)
+					return
+				}
+				z.Options[za0001] = za0002
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -1222,8 +1461,14 @@ func (z *SinkConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 }
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z SinkConfig) Msgsize() (s int) {
-	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 4 + msgp.StringPrefixSize + len(z.DSN)
+func (z *SinkConfig) Msgsize() (s int) {
+	s = 1 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 4 + msgp.StringPrefixSize + len(z.DSN) + 8 + msgp.IntSize + 8 + msgp.MapHeaderSize
+	if z.Options != nil {
+		for za0001, za0002 := range z.Options {
+			_ = za0002
+			s += msgp.StringPrefixSize + len(za0001) + msgp.GuessSize(za0002)
+		}
+	}
 	return
 }
 
@@ -1781,6 +2026,184 @@ func (z *SourceConfig) Msgsize() (s int) {
 	for za0002 := range z.Tables {
 		s += msgp.StringPrefixSize + len(z.Tables[za0002])
 	}
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
+func (z *TableStatsKeyInfo) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "PipelineID":
+			z.PipelineID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "PipelineID")
+				return
+			}
+		case "SourceID":
+			z.SourceID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SourceID")
+				return
+			}
+		case "SinkID":
+			z.SinkID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
+		case "Table":
+			z.Table, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Table")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *TableStatsKeyInfo) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 4
+	// write "PipelineID"
+	err = en.Append(0x84, 0xaa, 0x50, 0x69, 0x70, 0x65, 0x6c, 0x69, 0x6e, 0x65, 0x49, 0x44)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.PipelineID)
+	if err != nil {
+		err = msgp.WrapError(err, "PipelineID")
+		return
+	}
+	// write "SourceID"
+	err = en.Append(0xa8, 0x53, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x49, 0x44)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.SourceID)
+	if err != nil {
+		err = msgp.WrapError(err, "SourceID")
+		return
+	}
+	// write "SinkID"
+	err = en.Append(0xa6, 0x53, 0x69, 0x6e, 0x6b, 0x49, 0x44)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.SinkID)
+	if err != nil {
+		err = msgp.WrapError(err, "SinkID")
+		return
+	}
+	// write "Table"
+	err = en.Append(0xa5, 0x54, 0x61, 0x62, 0x6c, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Table)
+	if err != nil {
+		err = msgp.WrapError(err, "Table")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *TableStatsKeyInfo) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 4
+	// string "PipelineID"
+	o = append(o, 0x84, 0xaa, 0x50, 0x69, 0x70, 0x65, 0x6c, 0x69, 0x6e, 0x65, 0x49, 0x44)
+	o = msgp.AppendString(o, z.PipelineID)
+	// string "SourceID"
+	o = append(o, 0xa8, 0x53, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x49, 0x44)
+	o = msgp.AppendString(o, z.SourceID)
+	// string "SinkID"
+	o = append(o, 0xa6, 0x53, 0x69, 0x6e, 0x6b, 0x49, 0x44)
+	o = msgp.AppendString(o, z.SinkID)
+	// string "Table"
+	o = append(o, 0xa5, 0x54, 0x61, 0x62, 0x6c, 0x65)
+	o = msgp.AppendString(o, z.Table)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *TableStatsKeyInfo) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "PipelineID":
+			z.PipelineID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "PipelineID")
+				return
+			}
+		case "SourceID":
+			z.SourceID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SourceID")
+				return
+			}
+		case "SinkID":
+			z.SinkID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
+		case "Table":
+			z.Table, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Table")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *TableStatsKeyInfo) Msgsize() (s int) {
+	s = 1 + 11 + msgp.StringPrefixSize + len(z.PipelineID) + 9 + msgp.StringPrefixSize + len(z.SourceID) + 7 + msgp.StringPrefixSize + len(z.SinkID) + 6 + msgp.StringPrefixSize + len(z.Table)
 	return
 }
 

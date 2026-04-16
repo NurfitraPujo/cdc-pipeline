@@ -516,6 +516,326 @@ func (z PipelineTransitionState) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
+func (z *SchemaEvolutionState) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "status":
+			z.Status, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "Status")
+				return
+			}
+		case "f_at":
+			z.FrozenAt, err = dc.ReadTime()
+			if err != nil {
+				err = msgp.WrapError(err, "FrozenAt")
+				return
+			}
+		case "cols":
+			var zb0002 uint32
+			zb0002, err = dc.ReadMapHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "Columns")
+				return
+			}
+			if z.Columns == nil {
+				z.Columns = make(map[string]string, zb0002)
+			} else if len(z.Columns) > 0 {
+				clear(z.Columns)
+			}
+			for zb0002 > 0 {
+				zb0002--
+				var za0001 string
+				za0001, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Columns")
+					return
+				}
+				var za0002 string
+				za0002, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "Columns", za0001)
+					return
+				}
+				z.Columns[za0001] = za0002
+			}
+		case "b_cnt":
+			z.BufferedCount, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "BufferedCount")
+				return
+			}
+		case "c_id":
+			z.CorrelationID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "CorrelationID")
+				return
+			}
+		case "c_min":
+			z.ChangesThisMin, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "ChangesThisMin")
+				return
+			}
+		case "l_at":
+			z.LastChangeAt, err = dc.ReadTime()
+			if err != nil {
+				err = msgp.WrapError(err, "LastChangeAt")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *SchemaEvolutionState) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 7
+	// write "status"
+	err = en.Append(0x87, 0xa6, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.Status)
+	if err != nil {
+		err = msgp.WrapError(err, "Status")
+		return
+	}
+	// write "f_at"
+	err = en.Append(0xa4, 0x66, 0x5f, 0x61, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteTime(z.FrozenAt)
+	if err != nil {
+		err = msgp.WrapError(err, "FrozenAt")
+		return
+	}
+	// write "cols"
+	err = en.Append(0xa4, 0x63, 0x6f, 0x6c, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteMapHeader(uint32(len(z.Columns)))
+	if err != nil {
+		err = msgp.WrapError(err, "Columns")
+		return
+	}
+	for za0001, za0002 := range z.Columns {
+		err = en.WriteString(za0001)
+		if err != nil {
+			err = msgp.WrapError(err, "Columns")
+			return
+		}
+		err = en.WriteString(za0002)
+		if err != nil {
+			err = msgp.WrapError(err, "Columns", za0001)
+			return
+		}
+	}
+	// write "b_cnt"
+	err = en.Append(0xa5, 0x62, 0x5f, 0x63, 0x6e, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.BufferedCount)
+	if err != nil {
+		err = msgp.WrapError(err, "BufferedCount")
+		return
+	}
+	// write "c_id"
+	err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.CorrelationID)
+	if err != nil {
+		err = msgp.WrapError(err, "CorrelationID")
+		return
+	}
+	// write "c_min"
+	err = en.Append(0xa5, 0x63, 0x5f, 0x6d, 0x69, 0x6e)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.ChangesThisMin)
+	if err != nil {
+		err = msgp.WrapError(err, "ChangesThisMin")
+		return
+	}
+	// write "l_at"
+	err = en.Append(0xa4, 0x6c, 0x5f, 0x61, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteTime(z.LastChangeAt)
+	if err != nil {
+		err = msgp.WrapError(err, "LastChangeAt")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *SchemaEvolutionState) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 7
+	// string "status"
+	o = append(o, 0x87, 0xa6, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73)
+	o = msgp.AppendString(o, z.Status)
+	// string "f_at"
+	o = append(o, 0xa4, 0x66, 0x5f, 0x61, 0x74)
+	o = msgp.AppendTime(o, z.FrozenAt)
+	// string "cols"
+	o = append(o, 0xa4, 0x63, 0x6f, 0x6c, 0x73)
+	o = msgp.AppendMapHeader(o, uint32(len(z.Columns)))
+	for za0001, za0002 := range z.Columns {
+		o = msgp.AppendString(o, za0001)
+		o = msgp.AppendString(o, za0002)
+	}
+	// string "b_cnt"
+	o = append(o, 0xa5, 0x62, 0x5f, 0x63, 0x6e, 0x74)
+	o = msgp.AppendInt(o, z.BufferedCount)
+	// string "c_id"
+	o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
+	o = msgp.AppendString(o, z.CorrelationID)
+	// string "c_min"
+	o = append(o, 0xa5, 0x63, 0x5f, 0x6d, 0x69, 0x6e)
+	o = msgp.AppendInt(o, z.ChangesThisMin)
+	// string "l_at"
+	o = append(o, 0xa4, 0x6c, 0x5f, 0x61, 0x74)
+	o = msgp.AppendTime(o, z.LastChangeAt)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *SchemaEvolutionState) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "status":
+			z.Status, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Status")
+				return
+			}
+		case "f_at":
+			z.FrozenAt, bts, err = msgp.ReadTimeBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "FrozenAt")
+				return
+			}
+		case "cols":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadMapHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Columns")
+				return
+			}
+			if z.Columns == nil {
+				z.Columns = make(map[string]string, zb0002)
+			} else if len(z.Columns) > 0 {
+				clear(z.Columns)
+			}
+			for zb0002 > 0 {
+				var za0002 string
+				zb0002--
+				var za0001 string
+				za0001, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Columns")
+					return
+				}
+				za0002, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "Columns", za0001)
+					return
+				}
+				z.Columns[za0001] = za0002
+			}
+		case "b_cnt":
+			z.BufferedCount, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "BufferedCount")
+				return
+			}
+		case "c_id":
+			z.CorrelationID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "CorrelationID")
+				return
+			}
+		case "c_min":
+			z.ChangesThisMin, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "ChangesThisMin")
+				return
+			}
+		case "l_at":
+			z.LastChangeAt, bts, err = msgp.ReadTimeBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "LastChangeAt")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *SchemaEvolutionState) Msgsize() (s int) {
+	s = 1 + 7 + msgp.StringPrefixSize + len(z.Status) + 5 + msgp.TimeSize + 5 + msgp.MapHeaderSize
+	if z.Columns != nil {
+		for za0001, za0002 := range z.Columns {
+			_ = za0002
+			s += msgp.StringPrefixSize + len(za0001) + msgp.StringPrefixSize + len(za0002)
+		}
+	}
+	s += 6 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.CorrelationID) + 6 + msgp.IntSize + 5 + msgp.TimeSize
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
 func (z *StatsSummary) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
