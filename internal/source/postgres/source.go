@@ -321,24 +321,24 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 			}
 		}
 
-		s.lastCheckpoint = protocol.Checkpoint{
-			IngressLSN: m.LSN,
-		}
-
 		if m.SourceID != "" {
+			s.lastCheckpoint = protocol.Checkpoint{
+				IngressLSN: m.LSN,
+			}
 			msgs = append(msgs, m)
 			mu.Unlock()
 			if m.Op == "snapshot" && len(msgs) >= 1000 {
 				triggerFlush()
 			}
+
+			select {
+			case <-s.ackChan:
+				lc.Ack()
+			case <-sourceCtx.Done():
+			}
 		} else {
 			mu.Unlock()
-		}
-
-		select {
-		case <-s.ackChan:
 			lc.Ack()
-		case <-sourceCtx.Done():
 		}
 	}
 
@@ -458,7 +458,7 @@ func (s *PostgresSource) formatDataMessage(msg any, sourceID string) protocol.Me
 	}
 
 	saniData := sanitizePayload(data)
-	payload, err = msgpack.Marshal(saniData)
+	payload, err := msgpack.Marshal(saniData)
 	if err != nil {
 		log.Error().Err(err).Str("table", tableName).Interface("raw_data", data).Msg("Error marshaling data message")
 		return protocol.Message{}
