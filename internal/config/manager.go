@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
@@ -51,6 +52,34 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 
 func (m *ConfigManager) GetKV() nats.KeyValue {
 	return m.kv
+}
+
+func (m *ConfigManager) UpdateSchemaStateCAS(ctx context.Context, pipelineID, table string, state protocol.SchemaEvolutionState, revision uint64) (uint64, error) {
+	key := protocol.SchemaEvolutionKey(pipelineID, table)
+	val, err := state.MarshalMsg(nil)
+	if err != nil {
+		return 0, err
+	}
+
+	if revision == 0 {
+		return m.kv.Create(key, val)
+	}
+	return m.kv.Update(key, val, revision)
+}
+
+func (m *ConfigManager) GetSchemaState(pipelineID, table string) (protocol.SchemaEvolutionState, uint64, error) {
+	key := protocol.SchemaEvolutionKey(pipelineID, table)
+	entry, err := m.kv.Get(key)
+	if err != nil {
+		if err == nats.ErrKeyNotFound {
+			return protocol.SchemaEvolutionState{Status: protocol.SchemaStatusStable}, 0, nil
+		}
+		return protocol.SchemaEvolutionState{}, 0, err
+	}
+
+	var state protocol.SchemaEvolutionState
+	_, err = state.UnmarshalMsg(entry.Value())
+	return state, entry.Revision(), err
 }
 
 // getGlobalConfig returns a copy of the current global config with defaults applied
@@ -109,6 +138,16 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 				continue
 			}
 			cfg.SetDefaults()
+
+			// Idempotency check: Skip if config is the same
+			m.globalConfigMu.RLock()
+			isSame := reflect.DeepEqual(m.globalConfig, cfg)
+			m.globalConfigMu.RUnlock()
+			if isSame {
+				log.Debug().Msg("Global config unchanged, skipping reload of all workers")
+				continue
+			}
+
 			m.globalConfigMu.Lock()
 			m.globalConfig = cfg
 			m.globalConfigMu.Unlock()
@@ -205,6 +244,32 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 				continue
 			}
 
+			// Smart reload: detect if ONLY Tables changed
+			var newTables []string
+			if exists && m.onlyTablesChanged(currentCfg, cfg, &newTables) {
+				m.workersMu.Unlock() // Unlock early as we are not modifying the worker map
+				m.workersMu.RLock()
+				worker, workerExists := m.workers[pipelineID]
+				m.workersMu.RUnlock()
+
+				if workerExists {
+					log.Info().
+						Str("pipeline_id", pipelineID).
+						Strs("new_tables", newTables).
+						Msg("Smart reload: signaling dynamic table addition")
+
+					// Update config in memory for future comparisons
+					m.workersMu.Lock()
+					m.configs[pipelineID] = cfg
+					m.revisions[pipelineID] = entry.Revision()
+					m.workersMu.Unlock()
+					
+					// This is a conceptual method on the Worker interface
+					worker.SignalDynamicTables(newTables)
+				}
+				continue
+			}
+
 			// Update cache and proceed with transition
 			m.configs[pipelineID] = cfg
 			m.revisions[pipelineID] = entry.Revision()
@@ -218,6 +283,82 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			m.transitionWorker(ctx, pipelineID, cfg)
 		}
 	}
+}
+
+func (m *ConfigManager) onlyTablesChanged(oldCfg, newCfg protocol.PipelineConfig, newTables *[]string) bool {
+	// Create copies to avoid modifying the originals
+	oldCopy := oldCfg
+	newCopy := newCfg
+
+	// Temporarily blank out the tables to compare the rest of the struct
+	oldCopy.Tables = nil
+	newCopy.Tables = nil
+
+	if !reflect.DeepEqual(oldCopy, newCopy) {
+		return false
+	}
+
+	// If the rest of the struct is identical, check if tables were only added
+	if len(newCfg.Tables) > len(oldCfg.Tables) {
+		oldTablesSet := make(map[string]bool)
+		for _, t := range oldCfg.Tables {
+			oldTablesSet[t] = true
+		}
+		for _, t := range newCfg.Tables {
+			if !oldTablesSet[t] {
+				*newTables = append(*newTables, t)
+			}
+		}
+		return len(*newTables) > 0 // It's only a table change if new tables were actually found
+	}
+
+	return false
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func processorConfigsEqual(a, b []protocol.ProcessorConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type || !mapsEqual(a[i].Options, b[i].Options) {
+			return false
+		}
+	}
+	return true
+}
+
+func mapsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func retryConfigEqual(a, b *protocol.RetryConfig) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.MaxRetries == b.MaxRetries && a.InitialInterval == b.InitialInterval && a.MaxInterval == b.MaxInterval && a.EnableDLQ == b.EnableDLQ
 }
 
 func (m *ConfigManager) applyHierarchy(cfg *protocol.PipelineConfig) {
@@ -315,46 +456,74 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	m.workersMu.Unlock()
 	log.Info().Str("pipeline_id", id).Msg("Successfully started new worker")
 
-	// --- SUPERVISOR GOROUTINE ---
-	// Capture crash recovery delay at start
-	crashRecoveryDelay := m.getGlobalConfig().CrashRecoveryDelay
-	go func(worker engine.PipelineWorker, pid string, recoveryDelay time.Duration) {
-		<-worker.Finished()
-
-		// When worker finishes, check if it was intentional (Transitioning)
-		_, err := m.kv.Get(protocol.TransitionStateKey(pid))
-		if err == nats.ErrKeyNotFound {
-			// CRASH DETECTED: It finished but we aren't transitioning.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(recoveryDelay):
-				log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
-				// Re-fetch latest config and restart.
-				// Note: startNewWorker will spawn a NEW supervisor for the next instance.
-				entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
-				if err != nil {
-					log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config")
-					return
-				}
-				var latestCfg protocol.PipelineConfig
-				if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
-					log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
-					return
-				}
-				m.applyHierarchy(&latestCfg)
-
-				// Synchronize cache so Watch events don't re-trigger
-				m.workersMu.Lock()
-				m.configs[pid] = latestCfg
-				m.revisions[pid] = entry.Revision()
-				m.workersMu.Unlock()
-
-				m.startNewWorker(ctx, pid, latestCfg)
-			}
-		}
-	}(newWorker, id, crashRecoveryDelay)
+	// --- HEARTBEAT & SUPERVISOR GOROUTINE ---
+	go m.monitorWorker(ctx, newWorker, id, cfg)
 }
+
+func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.PipelineWorker, pid string, cfg protocol.PipelineConfig) {
+	// Heartbeat setup
+	ticker := time.NewTicker(2 * time.Second) // More frequent for testing
+	defer ticker.Stop()
+	startTime := time.Now()
+	workerID := fmt.Sprintf("%s-%s", pid, startTime.Format("05.000")) // Unique ID per instance
+
+	// Supervisor setup
+	crashRecoveryDelay := m.getGlobalConfig().CrashRecoveryDelay
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-worker.Finished():
+			// When worker finishes, check if it was intentional (Transitioning)
+			_, err := m.kv.Get(protocol.TransitionStateKey(pid))
+			if err == nats.ErrKeyNotFound {
+				// CRASH DETECTED: It finished but we aren't transitioning.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(crashRecoveryDelay):
+					log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
+					// Re-fetch latest config and restart.
+					entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
+					if err != nil {
+						log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config")
+						return
+					}
+					var latestCfg protocol.PipelineConfig
+					if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
+						log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
+						return
+					}
+					m.applyHierarchy(&latestCfg)
+
+					// Synchronize cache so Watch events don't re-trigger
+					m.workersMu.Lock()
+					m.configs[pid] = latestCfg
+					m.revisions[pid] = entry.Revision()
+					m.workersMu.Unlock()
+
+					m.startNewWorker(ctx, pid, latestCfg)
+				}
+			}
+			return // End this monitoring goroutine
+		case t := <-ticker.C:
+			hb := protocol.WorkerHeartbeat{
+				WorkerID:  workerID,
+				Status:    "Running", // If it's ticking, it's running
+				UptimeSec: int64(t.Sub(startTime).Seconds()),
+				UpdatedAt: t,
+			}
+			data, _ := json.Marshal(hb)
+			// Use the generic pipeline ID for the key so it's predictable in tests
+			if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+				log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update worker heartbeat")
+			}
+			metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(t.Unix()))
+		}
+	}
+}
+
 
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	m.workersMu.Lock()
