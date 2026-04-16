@@ -215,11 +215,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 		var m protocol.Message
 		switch msg := lc.Message.(type) {
 		case *format.Relation:
-			log.Debug().
-				Str("table", msg.Name).
-				Uint32("oid", msg.OID).
-				Int("cols", len(msg.Columns)).
-				Msg("PostgresSource: Received Relation")
 			if strings.HasPrefix(msg.Name, "cdc_snapshot_") {
 				mu.Unlock()
 				lc.Ack()
@@ -240,10 +235,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 				Schema: &protocol.SchemaMetadata{Table: msg.Name, Schema: msg.Namespace, Columns: cols},
 			}
 		case *format.Insert:
-			log.Debug().
-				Str("table", msg.TableName).
-				Interface("data", msg.Decoded).
-				Msg("PostgresSource: Received Insert")
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
 				mu.Unlock()
 				lc.Ack()
@@ -259,11 +250,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
 		case *format.Update:
-			log.Debug().
-				Str("table", msg.TableName).
-				Interface("old_data", msg.OldDecoded).
-				Interface("new_data", msg.NewDecoded).
-				Msg("PostgresSource: Received Update")
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
 				mu.Unlock()
 				lc.Ack()
@@ -279,10 +265,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
 		case *format.Delete:
-			log.Debug().
-				Str("table", msg.TableName).
-				Interface("old_data", msg.OldDecoded).
-				Msg("PostgresSource: Received Delete")
 			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
 				mu.Unlock()
 				lc.Ack()
@@ -298,11 +280,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 			}
 			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
 		case *format.Snapshot:
-			log.Debug().
-				Str("table", msg.Table).
-				Uint64("lsn", uint64(msg.LSN)).
-				Str("event", string(msg.EventType)).
-				Msg("PostgresSource: Received Snapshot")
 			if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
 				mu.Unlock()
 				lc.Ack()

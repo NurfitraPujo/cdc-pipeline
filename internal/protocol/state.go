@@ -70,6 +70,7 @@ const (
 
 	SchemaStatusStable       = "stable"
 	SchemaStatusFrozen       = "frozen"
+	SchemaStatusDraining     = "draining"
 	SchemaStatusTypeConflict = "type_conflict"
 	SchemaStatusSuspended    = "suspended"
 )

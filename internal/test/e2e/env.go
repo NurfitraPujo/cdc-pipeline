@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,8 +204,49 @@ func (e *Environment) EventuallyCountDatabend(table string, expected int, timeou
 			log.Printf("Databend query failed: %v", err)
 			return false
 		}
+
+		log.Printf("Count: %d, Expected: %d", count, expected)
+
 		return count == expected
 	}, timeout, 1*time.Second)
+}
+
+func (e *Environment) EventuallyAssertHeartbeat(pipelineID, expectedStatus string, timeout time.Duration) {
+	require.Eventually(e.T, func() bool {
+		keys, err := e.KV.Keys()
+		if err != nil {
+			return false
+		}
+
+		var workerKey string
+		prefix := protocol.WorkerHeartbeatKey(pipelineID)
+		for _, key := range keys {
+			if strings.HasPrefix(key, prefix) {
+				workerKey = key
+				break
+			}
+		}
+
+		if workerKey == "" {
+			log.Printf("Heartbeat key for pipeline %s not found", pipelineID)
+			return false
+		}
+
+		entry, err := e.KV.Get(workerKey)
+		if err != nil {
+			log.Printf("Failed to get heartbeat key %s: %v", workerKey, err)
+			return false
+		}
+
+		var heartbeat protocol.WorkerHeartbeat
+		if err := json.Unmarshal(entry.Value(), &heartbeat); err != nil {
+			log.Printf("Failed to unmarshal heartbeat: %v", err)
+			return false
+		}
+
+		log.Printf("Found heartbeat for %s: Status=%s", pipelineID, heartbeat.Status)
+		return heartbeat.Status == expectedStatus
+	}, timeout, 1*time.Second, "timed out waiting for worker heartbeat to be '%s'", expectedStatus)
 }
 
 func (e *Environment) EventuallyMatchDatabend(table string, expected map[string]any, timeout time.Duration) {

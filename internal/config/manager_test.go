@@ -49,6 +49,9 @@ func (m *MockWorker) Shutdown(ctx context.Context) error {
 	m.shutdown = true
 	return nil
 }
+func (m *MockWorker) SignalDynamicTables(tables []string) {
+	log.Info().Str("pipeline_id", m.id).Int("num_tables", len(tables)).Msg("MockWorker SignalDynamicTables called")
+}
 
 func TestConfigManager_Transitions(t *testing.T) {
 	ctx := context.Background()

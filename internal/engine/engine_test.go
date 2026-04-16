@@ -144,10 +144,13 @@ func TestProducer_FailurePaths(t *testing.T) {
 
 	mockSrc := mocks.NewMockSource(ctrl)
 	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSub := mocks.NewMockSubscriber(ctrl)
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
 	cfg := protocol.PipelineConfig{ID: "p1", Sources: []string{"s1"}}
-	p := NewProducer("p1", cfg, mockSrc, mockPub, mockKV)
+	ackChanMock := make(chan *message.Message)
+	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackChanMock, nil).AnyTimes()
+	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV)
 	srcCfg := protocol.SourceConfig{ID: "s1"}
 	cp := protocol.Checkpoint{}
 
@@ -170,11 +173,11 @@ func TestProducer_FailurePaths(t *testing.T) {
 		srcMsgChan <- []protocol.Message{{SourceID: "s1", Table: "t1", Op: "insert"}}
 
 		// Publish fails
-		mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(errors.New("nats down"))
+		mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(errors.New("nats down")).AnyTimes()
 
 		// Circuit breaker logic: Get stats, update status to CIRCUIT_OPEN
-		mockKV.EXPECT().Get(gomock.Any()).Return(mockEntry{value: []byte("{}")}, nil)
-		mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil)
+		mockKV.EXPECT().Get(gomock.Any()).Return(mockEntry{value: []byte("{}")}, nil).AnyTimes()
+		mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil).AnyTimes()
 
 		errChan := make(chan error, 1)
 		go func() {
@@ -187,6 +190,65 @@ func TestProducer_FailurePaths(t *testing.T) {
 		err := <-errChan
 		assert.Error(t, err) // ctx canceled
 	})
+}
+
+func TestProducer_DiscoveryEvolution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSrc := mocks.NewMockSource(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	cfg := protocol.PipelineConfig{ID: "p2", Sources: []string{"s1"}, Tables: []string{"t1"}}
+	ackChanMock := make(chan *message.Message)
+	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackChanMock, nil).AnyTimes()
+	p := NewProducer("p2", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV)
+
+	ctx := context.Background()
+
+	// Warm cache first
+	m1 := protocol.Message{
+		SourceID: "s1",
+		Op:       protocol.OpSchemaChange,
+		LSN:      100,
+		Schema: &protocol.SchemaMetadata{
+			Table:   "t1",
+			Columns: map[string]string{"id": "int"},
+		},
+	}
+	p.handleDiscovery(ctx, m1)
+
+	p.muEvo.RLock()
+	state := p.evoStates["t1"]
+	assert.NotNil(t, state)
+	assert.Equal(t, protocol.SchemaStatusStable, state.Status)
+	assert.Equal(t, "int", state.CachedSchema["id"])
+	p.muEvo.RUnlock()
+
+	// New columns in discovery
+	m2 := protocol.Message{
+		SourceID: "s1",
+		Op:       protocol.OpSchemaChange,
+		LSN:      101,
+		Schema: &protocol.SchemaMetadata{
+			Table:   "t1",
+			Columns: map[string]string{"id": "int", "new_col": "text"},
+		},
+	}
+
+	// Expectations for evolution
+	mockKV.EXPECT().Update(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint64(2), nil)
+	mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(nil)
+
+	p.handleDiscovery(ctx, m2)
+
+	p.muEvo.RLock()
+	assert.Equal(t, protocol.SchemaStatusFrozen, state.Status)
+	assert.Equal(t, "text", state.CachedSchema["new_col"])
+	assert.NotEmpty(t, state.CorrelationID)
+	p.muEvo.RUnlock()
 }
 
 type mockEntry struct {

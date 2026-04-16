@@ -41,6 +41,20 @@ func (m *MockSource) EXPECT() *MockSourceMockRecorder {
 	return m.recorder
 }
 
+// AlterPublication mocks base method.
+func (m *MockSource) AlterPublication(ctx context.Context, tableName string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AlterPublication", ctx, tableName)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AlterPublication indicates an expected call of AlterPublication.
+func (mr *MockSourceMockRecorder) AlterPublication(ctx, tableName any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AlterPublication", reflect.TypeOf((*MockSource)(nil).AlterPublication), ctx, tableName)
+}
+
 // Name mocks base method.
 func (m *MockSource) Name() string {
 	m.ctrl.T.Helper()
@@ -53,6 +67,20 @@ func (m *MockSource) Name() string {
 func (mr *MockSourceMockRecorder) Name() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Name", reflect.TypeOf((*MockSource)(nil).Name))
+}
+
+// RestartWithNewTables mocks base method.
+func (m *MockSource) RestartWithNewTables(ctx context.Context, newTables []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RestartWithNewTables", ctx, newTables)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RestartWithNewTables indicates an expected call of RestartWithNewTables.
+func (mr *MockSourceMockRecorder) RestartWithNewTables(ctx, newTables any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RestartWithNewTables", reflect.TypeOf((*MockSource)(nil).RestartWithNewTables), ctx, newTables)
 }
 
 // Start mocks base method.

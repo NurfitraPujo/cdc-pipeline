@@ -22,7 +22,7 @@ func TestE2E_LiveCDC(t *testing.T) {
 		Sources:   []string{env.PgConfig.ID},
 		Sinks:     []string{env.DbConfig.ID},
 		Tables:    []string{"users_cdc"},
-		BatchSize: 2,
+		BatchSize: 10,
 		BatchWait: 10 * time.Millisecond,
 	}
 	data, _ := json.Marshal(pipeCfg)
@@ -30,22 +30,19 @@ func TestE2E_LiveCDC(t *testing.T) {
 	// Ensure table exists in source
 	env.SeedPostgres("users_cdc", 0)
 
-	env.StartWorker()
+	// Put config in KV *before* starting worker to avoid race
 	env.KV.Put(protocol.PipelineConfigKey(pipeCfg.ID), data)
+	env.StartWorker()
 
-	// give time for pipeline start and ran cdc
-	time.Sleep(5 * time.Second)
+	// Wait for the pipeline to be in a stable running state
+	env.EventuallyAssertHeartbeat("p_cdc", "Running", 30*time.Second)
 
 	// 2. Perform Live Inserts
 	env.Postgres.Exec("INSERT INTO users_cdc (name, age) VALUES ($1, $2)", "live-1", 30)
 	env.Postgres.Exec("INSERT INTO users_cdc (name, age) VALUES ($1, $2)", "live-2", 35)
 
-	time.Sleep(2 * time.Second)
-
 	// 3. Assert sync
 	env.EventuallyCountDatabend("users_cdc", 2, 30*time.Second)
-
-	// Give it a moment to ensure CDC stream is fully established
 
 	// 4. Perform Update
 	env.Postgres.Exec("UPDATE users_cdc SET age = 40 WHERE name = 'live-1'")
@@ -55,8 +52,6 @@ func TestE2E_LiveCDC(t *testing.T) {
 
 	// 6. Perform Delete
 	env.Postgres.Exec("DELETE FROM users_cdc WHERE name = 'live-2'")
-
-	time.Sleep(2 * time.Second)
 
 	// 7. Assert count decreased
 	env.EventuallyCountDatabend("users_cdc", 1, 30*time.Second)

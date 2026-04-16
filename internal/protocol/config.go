@@ -96,6 +96,10 @@ func DLQTopic(pid string) string {
 	return fmt.Sprintf("cdc_pipeline_%s_dlq", pid)
 }
 
+func AcksTopic(pid string) string {
+	return fmt.Sprintf("cdc_pipeline_%s_acks", pid)
+}
+
 func PipelineStatusPrefix(pid string) string {
 	return fmt.Sprintf("%s%s.sources.", PrefixPipelineState, pid)
 }

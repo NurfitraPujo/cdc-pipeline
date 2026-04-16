@@ -9,4 +9,5 @@ type PipelineWorker interface {
 	Drain() error
 	Finished() <-chan struct{}
 	Shutdown(ctx context.Context) error
+	SignalDynamicTables(tables []string)
 }

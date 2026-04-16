@@ -326,7 +326,7 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 
 		query += strings.Join(valueStrings, ", ")
 
-		log.Debug().Str("table", table).Str("query", query).Int("num_records", len(records)).Msg("DatabendSink: Executing Upsert")
+		log.Debug().Str("table", table).Str("query", query).Int("num_records", len(records)).Any("array", valueArgs).Msg("DatabendSink: Executing Upsert")
 
 		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
 			return fmt.Errorf("uploadTableBatch for group %s failed: %w", key, err)

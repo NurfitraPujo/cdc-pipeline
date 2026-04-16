@@ -155,27 +155,6 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				return lastLSN, nil
 			}
 
-			// Heavy Debug Log: show every table in the batch
-			tablesInBatch := make(map[string]int)
-			for _, m := range msgs {
-				tablesInBatch[m.Table]++
-			}
-			log.Debug().
-				Str("pipeline_id", p.pipelineID).
-				Int("total_count", len(msgs)).
-				Interface("tables", tablesInBatch).
-				Msg("Producer: Processing batch from msgChan")
-
-			// Debug Log
-			if len(msgs) > 0 {
-				log.Debug().
-					Str("pipeline_id", p.pipelineID).
-					Int("count", len(msgs)).
-					Str("first_op", msgs[0].Op).
-					Str("last_op", msgs[len(msgs)-1].Op).
-					Msg("Producer received message batch from source")
-			}
-
 			// 1. Process Discovery & Schema Evolution
 			discoveredTables := make([]protocol.Message, 0, 10)
 			mainBatch := make(protocol.MessageBatch, 0, len(msgs))
@@ -546,13 +525,6 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 	for k := range state.CachedSchema {
 		cachedKeys = append(cachedKeys, k)
 	}
-
-	log.Debug().
-		Str("table", msg.Table).
-		Strs("msg_keys", msgKeys).
-		Strs("cached_keys", cachedKeys).
-		Int("added_count", len(added)).
-		Msg("detectSchemaChange: Comparing keys")
 
 	if len(added) > 0 {
 		return p.performSchemaEvolution(msg.Table, msg.SourceID, added)

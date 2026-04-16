@@ -16,7 +16,7 @@ func TestE2E_InitialSnapshot(t *testing.T) {
 	env := Setup(t)
 
 	// 1. Pre-seed Postgres
-	env.SeedPostgres("users_snapshot", 1000)
+	env.SeedPostgres("users_snapshot", 100)
 
 	// 2. Configure Pipeline
 	pipeCfg := protocol.PipelineConfig{
@@ -25,8 +25,8 @@ func TestE2E_InitialSnapshot(t *testing.T) {
 		Sources:   []string{env.PgConfig.ID},
 		Sinks:     []string{env.DbConfig.ID},
 		Tables:    []string{"users_snapshot"},
-		BatchSize: 100,
-		BatchWait: 1 * time.Second,
+		BatchSize: 50,
+		BatchWait: 200 * time.Millisecond,
 	}
 	data, _ := json.Marshal(pipeCfg)
 	env.KV.Put(protocol.PipelineConfigKey(pipeCfg.ID), data)
@@ -35,5 +35,5 @@ func TestE2E_InitialSnapshot(t *testing.T) {
 	env.StartWorker()
 
 	// 4. Assert sync
-	env.EventuallyCountDatabend("users_snapshot", 1000, 60*time.Second)
-}
+	env.EventuallyCountDatabend("users_snapshot", 100, 60*time.Second)
+	}

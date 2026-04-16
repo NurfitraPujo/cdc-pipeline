@@ -127,7 +127,18 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 		retry = *cfg.Retry
 	}
 
-	prod := NewProducer(id, cfg, src, f.Publisher, f.KV)
+	// Create a subscriber for the producer to handle schema evolution acks
+	prodDurableName := fmt.Sprintf("cdc-worker-%s-producer-acks", id)
+	if f.WorkerGroup != "" {
+		prodDurableName = fmt.Sprintf("%s-%s", f.WorkerGroup, prodDurableName)
+	}
+	prodSub, err := nats.NewNatsSubscriber(f.NatsURL, prodDurableName, 100, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subscriber for producer %s: %w", id, err)
+	}
+	subscribers = append(subscribers, prodSub)
+
+	prod := NewProducer(id, f.NatsURL, cfg, src, f.Publisher, prodSub, f.KV)
 
 	var consumers []*Consumer
 	for i, snk := range snks {

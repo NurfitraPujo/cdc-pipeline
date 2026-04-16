@@ -2,12 +2,12 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"testing"
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
-	go_nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,42 +40,17 @@ func TestE2E_DynamicDiscovery(t *testing.T) {
 	_, err := env.Postgres.Exec("CREATE TABLE table_dynamic (id SERIAL PRIMARY KEY, name TEXT)")
 	require.NoError(t, err)
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
-	// 3. Wait for discovery reload to COMPLETE
-	log.Printf("Waiting for discovery reload to start...")
-	require.Eventually(t, func() bool {
-		entry, err := env.KV.Get(protocol.PipelineConfigKey(pipeCfg.ID))
-		if err != nil {
-			return false
-		}
-		var cfg protocol.PipelineConfig
-		json.Unmarshal(entry.Value(), &cfg)
-		for _, tbl := range cfg.Tables {
-			if tbl == "table_dynamic" {
-				return true
-			}
-		}
-		return false
-	}, 60*time.Second, 1*time.Second, "Table should be discovered in config")
-
-	log.Printf("Waiting for transition to complete...")
-	require.Eventually(t, func() bool {
-		_, err := env.KV.Get(protocol.TransitionStateKey(pipeCfg.ID))
-		return err == go_nats.ErrKeyNotFound
-	}, 60*time.Second, 1*time.Second, "Transition should finish")
-
-	// Extra buffer for worker startup
-	log.Printf("Reload complete. Waiting for new worker to settle...")
-	// time.Sleep(30 * time.Second)
-
-	// 4. Now perform inserts into the dynamic table
+	// 3. Insert data into the new table
+	// The running pipeline should discover the table and sync the data without restarting.
 	log.Printf("Performing inserts into dynamic table...")
-	for i := 0; i < 10; i++ {
-		_, err = env.Postgres.Exec("INSERT INTO table_dynamic (name) VALUES ($1)", "dynamic-user")
+	for i := range 10 {
+		_, err = env.Postgres.Exec("INSERT INTO table_dynamic (name) VALUES ($1)", fmt.Sprintf("dynamic-user-%d", i))
 		require.NoError(t, err)
+		// time.Sleep(100 * time.Millisecond) // Small delay to ensure order
 	}
 
-	// 5. Assert sync
+	// 4. Assert sync for the new table
 	env.EventuallyCountDatabend("table_dynamic", 10, 60*time.Second)
 }
