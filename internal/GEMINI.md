@@ -23,5 +23,7 @@ The `internal/` directory contains the core logic of the CDC Data Pipeline. The 
 4.  **Autonomous Self-Healing**: Supervisor goroutines monitor for crashes and reboot workers automatically.
 5.  **Zero-Allocation Efficiency**: Extensive use of MessagePack for high-performance serialization.
 6.  **Robust Error Handling**: Strict adherence to the `Cancel -> Sleep -> Close` lifecycle and dual-layer panic recovery.
+7.  **Robust Schema Evolution**: Uses a Distributed State Machine with NATS KV CAS fencing, Schema Circuit Breaker, and Correlation ID-secured acknowledgments.
+8.  **Chaotic-Safe Discovery**: Handles new tables with Chunked Dynamic Snapshots and Snapshot Isolation via JetStream buffering to ensure no data loss during discovery.
 
 Refer to nested `GEMINI.md` files in each subdirectory for more detailed technical documentation.

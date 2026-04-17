@@ -19,6 +19,7 @@ Located in `provider.go`, the interfaces define the contract for messaging backe
 - **NATS JetStream Implementation (`nats/`)**:
     - Leverages **Watermill NATS** for reliable patterns.
     - Uses **JetStream** for persistence and durability.
+    - **Dynamic Discovery Buffering**: Utilizes ephemeral JetStream topics (`cdc_pipeline_{id}_buffer_{table}`) to bridge the gap during Snapshotting/Draining phases.
     - Implements **Queue Groups** for consumer scaling.
 
 ## Plugging in New Backends

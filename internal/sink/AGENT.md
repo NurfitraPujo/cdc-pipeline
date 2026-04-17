@@ -7,7 +7,7 @@ The `internal/sink` package provides a **Plug-and-Play (PnP)** layer for writing
 Located in `provider.go`, the interface ensures all egress backends provide consistent behavior:
 - `Name() string`: Returns the unique identifier for the sink type.
 - `BatchUpload(ctx, messages)`: Uploads a batch of heterogeneous messages. Implementations must handle idempotency.
-- `ApplySchema(ctx, schema)`: Translates source metadata into target DDL (e.g., `CREATE TABLE`, `ALTER TABLE`).
+- **`ApplySchema(ctx context.Context, m protocol.Message)`**: Translates source metadata into target DDL (e.g., `CREATE TABLE`, `ALTER TABLE`). By passing the full `protocol.Message`, sinks like `postgres_debug` can capture cryptographic **Correlation IDs** and operational metadata during schema evolution.
 - `Stop()`: Closes connection pools and releases resources.
 
 ## Supported Backends

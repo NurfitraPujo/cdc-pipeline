@@ -8,7 +8,10 @@ The `internal/engine` package contains the core streaming logic of the CDC Data 
     - Interfaces with ingress sources (e.g., `internal/source`).
     - Handles **Ingress LSN Checkpointing**: Persists LSNs to NATS KV after successful publishing.
     - Wraps NATS publishing in a **Circuit Breaker** (using `gobreaker`) to prevent head-of-line blocking during transient failures.
-    - Manages **Dynamic Discovery**: Updates pipeline configuration when new tables are discovered in the source.
+    - **Chaotic-Safe Dynamic Discovery**:
+        - **Chunked Dynamic Snapshots**: When a new table is discovered, the Producer performs an automatic catch-up snapshot using paginated `SELECT` queries to bridge the gap before replication starts.
+        - **Snapshot Isolation**: While a table is snapshotting or draining, concurrent CDC data is automatically buffered to a dedicated NATS JetStream topic (`cdc_pipeline_{id}_buffer_{table}`).
+    - **Cache Warming**: Initial discovery now warms the producer's memory cache, preventing false-positive evolution freezes on startup.
 - **`Consumer`**:
     - Interfaces with egress sinks (e.g., `internal/sink`).
     - Implements **Heterogeneous Batching**: Groups records by table and column-set.
@@ -18,6 +21,12 @@ The `internal/engine` package contains the core streaming logic of the CDC Data 
     - Routes repeatedly failing messages to a dedicated NATS topic for manual inspection and replay.
 - **`Pipeline`**:
     - The top-level orchestrator that starts and coordinates the Producer and Consumer goroutines.
+    - **Robust Schema Evolution State Machine**:
+        - Managed via NATS KV using **CAS (Compare-And-Swap)** fencing tokens to prevent split-brain corruption.
+        - **Secured Acknowledgment**: Uses cryptographic **Correlation IDs** between Consumer and Producer to prevent spoofed acknowledgments.
+        - **Schema Circuit Breaker**: Rate-limits schema changes (max 5/min) to prevent DoS attacks.
+        - **Non-blocking Acknowledgment Protocol**: Ensures all source acknowledgments are non-blocking to prevent Producer deadlocks.
+        - **JSON-Backed Persistence**: Evolution state is fully serialized with exported fields and JSON tags for reliable recovery.
     - **Note**: Multi-source pipeline support (`Sources []string` field) is designed for future use. Currently only `Sources[0]` is used.
 
 ## PnP Transformer Architecture

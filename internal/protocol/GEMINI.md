@@ -5,10 +5,11 @@ The `internal/protocol` package defines the shared data structures used across t
 ## Core Features
 
 - **Data Models**:
-    - **`Message`**: The fundamental unit of CDC data, containing table info, operation type (insert/update/delete/snapshot), LSN, and payload.
+    - **`Message`**: The fundamental unit of CDC data, containing table info, operation type (insert/update/delete/snapshot), LSN, and payload. Now includes cryptographic **Correlation IDs** (SHA256-based) for secured acknowledgments and transformation lineage auditing.
     - **`PipelineConfig`**, **`SourceConfig`**, **`SinkConfig`**: Life-cycle and connectivity definitions.
     - **`Checkpoint`**: Persisted state tracking ingress/egress progress.
     - **`TableStats`**: Real-time metrics for each synced table.
+    - **Evolution State**: Defines the distributed state machine lifecycle: `Initial`, `Snapshotting` (active paginated fetch), `Draining` (replaying JetStream buffer), `ApplyingSchema`, `Verifying`, `SteadyState`. Fully JSON-serialized with explicit fencing tokens.
 - **MessagePack (`msgp`)**:
     - Uses code generation to provide zero-allocation, high-speed serialization.
     - Significantly more efficient than JSON for high-throughput CDC data.

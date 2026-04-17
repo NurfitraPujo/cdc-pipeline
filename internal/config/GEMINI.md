@@ -23,6 +23,8 @@ The `internal/config` package is the central nervous system of the CDC Data Pipe
 
 ## Conventions
 
-- **Concurrency Safety**: Uses `sync.RWMutex` to protect access to active worker maps and global configurations.
+- **Concurrency Safety**: 
+    - Uses `sync.RWMutex` to protect access to active worker maps and global configurations.
+    - Implements **Distributed Locking** via `AcquireSchemaLockCAS`, leveraging NATS KV **Revision Numbers** as fencing tokens to prevent split-brain during concurrent evolution attempts.
 - **Context Management**: Respects standard Go `context.Context` for graceful shutdown of watchers and supervisors.
 - **Transition State**: Persists a `PipelineTransitionState` in NATS KV during reloads to inform the Control Plane and prevent supervisor race conditions.

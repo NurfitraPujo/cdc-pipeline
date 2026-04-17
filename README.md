@@ -7,9 +7,11 @@ A high-performance, modular CDC (Change Data Capture) data pipeline from Postgre
 - **⚡ Resilience First**: Built-in **Circuit Breaker** (Producer) and **Isolation Mode** (Consumer) to handle transient failures and "poison-pill" batches.
 - **🤖 Autonomous Supervision**: Recursive worker supervisor that detects unplanned crashes and automatically reboots pipelines with exponential backoff.
 - **🔗 Per-Sink Consumer Architecture**: Complete isolation between egress targets. A failure or slowdown in one sink (e.g., Debug DB) never blocks production data flow to others (e.g., Databend).
-- **🧬 Auto-Schema Evolution**: Automatic DDL application to the sink (`CREATE/ALTER TABLE`) when source schemas change.
+- **🧬 Auto-Schema Evolution**: Robust distributed state machine powered by **NATS KV CAS (Compare-and-Swap)** fencing tokens to prevent split-brain corruption and ensure consistent transitions. Includes a **Schema Circuit Breaker** to prevent DoS attacks.
+- **🔄 Chaotic-Safe Dynamic Discovery**: Automatic catch-up for new tables using **paginated SELECT snapshots** and **JetStream buffering** to bridge the "Gap of Uncertainty," preventing data loss even when inserts immediately follow table creation.
 - **📦 Heterogeneous Batching**: Sophisticated grouping of CDC messages by column-set within a single batch, preventing SQL mismatches during live schema changes.
 - **🔄 Graceful Transitions**: Two-phase "Drain -> Shutdown -> Restart" protocol for zero-downtime, LSN-consistent configuration reloads.
+- **🛡️ Secured Acknowledgment**: Cryptographic **Correlation IDs** between Consumer and Producer to prevent spoofed acknowledgments and resolve deadlocks with a non-blocking protocol.
 - **📊 Live Observability**: Real-time SSE (Server-Sent Events) metrics stream and full Prometheus integration for the "Four Golden Signals."
 - **🔍 Deep Debugging**: Integrated PostgreSQL Debug Sink for full data lineage, capturing "before" and "after" transformation states with correlation IDs.
 

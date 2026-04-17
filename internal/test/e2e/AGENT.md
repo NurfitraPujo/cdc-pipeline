@@ -12,7 +12,7 @@ The `internal/test/e2e` package contains comprehensive integration tests that ve
     - **Initial Snapshot**: Verifies that existing data in Postgres is correctly copied to Databend before CDC begins.
     - **Live CDC**: Verifies `INSERT`, `UPDATE`, and `DELETE` operations are synced in real-time.
     - **Schema Evolution**: Verifies that `ALTER TABLE` commands in Postgres are automatically propagated to Databend.
-    - **Dynamic Discovery**: Verifies that creating a new table in Postgres triggers a pipeline reload and sync.
+    - **Dynamic Discovery**: Verifies that creating a new table in Postgres triggers a pipeline reload and sync. Includes **Production Chaos** testing: inserting data immediately after DDL without waiting for discovery to finish, verified via JetStream buffering.
     - **DLQ & Retries**: Verifies poison-pill handling and routing to the Dead Letter Queue.
 
 ## Key Files

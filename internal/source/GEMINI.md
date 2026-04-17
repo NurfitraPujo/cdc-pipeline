@@ -14,6 +14,8 @@ Located in `provider.go`, the interface defines the contract for any ingress bac
 - **PostgreSQL CDC (`postgres/`)**:
     - Leverages logical replication via `go-pq-cdc`.
     - Handles snapshots and real-time CDC.
+    - Implements **Chaotic-Safe Dynamic Discovery** via `ALTER PUBLICATION` for zero-downtime table additions.
+    - **Non-blocking Acknowledgment**: Integrates a NATS Subscriber to listen for schema acknowledgments, preventing source-side deadlocks during pipeline restarts.
     - Implements dynamic table discovery.
 
 ## Plugging in New Backends

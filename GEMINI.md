@@ -55,5 +55,7 @@ Detailed technical documentation is organized by directory:
 
 - **Configuration**: Managed dynamically via NATS KV. The `ConfigManager` handles graceful transitions.
 - **Reliability**: Dual-layer panic recovery and `Cancel->Sleep->Close` lifecycles ensure zero-crash stability.
-- **State**: LSN checkpoints are persisted in NATS KV for "at-least-once" guarantees.
-- **Schema**: Auto-evolves based on source DDL changes.
+- **State**: LSN checkpoints and evolution states are persisted in NATS KV for "at-least-once" guarantees.
+- **Robust Schema Evolution**: Distributed state machine powered by **NATS KV CAS (Compare-and-Swap)** fencing tokens to prevent split-brain issues and ensure atomic transitions.
+- **Chaotic-Safe Dynamic Discovery**: Bridges the "Gap of Uncertainty" for new tables using **paginated SELECT snapshots** and **JetStream buffering** to prevent data loss even when inserts immediately follow table creation.
+- **Schema**: Auto-evolves based on source DDL changes with a Schema Circuit Breaker for stability.
