@@ -138,6 +138,7 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 
 		select {
 		case s.msgChan <- mCopy:
+			log.Debug().Any("data", mCopy).Msg("Source data sent to message channel")
 		case <-sourceCtx.Done():
 		}
 	}
@@ -570,6 +571,7 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 			}
 			mu.Lock()
 			*msgs = append(*msgs, m)
+
 			knownTables["public."+tableName] = true
 			mu.Unlock()
 			foundNew = true

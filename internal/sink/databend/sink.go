@@ -110,7 +110,12 @@ func validateIdentifier(name string) error {
 	return nil
 }
 
-func (s *DatabendSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
+func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) error {
+	schema := m.Schema
+	if schema == nil {
+		return fmt.Errorf("schema metadata is nil in message")
+	}
+
 	log.Info().Str("table", schema.Table).Msg("Syncing schema in Databend")
 
 	if err := validateIdentifier(schema.Table); err != nil {

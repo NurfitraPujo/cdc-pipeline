@@ -65,6 +65,7 @@ type HistoryPoint struct {
 const (
 	PrefixTableState       = "cdc.table.state."
 	TableStateSnapshotting = "Snapshotting"
+	TableStateDraining     = "Draining"
 	TableStateCDC          = "CDC"
 	TableStateFailed       = "Failed"
 

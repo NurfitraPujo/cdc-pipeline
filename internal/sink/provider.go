@@ -11,6 +11,6 @@ type Sink interface {
 	// It should handle deduplication and ensures idempotency.
 	BatchUpload(ctx context.Context, messages []protocol.Message) error
 	// ApplySchema updates the sink's schema (DDL).
-	ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error
+	ApplySchema(ctx context.Context, m protocol.Message) error
 	Stop() error
 }

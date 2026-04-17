@@ -42,17 +42,17 @@ func (m *MockSink) EXPECT() *MockSinkMockRecorder {
 }
 
 // ApplySchema mocks base method.
-func (m *MockSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
+func (m *MockSink) ApplySchema(ctx context.Context, msg protocol.Message) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplySchema", ctx, schema)
+	ret := m.ctrl.Call(m, "ApplySchema", ctx, msg)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ApplySchema indicates an expected call of ApplySchema.
-func (mr *MockSinkMockRecorder) ApplySchema(ctx, schema any) *gomock.Call {
+func (mr *MockSinkMockRecorder) ApplySchema(ctx, msg any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySchema", reflect.TypeOf((*MockSink)(nil).ApplySchema), ctx, schema)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySchema", reflect.TypeOf((*MockSink)(nil).ApplySchema), ctx, msg)
 }
 
 // BatchUpload mocks base method.

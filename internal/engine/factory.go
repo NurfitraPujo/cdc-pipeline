@@ -138,7 +138,18 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	}
 	subscribers = append(subscribers, prodSub)
 
-	prod := NewProducer(id, f.NatsURL, cfg, src, f.Publisher, prodSub, f.KV)
+	// Fetch primary source config for the producer
+	srcID := cfg.Sources[0]
+	srcEntry, err := f.KV.Get(protocol.SourceConfigKey(srcID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch source config %s for producer: %w", srcID, err)
+	}
+	var srcConfig protocol.SourceConfig
+	if err := json.Unmarshal(srcEntry.Value(), &srcConfig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal source config %s: %w", srcID, err)
+	}
+
+	prod := NewProducer(id, f.NatsURL, cfg, src, f.Publisher, prodSub, f.KV, srcConfig)
 
 	var consumers []*Consumer
 	for i, snk := range snks {

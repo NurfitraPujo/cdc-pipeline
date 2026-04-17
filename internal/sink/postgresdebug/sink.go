@@ -170,8 +170,8 @@ func (s *DebugSink) BatchUpload(ctx context.Context, messages []protocol.Message
 	return nil
 }
 
-func (s *DebugSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
-	return nil
+func (s *DebugSink) ApplySchema(ctx context.Context, m protocol.Message) error {
+	return s.captureSchemaChange(ctx, m)
 }
 
 func (s *DebugSink) Stop() error {

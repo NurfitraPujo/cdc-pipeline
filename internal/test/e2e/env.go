@@ -249,6 +249,20 @@ func (e *Environment) EventuallyAssertHeartbeat(pipelineID, expectedStatus strin
 	}, timeout, 1*time.Second, "timed out waiting for worker heartbeat to be '%s'", expectedStatus)
 }
 
+func (e *Environment) EventuallyAssertTableState(pipelineID, sourceID, table, expectedState string, timeout time.Duration) {
+	require.Eventually(e.T, func() bool {
+		key := protocol.TableStateKey(pipelineID, sourceID, table)
+		entry, err := e.KV.Get(key)
+		if err != nil {
+			log.Printf("Failed to get table state key %s: %v", key, err)
+			return false
+		}
+		state := string(entry.Value())
+		log.Printf("Found state for %s/%s: %s", pipelineID, table, state)
+		return state == expectedState
+	}, timeout, 1*time.Second, "timed out waiting for table %s state to be '%s'", table, expectedState)
+}
+
 func (e *Environment) EventuallyMatchDatabend(table string, expected map[string]any, timeout time.Duration) {
 	e.EventuallyMatchDatabendRow(table, "", nil, expected, timeout)
 }

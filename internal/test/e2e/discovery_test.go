@@ -40,17 +40,15 @@ func TestE2E_DynamicDiscovery(t *testing.T) {
 	_, err := env.Postgres.Exec("CREATE TABLE table_dynamic (id SERIAL PRIMARY KEY, name TEXT)")
 	require.NoError(t, err)
 
-	time.Sleep(10 * time.Second)
-
-	// 3. Insert data into the new table
-	// The running pipeline should discover the table and sync the data without restarting.
-	log.Printf("Performing inserts into dynamic table...")
+	// 3. Insert data into the new table IMMEDIATELY (Simulate production chaos)
+	log.Printf("Performing inserts into dynamic table immediately after creation...")
 	for i := range 10 {
 		_, err = env.Postgres.Exec("INSERT INTO table_dynamic (name) VALUES ($1)", fmt.Sprintf("dynamic-user-%d", i))
 		require.NoError(t, err)
-		// time.Sleep(100 * time.Millisecond) // Small delay to ensure order
 	}
 
 	// 4. Assert sync for the new table
+	// The pipeline will eventually discover the table, perform a catch-up snapshot,
+	// and drain the JetStream buffer to ensure all 10 rows are synced.
 	env.EventuallyCountDatabend("table_dynamic", 10, 60*time.Second)
 }

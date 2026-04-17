@@ -20,7 +20,7 @@ type ChaosSink struct {
 	FailCount    int
 }
 
-func (s *ChaosSink) ApplySchema(ctx context.Context, schema protocol.SchemaMetadata) error {
+func (s *ChaosSink) ApplySchema(ctx context.Context, m protocol.Message) error {
 	return nil
 }
 func (s *ChaosSink) BatchUpload(ctx context.Context, batch []protocol.Message) error {

@@ -46,7 +46,7 @@ func TestDatabendSink(t *testing.T) {
 			},
 			PKColumns: []string{"id"},
 		}
-		err = sink.ApplySchema(ctx, schema)
+		err = sink.ApplySchema(ctx, protocol.Message{Op: "schema_change", Schema: &schema})
 		assert.NoError(t, err)
 
 		batch := []protocol.Message{

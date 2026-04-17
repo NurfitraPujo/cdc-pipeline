@@ -148,10 +148,10 @@ func TestProducer_FailurePaths(t *testing.T) {
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
 	cfg := protocol.PipelineConfig{ID: "p1", Sources: []string{"s1"}}
+	srcCfg := protocol.SourceConfig{ID: "s1"}
 	ackChanMock := make(chan *message.Message)
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackChanMock, nil).AnyTimes()
-	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV)
-	srcCfg := protocol.SourceConfig{ID: "s1"}
+	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV, srcCfg)
 	cp := protocol.Checkpoint{}
 
 	t.Run("Source Start Failure", func(t *testing.T) {
@@ -202,9 +202,10 @@ func TestProducer_DiscoveryEvolution(t *testing.T) {
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
 	cfg := protocol.PipelineConfig{ID: "p2", Sources: []string{"s1"}, Tables: []string{"t1"}}
+	srcCfg := protocol.SourceConfig{ID: "s1"}
 	ackChanMock := make(chan *message.Message)
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackChanMock, nil).AnyTimes()
-	p := NewProducer("p2", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV)
+	p := NewProducer("p2", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV, srcCfg)
 
 	ctx := context.Background()
 
@@ -239,7 +240,7 @@ func TestProducer_DiscoveryEvolution(t *testing.T) {
 	}
 
 	// Expectations for evolution
-	mockKV.EXPECT().Update(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint64(2), nil)
+	mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(2), nil)
 	mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(nil)
 
 	p.handleDiscovery(ctx, m2)

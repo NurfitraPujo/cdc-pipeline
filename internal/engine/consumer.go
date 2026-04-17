@@ -214,17 +214,16 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 						wmMsgs = []*message.Message{wmMsg}
 					}
 
-					schema := m.Schema
-					if schema == nil && m.Diff != nil {
+					if m.Schema == nil && m.Diff != nil {
 						log.Info().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Interface("added_cols", m.Diff.Added).Msg("Constructing schema from diff")
-						schema = &protocol.SchemaMetadata{
+						m.Schema = &protocol.SchemaMetadata{
 							Table:   m.Table,
 							Columns: m.Diff.Added,
 						}
 					}
 
-					if schema != nil {
-						if err := c.sink.ApplySchema(ctx, *schema); err != nil {
+					if m.Schema != nil {
+						if err := c.sink.ApplySchema(ctx, *m); err != nil {
 							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
 							c.updateTableError(m.SourceID, m.Table)
 							wmMsg.Nack()
