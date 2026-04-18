@@ -14,13 +14,14 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
+	"github.com/Trendyol/go-pq-cdc/pq"
 	"github.com/Trendyol/go-pq-cdc/pq/message/format"
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog/log"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 var metricPortCounter = uint32(20000)
@@ -43,7 +44,7 @@ type PostgresSource struct {
 	// Internal channels for goroutine communication
 	msgChan chan []protocol.Message
 	ackChan chan struct{}
-	// runWg   sync.WaitGroup
+	runWg   sync.WaitGroup
 }
 
 func NewPostgresSource(name string) *PostgresSource {
@@ -57,48 +58,123 @@ func (s *PostgresSource) Name() string {
 	return s.name
 }
 
-func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
-	s.mu.Lock()
-	s.config = srcConfig
-	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan struct{})
-	s.mu.Unlock()
+func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) func(lc *replication.ListenerContext) {
+	return func(lc *replication.ListenerContext) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error().Str("source", s.name).Interface("recover", r).Msg("PostgresSource RECOVERED from handler panic")
+			}
+		}()
 
-	go func() {
-		s.startConnector(ctx, checkpoint)
-	}()
+		mu.Lock()
+		var m protocol.Message
+		var tableName string
 
-	return s.msgChan, s.ackChan, nil
+		switch msg := lc.Message.(type) {
+		case *format.Relation:
+			s.oidMu.Lock()
+			s.oidCache[msg.OID] = msg.Name
+			s.oidMu.Unlock()
+			log.Info().Str("table", msg.Name).Uint32("oid", msg.OID).Msg("PostgresSource: Received relation")
+			mu.Unlock()
+			lc.Ack()
+			return
+
+		case *format.Insert:
+			tableName = msg.TableName
+			if tableName == "" {
+				s.oidMu.RLock()
+				tableName = s.oidCache[msg.OID]
+				s.oidMu.RUnlock()
+			}
+			
+			cleanName := strings.TrimPrefix(tableName, "public.")
+			if tableName == "" || !knownTables[cleanName] {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			sani := sanitizePayload(msg.Decoded)
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "insert", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+
+		case *format.Update:
+			tableName = msg.TableName
+			if tableName == "" {
+				s.oidMu.RLock()
+				tableName = s.oidCache[msg.OID]
+				s.oidMu.RUnlock()
+			}
+
+			cleanName := strings.TrimPrefix(tableName, "public.")
+			if tableName == "" || !knownTables[cleanName] {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			sani := sanitizePayload(msg.NewDecoded)
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "update", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+
+		case *format.Snapshot:
+			if msg.EventType != format.SnapshotEventTypeData {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			tableName = msg.Table
+			cleanName := strings.TrimPrefix(tableName, "public.")
+			if tableName == "" || !knownTables[cleanName] {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			sani := sanitizePayload(msg.Data)
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "snapshot", Data: sani, Timestamp: msg.ServerTime, LSN: uint64(msg.LSN), UUID: uuid.New().String()}
+
+		case *format.Delete:
+			tableName = msg.TableName
+			if tableName == "" {
+				s.oidMu.RLock()
+				tableName = s.oidCache[msg.OID]
+				s.oidMu.RUnlock()
+			}
+
+			cleanName := strings.TrimPrefix(tableName, "public.")
+			if tableName == "" || !knownTables[cleanName] {
+				mu.Unlock()
+				lc.Ack()
+				return
+			}
+			sani := sanitizePayload(msg.OldDecoded)
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "delete", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		}
+
+		if m.SourceID != "" {
+			*msgs = append(*msgs, m)
+			mu.Unlock()
+			
+			triggerFlush()
+
+			select {
+			case <-s.ackChan:
+				lc.Ack()
+			default:
+				lc.Ack()
+			}
+		} else {
+			mu.Unlock()
+			lc.Ack()
+		}
+	}
 }
 
-func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol.Checkpoint) {
-	s.mu.RLock()
-	srcConfig := s.config
-	s.mu.RUnlock()
-
-	log.Info().Int64("lsn", int64(checkpoint.IngressLSN)).Msg("Starting connector with checkpoint")
-
+func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
 	sourceCtx, sourceCancel := context.WithCancel(ctx)
 	s.mu.Lock()
+	s.config = srcConfig
 	s.cancel = sourceCancel
+	s.msgChan = make(chan []protocol.Message, 1)
+	s.ackChan = make(chan struct{}, 1000)
 	s.mu.Unlock()
-
-	var mu sync.Mutex
-	var msgs []protocol.Message
-	knownTables := make(map[string]bool)
-	for _, t := range srcConfig.Tables {
-		knownTables["public."+t] = true
-	}
-
-	batchWait := srcConfig.BatchWait
-	if batchWait == 0 {
-		batchWait = 500 * time.Millisecond
-	}
-
-	discoveryInterval := srcConfig.DiscoveryInterval
-	if discoveryInterval <= 0 {
-		discoveryInterval = 30 * time.Second
-	}
 
 	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelSetup()
@@ -116,13 +192,21 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 	var err error
 	s.db, err = sql.Open("pgx", dsn)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to open DB for source")
-		return
+		sourceCancel()
+		return nil, nil, fmt.Errorf("failed to open DB: %w", err)
 	}
-	defer s.db.Close()
 
 	if err := s.primeOIDCache(setupCtx, s.db); err != nil {
 		log.Warn().Err(err).Msg("Failed to prime OID cache")
+	}
+
+	var mu sync.Mutex
+	var msgs []protocol.Message
+	knownTables := make(map[string]bool)
+	for _, t := range srcConfig.Tables {
+		cleanTable := strings.TrimPrefix(t, "public.")
+		knownTables["public."+cleanTable] = true
+		knownTables[cleanTable] = true
 	}
 
 	triggerFlush := func() {
@@ -142,46 +226,6 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 		case <-sourceCtx.Done():
 		}
 	}
-
-	go func() {
-		ticker := time.NewTicker(batchWait)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-sourceCtx.Done():
-				return
-			case <-ticker.C:
-				triggerFlush()
-			}
-		}
-	}()
-
-	go func() {
-		for _, t := range srcConfig.Tables {
-			cols, pks, err := s.getTableMetadata(sourceCtx, s.db, "public", t)
-			if err == nil {
-				m := protocol.Message{
-					SourceID: srcConfig.ID, Table: t, Op: "schema_change", Timestamp: time.Now(),
-					Schema: &protocol.SchemaMetadata{Table: t, Schema: "public", Columns: cols, PKColumns: pks},
-				}
-				mu.Lock()
-				msgs = append(msgs, m)
-				mu.Unlock()
-				triggerFlush()
-			}
-		}
-
-		ticker := time.NewTicker(discoveryInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-sourceCtx.Done():
-				return
-			case <-ticker.C:
-				s.discoverTables(sourceCtx, s.db, srcConfig, &mu, &msgs, knownTables, triggerFlush)
-			}
-		}
-	}()
 
 	pubTables := make(publication.Tables, len(srcConfig.Tables))
 	for i, t := range srcConfig.Tables {
@@ -205,148 +249,125 @@ func (s *PostgresSource) startConnector(ctx context.Context, checkpoint protocol
 		Metric: config.MetricConfig{Port: int(atomic.AddUint32(&metricPortCounter, 1))},
 	}
 
-	handler := func(lc *replication.ListenerContext) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error().Str("slot", srcConfig.SlotName).Interface("recover", r).Msg("PostgresSource RECOVERED from handler panic")
-			}
-		}()
-
-		mu.Lock()
-		var m protocol.Message
-		switch msg := lc.Message.(type) {
-		case *format.Relation:
-			if strings.HasPrefix(msg.Name, "cdc_snapshot_") {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			if !s.isSchemaAllowed(msg.Namespace, srcConfig.Schemas) {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			knownTables[msg.Namespace+"."+msg.Name] = true
-			cols := make(map[string]string)
-			for _, col := range msg.Columns {
-				cols[col.Name] = s.resolveTypeName(col.DataType)
-			}
-			m = protocol.Message{
-				SourceID: srcConfig.ID, Table: msg.Name, Op: "schema_change", Timestamp: time.Now(),
-				Schema: &protocol.SchemaMetadata{Table: msg.Name, Schema: msg.Namespace, Columns: cols},
-			}
-		case *format.Insert:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.Decoded)
-			payload, err := msgpack.Marshal(sani)
-			if err != nil {
-				log.Error().Err(err).Str("table", msg.TableName).Interface("raw_data", msg.Decoded).Msg("Error marshaling insert")
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "insert", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
-		case *format.Update:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.NewDecoded)
-			payload, err := msgpack.Marshal(sani)
-			if err != nil {
-				log.Error().Err(err).Str("table", msg.TableName).Interface("raw_new_data", msg.NewDecoded).Msg("Error marshaling update")
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "update", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
-		case *format.Delete:
-			if strings.HasPrefix(msg.TableName, "cdc_snapshot_") {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.OldDecoded)
-			payload, err := msgpack.Marshal(sani)
-			if err != nil {
-				log.Error().Err(err).Str("table", msg.TableName).Interface("raw_old_data", msg.OldDecoded).Msg("Error marshaling delete")
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			m = protocol.Message{SourceID: srcConfig.ID, Table: msg.TableName, Op: "delete", Payload: payload, Data: sani, Timestamp: msg.MessageTime}
-		case *format.Snapshot:
-			if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			if msg.EventType == format.SnapshotEventTypeData {
-				sani := sanitizePayload(msg.Data)
-				payload, err := msgpack.Marshal(sani)
-				if err != nil {
-					log.Error().Err(err).Str("table", msg.Table).Interface("raw_data", msg.Data).Msg("Error marshaling snapshot")
-					mu.Unlock()
-					lc.Ack()
-					return
-				}
-				m = protocol.Message{SourceID: srcConfig.ID, Table: msg.Table, Op: "snapshot", LSN: uint64(msg.LSN), Payload: payload, Data: sani, Timestamp: msg.ServerTime}
-			}
-		}
-
-		if m.SourceID != "" {
-			s.lastCheckpoint = protocol.Checkpoint{
-				IngressLSN: m.LSN,
-			}
-			msgs = append(msgs, m)
-			mu.Unlock()
-			if m.Op == "snapshot" && len(msgs) >= 1000 {
-				triggerFlush()
-			}
-
-			select {
-			case <-s.ackChan:
-				lc.Ack()
-			case <-sourceCtx.Done():
-			}
-		} else {
-			mu.Unlock()
-			lc.Ack()
-		}
+	if checkpoint.IngressLSN > 0 {
+		cfg.StartLSN = pq.LSN(checkpoint.IngressLSN)
 	}
+
+	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush)
 
 	var connectorErr error
 	s.mu.Lock()
 	s.connector, connectorErr = cdc.NewConnector(setupCtx, cfg, handler)
 	s.mu.Unlock()
-	if connectorErr != nil {
-		log.Error().Err(connectorErr).Msg("Failed to create CDC connector")
-		s.mu.Lock()
-		if s.cancel != nil {
-			s.cancel()
-		}
-		s.mu.Unlock()
-		return
+	if connectorErr != nil || s.connector == nil {
+		sourceCancel()
+		return nil, nil, fmt.Errorf("failed to create connector: %w", connectorErr)
 	}
 
+	s.runWg.Add(1)
+	go func() {
+		defer s.runWg.Done()
+		s.startConnector(sourceCtx, checkpoint, &mu, &msgs, knownTables, triggerFlush)
+	}()
+
+	return s.msgChan, s.ackChan, nil
+}
+
+func (s *PostgresSource) startConnector(sourceCtx context.Context, checkpoint protocol.Checkpoint, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) {
+	log.Info().Uint64("lsn", checkpoint.IngressLSN).Msg("Starting connector loop")
+
+	s.mu.RLock()
+	batchWait := s.config.BatchWait
+	discoveryInterval := s.config.DiscoveryInterval
+	srcConfig := s.config
+	s.mu.RUnlock()
+
+	if batchWait == 0 {
+		batchWait = 500 * time.Millisecond
+	}
+	if discoveryInterval <= 0 {
+		discoveryInterval = 30 * time.Second
+	}
+
+	// Prime initial schemas synchronously BEFORE starting connector to prevent race with first data messages
+	for _, t := range srcConfig.Tables {
+		cleanTable := strings.TrimPrefix(t, "public.")
+		cols, pks, err := s.getTableMetadata(sourceCtx, s.db, "public", cleanTable)
+		if err == nil {
+			m := protocol.Message{
+				SourceID: srcConfig.ID, Table: cleanTable, Op: "schema_change", Timestamp: time.Now(),
+				Schema: &protocol.SchemaMetadata{Table: cleanTable, Schema: "public", Columns: cols, PKColumns: pks},
+			}
+			mu.Lock()
+			*msgs = append(*msgs, m)
+			mu.Unlock()
+			triggerFlush()
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(batchWait)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sourceCtx.Done():
+				return
+			case <-ticker.C:
+				triggerFlush()
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(discoveryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sourceCtx.Done():
+				return
+			case <-ticker.C:
+				s.discoverTables(sourceCtx, s.db, srcConfig, mu, msgs, knownTables, triggerFlush)
+			}
+		}
+	}()
+
 	s.connector.Start(sourceCtx)
+
+	if checkpoint.IngressLSN > 0 {
+		s.connector.UpdateXLogPos(pq.LSN(checkpoint.IngressLSN))
+	}
+
+	go func() {
+		<-sourceCtx.Done()
+		log.Info().Str("source", s.name).Msg("PostgresSource: Context canceled, closing message channel")
+		triggerFlush()
+		time.Sleep(100 * time.Millisecond)
+		s.mu.Lock()
+		close(s.msgChan)
+		s.mu.Unlock()
+	}()
+}
+
+func (s *PostgresSource) UpdateXLogPos(ctx context.Context, lsn uint64) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.connector != nil {
+		s.connector.UpdateXLogPos(pq.LSN(lsn))
+	}
+	return nil
 }
 
 func (s *PostgresSource) Stop() error {
-	s.closeOnce.Do(func() {
-		log.Info().Str("source", s.name).Msg("PostgresSource: Stopping...")
-		s.mu.Lock()
-		if s.cancel != nil {
-			s.cancel()
-		}
-		s.mu.Unlock()
-		// s.runWg.Wait()
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.mu.Unlock()
 
+	s.runWg.Wait()
+
+	s.closeOnce.Do(func() {
+		log.Info().Str("source", s.name).Msg("PostgresSource: Closing resources")
 		s.mu.Lock()
 		if s.connector != nil {
 			s.connector.Close()
@@ -363,106 +384,125 @@ func (s *PostgresSource) RestartWithNewTables(ctx context.Context, newTables []s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log.Info().Strs("tables", newTables).Msg("Gracefully restarting source with new tables")
+	log.Info().Strs("tables", newTables).Msg("Restarting source with new tables")
 
 	if s.cancel != nil {
-		go func() {
-			s.cancel()
-			s.connector.Close()
-		}()
-	}
-	// s.runWg.Wait()
-
-	db, err := sql.Open("pgx", s.dsn)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to create connection for restart")
-		return err
-	}
-
-	s.db = db
-	log.Info().Strs("tables", newTables).Msg("Altering the publication")
-
-	for _, table := range newTables {
-		if err := s.AlterPublication(ctx, table); err != nil {
-			log.Error().Err(err).Str("table", table).Msg("Failed to add new table to publication during restart")
-		}
+		s.cancel()
+		s.connector.Close()
 	}
 
 	s.config.Tables = append(s.config.Tables, newTables...)
 
-	// s.runWg.Add(1)
-	log.Info().Strs("tables", newTables).Msg("Restarting the connector")
+	pubTables := make(publication.Tables, len(s.config.Tables))
+	for i, t := range s.config.Tables {
+		pubTables[i] = publication.Table{Name: t, ReplicaIdentity: "DEFAULT"}
+	}
 
-	go func() {
-		// defer s.runWg.Done()
+	cfg := config.Config{
+		Host: s.config.Host, Port: s.config.Port, Username: s.config.User, Password: s.config.PassEncrypted, Database: s.config.Database,
+		Slot: slot.Config{Name: s.config.SlotName, CreateIfNotExists: true},
+		Publication: publication.Config{
+			Name: s.config.PublicationName, CreateIfNotExists: true, Tables: pubTables,
+			Operations: publication.Operations{publication.OperationInsert, publication.OperationUpdate, publication.OperationDelete},
+		},
+		Snapshot: config.SnapshotConfig{
+			Enabled: false,
+		},
+		Metric: config.MetricConfig{Port: int(atomic.AddUint32(&metricPortCounter, 1))},
+	}
 
-		if s.lastCheckpoint.IngressLSN != 0 {
-			s.startConnector(ctx, s.lastCheckpoint)
-		} else {
-			s.startConnector(ctx, protocol.Checkpoint{IngressLSN: 0})
+	var mu sync.Mutex
+	var msgs []protocol.Message
+	knownTables := make(map[string]bool)
+	for _, t := range s.config.Tables {
+		cleanTable := strings.TrimPrefix(t, "public.")
+		knownTables["public."+cleanTable] = true
+		knownTables[cleanTable] = true
+	}
+
+	triggerFlush := func() {
+		mu.Lock()
+		if len(msgs) == 0 {
+			mu.Unlock()
+			return
 		}
+		mCopy := make([]protocol.Message, len(msgs))
+		copy(mCopy, msgs)
+		msgs = msgs[:0]
+		mu.Unlock()
+
+		select {
+		case s.msgChan <- mCopy:
+		default:
+		}
+	}
+
+	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush)
+	
+	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelSetup()
+	
+	conn, err := cdc.NewConnector(setupCtx, cfg, handler)
+	if err != nil {
+		return err
+	}
+	s.connector = conn
+	
+	ctxWithCancel, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	
+	go func() {
+		s.startConnector(ctxWithCancel, s.lastCheckpoint, &mu, &msgs, knownTables, triggerFlush)
 	}()
 
-	log.Info().Strs("tables", newTables).Msg("Source restart complete")
 	return nil
 }
 
-// ... (Other helper functions like primeOIDCache, resolveTypeName, etc. go here)
-func (s *PostgresSource) formatDataMessage(msg any, sourceID string) protocol.Message {
-	var tableName, op string
-	var payload []byte
-	var data map[string]any
-	var msgTime time.Time
-	var lsn uint64
+func (s *PostgresSource) AlterPublication(ctx context.Context, tableName string) error {
+	s.mu.RLock()
+	db := s.db
+	pubName := s.config.PublicationName
+	s.mu.RUnlock()
 
-	switch m := msg.(type) {
-	case *format.Insert:
-		tableName, op, data, msgTime = m.TableName, "insert", m.Decoded, m.MessageTime
-	case *format.Update:
-		tableName, op, data, msgTime = m.TableName, "update", m.NewDecoded, m.MessageTime
-	case *format.Delete:
-		tableName, op, data, msgTime = m.TableName, "delete", m.OldDecoded, m.MessageTime
-	case *format.Snapshot:
-		if m.EventType != format.SnapshotEventTypeData {
-			return protocol.Message{}
+	if db == nil {
+		return fmt.Errorf("database connection not initialized")
+	}
+
+	// Retry logic for "publication does not exist" which can happen due to replication lag or race
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", pubName, tableName)
+		_, err := db.ExecContext(execCtx, query)
+		cancel()
+
+		if err == nil {
+			log.Info().Str("table", tableName).Msg("Table added to publication")
+			return nil
 		}
-		tableName, op, data, msgTime, lsn = m.Table, "snapshot", m.Data, m.ServerTime, uint64(m.LSN)
-	default:
-		return protocol.Message{}
-	}
 
-	if strings.HasPrefix(tableName, "cdc_snapshot_") {
-		return protocol.Message{}
-	}
-
-	saniData := sanitizePayload(data)
-	payload, err := msgpack.Marshal(saniData)
-	if err != nil {
-		log.Error().Err(err).Str("table", tableName).Interface("raw_data", data).Msg("Error marshaling data message")
-		return protocol.Message{}
-	}
-
-	return protocol.Message{SourceID: sourceID, Table: tableName, Op: op, Payload: payload, Data: saniData, Timestamp: msgTime, LSN: lsn}
-}
-
-func sanitizePayload(in map[string]any) map[string]any {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		if valuer, ok := v.(driver.Valuer); ok {
-			val, err := valuer.Value()
-			if err == nil {
-				out[k] = val
-			} else {
-				out[k] = nil
+		lastErr = err
+		// 42704: undefined_object (publication does not exist)
+		if strings.Contains(err.Error(), "42704") {
+			log.Warn().Err(err).Str("table", tableName).Int("attempt", i+1).Msg("Publication not found, retrying...")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1 * time.Second):
+				continue
 			}
-		} else {
-			out[k] = v
 		}
+
+		// 42710: duplicate_object (already member)
+		if strings.Contains(err.Error(), "42710") || strings.Contains(err.Error(), "already member") {
+			return nil
+		}
+
+		break
 	}
-	return out
+
+	log.Error().Err(lastErr).Str("table", tableName).Msg("Failed to add table to publication after retries")
+	return fmt.Errorf("failed to add table to publication after retries: %w", lastErr)
 }
 
 func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
@@ -482,15 +522,6 @@ func (s *PostgresSource) primeOIDCache(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
-}
-
-func (s *PostgresSource) resolveTypeName(oid uint32) string {
-	s.oidMu.RLock()
-	defer s.oidMu.RUnlock()
-	if name, ok := s.oidCache[oid]; ok {
-		return name
-	}
-	return fmt.Sprintf("oid_%d", oid)
 }
 
 func (s *PostgresSource) getTableMetadata(ctx context.Context, db *sql.DB, schema, table string) (map[string]string, []string, error) {
@@ -522,18 +553,6 @@ func (s *PostgresSource) getTableMetadata(ctx context.Context, db *sql.DB, schem
 	}
 
 	return cols, pks, nil
-}
-
-func (s *PostgresSource) isSchemaAllowed(schema string, allowed []string) bool {
-	if len(allowed) == 0 {
-		return true
-	}
-	for _, a := range allowed {
-		if a == schema {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConfig protocol.SourceConfig, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) {
@@ -571,7 +590,6 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 			}
 			mu.Lock()
 			*msgs = append(*msgs, m)
-
 			knownTables["public."+tableName] = true
 			mu.Unlock()
 			foundNew = true
@@ -583,16 +601,22 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 	}
 }
 
-func (s *PostgresSource) AlterPublication(ctx context.Context, tableName string) error {
-	if s.db == nil {
-		return fmt.Errorf("database connection not initialized")
+func sanitizePayload(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
 	}
-	query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", s.config.PublicationName, tableName)
-	_, err := s.db.ExecContext(ctx, query)
-	if err != nil {
-		log.Error().Err(err).Str("table", tableName).Msg("Failed to add table to publication")
-		return err
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err == nil {
+				out[k] = val
+			} else {
+				out[k] = nil
+			}
+		} else {
+			out[k] = v
+		}
 	}
-	log.Info().Str("table", tableName).Msg("Table added to publication via AlterPublication")
-	return nil
+	return out
 }

@@ -93,16 +93,19 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, p.id)
 		}
 
-		// 2. Get Checkpoints for all tables
+		// 2. Get Checkpoints for all tables (use EgressLSN for resume safety)
 		minLSN := uint64(0)
 		for _, table := range p.config.Tables {
-			cpKey := protocol.IngressCheckpointKey(p.id, sourceID, table)
-			cpEntry, err := p.producer.kv.Get(cpKey)
-			if err == nil {
-				var cp protocol.Checkpoint
-				if err := json.Unmarshal(cpEntry.Value(), &cp); err == nil {
-					if minLSN == 0 || cp.IngressLSN < minLSN {
-						minLSN = cp.IngressLSN
+			// Pull from egress checkpoints for all configured sinks
+			for _, sinkID := range p.config.Sinks {
+				cpKey := protocol.EgressCheckpointKey(p.id, sourceID, sinkID, table)
+				cpEntry, err := p.producer.kv.Get(cpKey)
+				if err == nil {
+					var cp protocol.Checkpoint
+					if _, err := cp.UnmarshalMsg(cpEntry.Value()); err == nil {
+						if cp.EgressLSN > 0 && (minLSN == 0 || cp.EgressLSN < minLSN) {
+							minLSN = cp.EgressLSN
+						}
 					}
 				}
 			}

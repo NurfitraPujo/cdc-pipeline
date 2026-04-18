@@ -35,6 +35,8 @@ type Connector interface {
 	Close()
 	GetConfig() *config.Config
 	SetMetricCollectors(collectors ...prometheus.Collector)
+	UpdateXLogPos(lsn pq.LSN)
+	AddRelation(rel *format.Relation)
 }
 
 type connector struct {
@@ -210,7 +212,24 @@ func initializeSnapshot(ctx context.Context, cfg config.Config, tables publicati
 	return snapshot.New(ctx, cfg.Snapshot, tables, cfg.DSN(), m)
 }
 
+func (c *connector) AddRelation(rel *format.Relation) {
+	if c.stream != nil {
+		c.stream.AddRelation(rel)
+	}
+}
+
+func (c *connector) UpdateXLogPos(lsn pq.LSN) {
+	if c.stream != nil {
+		c.stream.UpdateXLogPos(lsn)
+	}
+}
+
 func (c *connector) Start(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 	c.once.Do(func() {
 		go c.server.Listen()
 	})
@@ -254,6 +273,11 @@ func (c *connector) Start(ctx context.Context) {
 		return
 	}
 
+	// NEW: Use StartLSN from config if provided
+	if c.cfg.StartLSN > 0 {
+		c.UpdateXLogPos(c.cfg.StartLSN)
+	}
+
 	// Normal CDC flow (unchanged for backward compatibility)
 	c.CaptureSlot(ctx)
 
@@ -289,8 +313,12 @@ func (c *connector) Start(ctx context.Context) {
 
 	c.readyCh <- struct{}{}
 
-	<-c.cancelCh
-	logger.Debug("cancel channel triggered")
+	select {
+	case <-c.cancelCh:
+		logger.Debug("cancel channel triggered")
+	case <-ctx.Done():
+		logger.Debug("context canceled, stopping connector")
+	}
 }
 
 func (c *connector) shouldTakeSnapshot(ctx context.Context) bool {
@@ -607,19 +635,28 @@ func (c *connector) CaptureSlot(ctx context.Context) {
 	logger.Info("slot capturing...")
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		info, err := c.slot.Info(ctx)
-		if err != nil {
-			logger.Warn("slot info failed on capture slot", "error", err)
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("slot capture aborted: context canceled")
+			return
+		case <-ticker.C:
+			info, err := c.slot.Info(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Warn("slot info failed on capture slot", "error", err)
+				continue
+			}
 
-		if info.Active {
-			continue
-		}
+			if info.Active {
+				continue
+			}
 
-		logger.Debug("capture slot", "slotInfo", info)
-		break
+			logger.Debug("capture slot", "slotInfo", info)
+			return
+		}
 	}
 }
 

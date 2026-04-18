@@ -33,14 +33,24 @@ func NewTimescaleDB(ctx context.Context, dsn string) (*TimescaleDB, error) {
 }
 
 func (tdb *TimescaleDB) SyncHyperTables(ctx context.Context) {
-	for range tdb.ticker.C {
-		hyperTables, err := tdb.FindHyperTables(ctx)
-		if err != nil {
-			logger.Error("timescale tables", "error", err)
-			continue
-		}
+	defer tdb.ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("timescale sync aborted: context canceled")
+			return
+		case <-tdb.ticker.C:
+			hyperTables, err := tdb.FindHyperTables(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Error("timescale tables", "error", err)
+				continue
+			}
 
-		logger.Debug("timescale tables", "tables", hyperTables)
+			logger.Debug("timescale tables", "tables", hyperTables)
+		}
 	}
 }
 

@@ -134,21 +134,31 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 		case <-ctx.Done():
 			return lastLSN, ctx.Err()
 		case ackMsg, ok := <-ackMsgChan:
-
 			if !ok {
 				log.Warn().Msg("Schema acks channel closed")
 				continue
 			}
 			var ack protocol.Message
 			if _, err := ack.UnmarshalMsg(ackMsg.Payload); err != nil {
-				log.Error().Err(err).Msg("Failed to unmarshal schema ack")
+				log.Error().Err(err).Msg("Failed to unmarshal ack from consumer")
 				ackMsg.Nack()
 				continue
 			}
+
 			if ack.Op == protocol.OpSchemaChangeAck {
 				p.handleSchemaAck(ctx, ack)
+				ackMsg.Ack()
+			} else if ack.Op == "ack" {
+				// Record ack: Propagate to source handler
+				select {
+				case ackChan <- struct{}{}:
+				case <-ctx.Done():
+					return lastLSN, nil
+				default:
+					// No one waiting, fine
+				}
+				ackMsg.Ack()
 			}
-			ackMsg.Ack()
 
 		case msgs, ok := <-msgChan:
 			log.Debug().Any("data", msgs).Msg("Receiving data from source")
@@ -258,6 +268,9 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				// Success! Update checkpoints
 				latestByTable := make(map[string]protocol.Message)
 				for _, m := range mainBatch {
+					if m.LSN > lastLSN {
+						lastLSN = m.LSN
+					}
 					latestByTable[m.SourceID+"."+m.Table] = m
 				}
 
@@ -283,17 +296,6 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				for _, t := range discoveredTables {
 					p.handleDiscovery(ctx, t)
 				}
-			}
-
-			// Signal acknowledgment back to the source handler
-			// We use a non-blocking send to avoid deadlocks for internal/discovery messages
-			// that don't have a listener on the ack channel.
-			select {
-			case ackChan <- struct{}{}:
-			case <-ctx.Done():
-				return lastLSN, nil
-			default:
-				// No one waiting for ack, that's fine
 			}
 		}
 	}
@@ -379,11 +381,14 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 
 		// 3. Trigger snapshot if missing checkpoint AND not in Snapshotting/CDC/Draining
 		cpKey := protocol.IngressCheckpointKey(p.pipelineID, sid, table)
-		_, err = p.kv.Get(cpKey)
-		if err != nil {
+		_, cpErr := p.kv.Get(cpKey)
+		if cpErr != nil {
+			// If we are starting from LSN 0, go-pq-cdc handles initial snapshot for configured tables.
+			// We only trigger handleDynamicTables for truly dynamic ones or if we are already in a transition state.
 			if state != protocol.TableStateSnapshotting && state != protocol.TableStateCDC && state != protocol.TableStateDraining {
-				log.Info().Str("table", table).Msg("Missing ingress checkpoint, triggering background snapshot")
-				go p.handleDynamicTables(sid, []string{table})
+				// ONLY trigger if not in initial list OR if we specifically want to re-snapshot
+				log.Info().Str("table", table).Msg("Missing ingress checkpoint, table will be snapshotted by source or discovery")
+				// go p.handleDynamicTables(sid, []string{table}) // Avoid triggering restart for initial tables
 			}
 		}
 	}
@@ -417,7 +422,7 @@ func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
 func (p *Producer) flushBuffer(ctx context.Context, table string) {
 	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
 	// Create a temporary subscriber to drain the buffer
-	sub, err := stream_nats.NewNatsSubscriber(p.natsURL, "drainer-"+uuid.New().String(), 100, 30*time.Second)
+	sub, err := stream_nats.NewNatsSubscriber(p.natsURL, "drainer-"+uuid.New().String(), topic, 100, 30*time.Second)
 	if err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to create subscriber to drain buffer")
 		return
@@ -480,20 +485,20 @@ finished:
 	}
 }
 
-func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDiff, bool) {
+func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff, bool) {
 	// HACK: Ignore tables created by the snapshot engine
-	if strings.HasPrefix(msg.Table, "cdc_snapshot_") {
+	if strings.HasPrefix(m.Table, "cdc_snapshot_") {
 		return nil, false
 	}
 
 	p.muEvo.Lock()
 	defer p.muEvo.Unlock()
 
-	state, ok := p.evoStates[msg.Table]
+	state, ok := p.evoStates[m.Table]
 	if !ok {
 		// Initialize with current columns
 		cols := make(map[string]string)
-		for k := range msg.Data {
+		for k := range m.Data {
 			cols[k] = "unknown"
 		}
 		state = &tableEvolution{
@@ -501,7 +506,7 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 			CachedSchema: cols,
 			LastCheckAt:  time.Now(),
 		}
-		p.evoStates[msg.Table] = state
+		p.evoStates[m.Table] = state
 		return nil, false
 	}
 
@@ -510,14 +515,14 @@ func (p *Producer) detectSchemaChange(msg protocol.Message) (*protocol.SchemaDif
 	}
 
 	added := make(map[string]string)
-	for k := range msg.Data {
+	for k := range m.Data {
 		if _, exists := state.CachedSchema[k]; !exists {
 			added[k] = "unknown"
 		}
 	}
 
 	if len(added) > 0 {
-		return p.performSchemaEvolution(msg.Table, msg.SourceID, added)
+		return p.performSchemaEvolution(m.Table, m.SourceID, added)
 	}
 
 	return nil, false

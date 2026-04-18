@@ -35,8 +35,9 @@ func Init(level string, isDevelopment bool) {
 					log.Warn().Err(err).Msg("Failed to open log file, file logging disabled")
 					log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
 				} else {
-					multi := io.MultiWriter(os.Stderr, file)
-					log.Logger = zerolog.New(multi).With().Timestamp().Logger().Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"})
+					consoleWriter := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}
+					multi := io.MultiWriter(consoleWriter, file)
+					log.Logger = zerolog.New(multi).With().Timestamp().Logger()
 				}
 			}
 		} else {

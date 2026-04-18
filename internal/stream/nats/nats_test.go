@@ -32,7 +32,7 @@ func TestNatsStreaming(t *testing.T) {
 	assert.NoError(t, err)
 	defer pub.Close()
 
-	sub, err := NewNatsSubscriber(url, "test-sub", 10, time.Second)
+	sub, err := NewNatsSubscriber(url, "test-sub", "test-topic", 10, time.Second)
 	assert.NoError(t, err)
 	defer sub.Close()
 

@@ -11,7 +11,6 @@ import (
 
 	"github.com/Trendyol/go-pq-cdc/config"
 	"github.com/Trendyol/go-pq-cdc/internal/metric"
-	"github.com/Trendyol/go-pq-cdc/internal/slice"
 	"github.com/Trendyol/go-pq-cdc/logger"
 	"github.com/Trendyol/go-pq-cdc/pq"
 	"github.com/Trendyol/go-pq-cdc/pq/message"
@@ -34,6 +33,7 @@ const (
 type ListenerContext struct {
 	Message any
 	Ack     func() error
+	LSN     pq.LSN
 }
 
 type ListenerFunc func(ctx *ListenerContext)
@@ -50,6 +50,8 @@ type Streamer interface {
 	GetSystemInfo() *pq.IdentifySystemResult
 	GetMetric() metric.Metric
 	OpenFromSnapshotLSN()
+	UpdateXLogPos(lsn pq.LSN)
+	AddRelation(rel *format.Relation)
 }
 
 type stream struct {
@@ -218,6 +220,13 @@ func (s *stream) sink(ctx context.Context) {
 // connection is in a corrupted state and the caller should log an error.
 func (s *stream) sinkLoop(ctx context.Context, buf *messageBuffer) (corrupted bool) {
 	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("sink loop: context canceled")
+			return false
+		default:
+		}
+
 		msgCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(300*time.Millisecond))
 		rawMsg, err := s.conn.ReceiveMessage(msgCtx)
 		cancel()
@@ -311,19 +320,17 @@ func (s *stream) handleXLogData(data []byte, buf *messageBuffer) {
 		return
 	}
 
-	logger.Debug("wal received",
-		"walData", string(xld.WALData),
-		"walDataByte", slice.ConvertToInt(xld.WALData),
-		"walStart", xld.WALStart,
-		"walEnd", xld.ServerWALEnd,
-		"serverTime", xld.ServerTime,
-	)
-
 	s.metric.SetCDCLatency(time.Now().UTC().Sub(xld.ServerTime).Nanoseconds())
 
+	s.mu.Lock()
 	decodedMsg, err := message.New(xld.WALData, xld.ServerTime, s.relation)
+	s.mu.Unlock()
+
 	if err != nil || decodedMsg == nil {
-		logger.Debug("wal data message parsing error", "error", err)
+		if err != nil {
+			logger.Debug("wal data message parsing error", "error", err)
+		}
+		s.UpdateXLogPos(xld.WALStart)
 		return
 	}
 
@@ -371,13 +378,21 @@ func (s *stream) process(ctx context.Context) {
 	logger.Info("postgres message process started")
 
 	for {
-		msg, ok := <-s.messageCH
-		if !ok {
-			break
+		var msg *Message
+		var ok bool
+		select {
+		case <-ctx.Done():
+			logger.Info("message process: context canceled")
+			return
+		case msg, ok = <-s.messageCH:
+			if !ok {
+				return
+			}
 		}
 
 		lCtx := &ListenerContext{
 			Message: msg.message,
+			LSN:     pq.LSN(msg.walStart),
 			Ack: func() error {
 				pos := pq.LSN(msg.walStart)
 				s.UpdateXLogPos(pos)
@@ -428,12 +443,24 @@ func (s *stream) SetSnapshotLSN(lsn pq.LSN) {
 	s.snapshotLSN = lsn
 }
 
-func (s *stream) UpdateXLogPos(l pq.LSN) {
+func (s *stream) UpdateXLogPos(lsn pq.LSN) {
+	s.mu.Lock()
+	s.lastXLogPos = lsn
+	s.mu.Unlock()
+
+	if s.conn != nil && !s.conn.IsClosed() {
+		// Force a status update to advance the slot in Postgres
+		if err := SendStandbyStatusUpdate(context.Background(), s.conn, uint64(lsn)); err != nil {
+			logger.Error("failed to send manual standby status update", "error", err, "lsn", lsn.String())
+		}
+	}
+}
+
+func (s *stream) AddRelation(rel *format.Relation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.lastXLogPos < l {
-		s.lastXLogPos = l
+	if s.relation != nil {
+		s.relation[rel.OID] = rel
 	}
 }
 

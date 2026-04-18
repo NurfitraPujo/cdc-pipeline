@@ -2,13 +2,11 @@ package slot
 
 import (
 	"context"
-	goerrors "errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Trendyol/go-pq-cdc/internal/metric"
 	"github.com/Trendyol/go-pq-cdc/logger"
 	"github.com/Trendyol/go-pq-cdc/pq"
 	"github.com/go-playground/errors"
@@ -17,106 +15,92 @@ import (
 )
 
 var (
-	ErrorSlotIsNotExists = goerrors.New("slot is not exists")
-	ErrorNotConnected    = goerrors.New("slot is not connected")
-	ErrorSlotClosed      = goerrors.New("slot is closed")
+	ErrorSlotIsNotExists = errors.New("replication slot is not exists")
+	ErrorSlotClosed      = errors.New("replication slot is closed")
 )
 
-var typeMap = pgtype.NewMap()
-
 type XLogUpdater interface {
-	UpdateXLogPos(l pq.LSN)
+	UpdateXLogPos(lsn pq.LSN)
 }
 
 type Slot struct {
-	conn            pq.Connection
-	replicationConn pq.Connection
-	metric          metric.Metric
-	logUpdater      XLogUpdater
-	ticker          *time.Ticker
-	statusSQL       string
 	cfg             Config
-	mu              sync.Mutex
+	conn            *pgconn.PgConn
+	replicationConn *pgconn.PgConn
+	statusSQL       string
+	ticker          *time.Ticker
+	metrics         MetricsStore
 	closed          atomic.Bool
+	mu              sync.Mutex
+	repDSN          string
+	dsn             string
 }
 
-func NewSlot(replicationDSN, standardDSN string, cfg Config, m metric.Metric, updater XLogUpdater) *Slot {
-	query := fmt.Sprintf("SELECT slot_name, slot_type, active, active_pid, restart_lsn, confirmed_flush_lsn, wal_status, PG_CURRENT_WAL_LSN() AS current_lsn FROM pg_replication_slots WHERE slot_name = '%s';", cfg.Name)
+type MetricsStore interface {
+	SetSlotActivity(active bool)
+	SetSlotCurrentLSN(lsn float64)
+	SetSlotConfirmedFlushLSN(lsn float64)
+	SetSlotRetainedWALSize(size float64)
+	SetSlotLag(lag float64)
+}
 
+func NewSlot(repDSN string, dsn string, cfg Config, metrics MetricsStore, updater XLogUpdater) *Slot {
 	return &Slot{
-		cfg:             cfg,
-		conn:            pq.NewConnectionTemplate(standardDSN),
-		replicationConn: pq.NewConnectionTemplate(replicationDSN),
-		statusSQL:       query,
-		metric:          m,
-		ticker:          time.NewTicker(time.Millisecond * cfg.SlotActivityCheckerInterval),
-		logUpdater:      updater,
+		cfg:       cfg,
+		repDSN:    repDSN,
+		dsn:       dsn,
+		statusSQL: fmt.Sprintf("SELECT * FROM pg_replication_slots WHERE slot_name = '%s'", cfg.Name),
+		ticker:    time.NewTicker(time.Duration(cfg.SlotActivityCheckerInterval) * time.Millisecond),
+		metrics:   metrics,
 	}
 }
 
 func (s *Slot) Connect(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.conn.Connect(ctx)
-}
 
-func (s *Slot) Create(ctx context.Context) (*Info, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.conn.Connect(ctx); err != nil {
-		return nil, errors.Wrap(err, "slot connect")
+	if s.conn != nil && !s.conn.IsClosed() {
+		return nil
 	}
-	defer func() {
-		_ = s.conn.Close(ctx)
-	}()
 
-	info, err := s.infoLocked(ctx)
+	conn, err := pgconn.Connect(ctx, s.dsn)
 	if err != nil {
-		if !goerrors.Is(err, ErrorSlotIsNotExists) || !s.cfg.CreateIfNotExists {
-			return nil, errors.Wrap(err, "replication slot info")
-		}
-	} else {
-		logger.Warn("replication slot already exists")
-		return info, nil
+		return errors.Wrap(err, "slot connect")
 	}
+	s.conn = conn
 
-	// Slot needs replication connection for CREATE_REPLICATION_SLOT command
-	if err := s.createSlotWithReplicationConn(ctx); err != nil {
-		return nil, err
-	}
-
-	logger.Info("replication slot created", "name", s.cfg.Name)
-
-	return s.infoLocked(ctx)
-}
-
-func (s *Slot) createSlotWithReplicationConn(ctx context.Context) error {
-	if err := s.replicationConn.Connect(ctx); err != nil {
+	repConn, err := pgconn.Connect(ctx, s.repDSN)
+	if err != nil {
+		_ = conn.Close(ctx)
 		return errors.Wrap(err, "slot replication connect")
 	}
-	defer func() {
-		_ = s.replicationConn.Close(ctx)
-	}()
-
-	sql := fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput", s.cfg.Name)
-	resultReader := s.replicationConn.Exec(ctx, sql)
-	_, err := resultReader.ReadAll()
-	if err != nil {
-		return errors.Wrap(err, "replication slot create result")
-	}
-
-	if err = resultReader.Close(); err != nil {
-		return errors.Wrap(err, "replication slot create result reader close")
-	}
+	s.replicationConn = repConn
 
 	return nil
 }
 
-func (s *Slot) Info(ctx context.Context) (*Info, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Slot) Create(ctx context.Context) (*Info, error) {
+	// Ensure connected
+	if err := s.Connect(ctx); err != nil {
+		return nil, err
+	}
 
+	info, err := s.Info(ctx)
+	if err == nil {
+		return info, nil
+	}
+
+	if err.Error() == ErrorSlotIsNotExists.Error() {
+		if err := s.createSlotWithReplicationConn(ctx); err != nil {
+			return nil, err
+		}
+		return s.Info(ctx)
+	}
+
+	return nil, err
+}
+
+func (s *Slot) Info(ctx context.Context) (*Info, error) {
 	if s.closed.Load() {
 		return nil, ErrorSlotClosed
 	}
@@ -125,6 +109,10 @@ func (s *Slot) Info(ctx context.Context) (*Info, error) {
 }
 
 func (s *Slot) infoLocked(ctx context.Context) (*Info, error) {
+	if s.conn == nil || s.conn.IsClosed() {
+		return nil, errors.New("connection closed")
+	}
+
 	resultReader := s.conn.Exec(ctx, s.statusSQL)
 	results, err := resultReader.ReadAll()
 	if err != nil {
@@ -141,48 +129,66 @@ func (s *Slot) infoLocked(ctx context.Context) (*Info, error) {
 	}
 
 	if slotInfo.Type != Logical {
-		return nil, errors.Newf("'%s' replication slot must be logical but it is %s", slotInfo.Name, slotInfo.Type)
+		return nil, errors.New(fmt.Sprintf("'%s' replication slot must be logical but it is %s", slotInfo.Name, slotInfo.Type))
 	}
 
 	return slotInfo, nil
 }
 
 func (s *Slot) Metrics(ctx context.Context) {
-	for range s.ticker.C {
-		if s.closed.Load() {
-			return
-		}
+	if s.ticker == nil {
+		return
+	}
+	defer s.ticker.Stop()
 
-		slotInfo, err := s.Info(ctx)
-		if err != nil {
-			if goerrors.Is(err, ErrorSlotClosed) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.ticker.C:
+			if s.closed.Load() {
 				return
 			}
-			logger.Error("slot metrics", "error", err)
-			continue
+
+			slotInfo, err := s.Info(ctx)
+			if err != nil {
+				if err.Error() == ErrorSlotClosed.Error() {
+					return
+				}
+				// Only log if not cancelled
+				if ctx.Err() == nil {
+					logger.Error("slot metrics", "error", err)
+				}
+				continue
+			}
+
+			s.metrics.SetSlotActivity(slotInfo.Active)
+			s.metrics.SetSlotCurrentLSN(float64(slotInfo.CurrentLSN))
+			s.metrics.SetSlotConfirmedFlushLSN(float64(slotInfo.ConfirmedFlushLSN))
+			s.metrics.SetSlotRetainedWALSize(float64(slotInfo.RetainedWALSize))
+			s.metrics.SetSlotLag(float64(slotInfo.Lag))
 		}
-
-		s.metric.SetSlotActivity(slotInfo.Active)
-		s.metric.SetSlotCurrentLSN(float64(slotInfo.CurrentLSN))
-		s.metric.SetSlotConfirmedFlushLSN(float64(slotInfo.ConfirmedFlushLSN))
-		s.metric.SetSlotRetainedWALSize(float64(slotInfo.RetainedWALSize))
-		s.metric.SetSlotLag(float64(slotInfo.Lag))
-
-		logger.Debug("slot metrics", "info", slotInfo)
 	}
 }
 
 func (s *Slot) Close(ctx context.Context) {
 	s.closed.Store(true)
-	s.ticker.Stop()
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.conn.IsClosed() {
+	if s.conn != nil && !s.conn.IsClosed() {
 		_ = s.conn.Close(ctx)
 	}
+	if s.replicationConn != nil && !s.replicationConn.IsClosed() {
+		_ = s.replicationConn.Close(ctx)
+	}
 }
+
+var typeMap = pgtype.NewMap()
 
 func decodeSlotInfoResult(result *pgconn.Result) (*Info, error) {
 	var slotInfo Info
@@ -227,4 +233,23 @@ func decodeTextColumnData(data []byte, dataType uint32) (interface{}, error) {
 		return dt.Codec.DecodeValue(typeMap, dataType, pgtype.TextFormatCode, data)
 	}
 	return string(data), nil
+}
+
+func (s *Slot) createSlotWithReplicationConn(ctx context.Context) error {
+	if s.replicationConn == nil || s.replicationConn.IsClosed() {
+		return errors.New("replication connection closed")
+	}
+
+	sql := fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput", s.cfg.Name)
+	resultReader := s.replicationConn.Exec(ctx, sql)
+	_, err := resultReader.ReadAll()
+	if err != nil {
+		return errors.Wrap(err, "replication slot create result")
+	}
+
+	if err = resultReader.Close(); err != nil {
+		return errors.Wrap(err, "replication slot create result reader close")
+	}
+
+	return nil
 }

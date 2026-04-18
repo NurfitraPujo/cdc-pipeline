@@ -197,13 +197,25 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 			for i := range batchFromNats {
 				m := &batchFromNats[i]
 				if m.Op == "drain_marker" {
-					if len(batch) > 0 {
-						c.flush(ctx, batch, wmMsgs)
-						batch = nil
-						wmMsgs = nil
+					c.mu.RLock()
+					isDraining := c.isDraining
+					c.mu.RUnlock()
+
+					if isDraining {
+						if len(batch) > 0 {
+							c.flush(ctx, batch, wmMsgs)
+							batch = nil
+							wmMsgs = nil
+						}
+						wmMsg.Ack()
+						log.Info().Str("pipeline_id", c.pipelineID).Msg("Received drain marker, finishing consumer")
+						return nil
+					} else {
+						// Stale drain marker from a previous session, ignore and ack
+						wmMsg.Ack()
+						log.Info().Str("pipeline_id", c.pipelineID).Msg("Received stale drain marker, ignoring")
+						continue
 					}
-					wmMsg.Ack()
-					return nil
 				}
 
 				if m.Op == protocol.OpSchemaChange {
@@ -315,6 +327,7 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 		c.handleSinkError(ctx, batch, wmMsgs, err)
 		return
 	}
+	log.Debug().Int("count", len(toUpload)).Str("pipeline_id", c.pipelineID).Msg("Consumer: Batch upload successful")
 
 	for _, m := range wmMsgs {
 		m.Ack()
@@ -322,6 +335,26 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 		delete(c.retries, m.UUID)
 		c.retryMu.Unlock()
 	}
+
+	// NEW: Publish acks back to the producer topic for ALL uploaded messages
+	// This ensures the source only advances its LSN when the data is in the sink.
+	ackTopic := protocol.AcksTopic(c.pipelineID)
+	for _, m := range toUpload {
+		if m.Op == "drain_marker" || m.Op == protocol.OpSchemaChangeAck {
+			continue
+		}
+		ack := protocol.Message{
+			Op:       "ack",
+			SourceID: m.SourceID,
+			Table:    m.Table,
+			LSN:      m.LSN,
+		}
+		ackData, _ := ack.MarshalMsg(nil)
+		if err := c.publisher.Publish(ackTopic, message.NewMessage(m.UUID, ackData)); err != nil {
+			log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to publish record ack")
+		}
+	}
+
 	c.updateStats(toUpload)
 	if time.Since(c.lastCleanupTime) > retryCleanupInterval {
 		c.cleanupOldRetries()
@@ -347,6 +380,8 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
 		if _, err := c.kv.Put(statsKey, statsData); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
+		} else {
+			log.Debug().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Uint64("total_synced", s.TotalSynced).Msg("Successfully updated table stats in KV")
 		}
 	}
 	c.statsMu.Unlock()

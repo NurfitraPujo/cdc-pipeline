@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
+
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +64,10 @@ func Setup(t *testing.T) *Environment {
 	nc, err := go_nats.Connect(natsURL)
 	require.NoError(t, err)
 	js, _ := nc.JetStream()
-	kv, _ := js.CreateKeyValue(&go_nats.KeyValueConfig{Bucket: protocol.KVBucketName})
+	
+	bucketName := fmt.Sprintf("cdc-test-%s", strings.ToLower(t.Name()))
+	// Limit length if needed, but for E2E it should be fine
+	kv, _ := js.CreateKeyValue(&go_nats.KeyValueConfig{Bucket: bucketName})
 
 	// Set small timeouts for faster E2E transitions, but enough for Postgres to release slots
 	globalCfg := protocol.GlobalConfig{
@@ -84,6 +89,13 @@ func Setup(t *testing.T) *Environment {
 	pgDSN := fmt.Sprintf("postgres://postgres:postgres@%s:%s/cdc_src?sslmode=disable", pgHost, pgPort.Port())
 	pgDB, _ := sql.Open("postgres", pgDSN)
 
+	randomID := ""
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for i := 0; i < 6; i++ {
+		randomID += string(charset[rand.Intn(len(charset))])
+	}
+	slotName := fmt.Sprintf("cdc_slot_%s_%s", strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")), randomID)
+
 	pgConfig := protocol.SourceConfig{
 		ID:                "pg1",
 		Type:              "postgres",
@@ -92,7 +104,7 @@ func Setup(t *testing.T) *Environment {
 		User:              "postgres",
 		PassEncrypted:     "postgres",
 		Database:          "cdc_src",
-		SlotName:          "cdc_slot",
+		SlotName:          slotName,
 		PublicationName:   "cdc_pub",
 		Schemas:           []string{"public"},
 		DiscoveryInterval: 2 * time.Second,
@@ -197,18 +209,18 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 }
 
 func (e *Environment) EventuallyCountDatabend(table string, expected int, timeout time.Duration) {
+	start := time.Now()
 	require.Eventually(e.T, func() bool {
 		var count int
 		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
 		if err != nil {
-			log.Printf("Databend query failed: %v", err)
+			log.Printf("Databend query failed for %s (elapsed %v): %v", table, time.Since(start), err)
 			return false
 		}
 
-		log.Printf("Count: %d, Expected: %d", count, expected)
-
+		log.Printf("Table %s: count=%d, expected=%d (elapsed %v)", table, count, expected, time.Since(start))
 		return count == expected
-	}, timeout, 1*time.Second)
+	}, timeout, 500*time.Millisecond)
 }
 
 func (e *Environment) EventuallyAssertHeartbeat(pipelineID, expectedStatus string, timeout time.Duration) {

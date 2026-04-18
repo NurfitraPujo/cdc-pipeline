@@ -53,7 +53,7 @@ func TestE2E_DLQ(t *testing.T) {
 	dlqTopic := protocol.DLQTopic(pipelineID)
 
 	// 2. Setup Subscriber for DLQ to verify arrival
-	dlqSub, err := nats.NewNatsSubscriber(env.NatsURL, "dlq-verifier", 100, 1*time.Second)
+	dlqSub, err := nats.NewNatsSubscriber(env.NatsURL, "dlq-verifier", dlqTopic, 100, 1*time.Second)
 	require.NoError(t, err)
 	defer dlqSub.Close()
 	dlqChan, err := dlqSub.Subscribe(ctx, dlqTopic)
@@ -72,7 +72,7 @@ func TestE2E_DLQ(t *testing.T) {
 		EnableDLQ:       true,
 	}
 
-	sub, err := nats.NewNatsSubscriber(env.NatsURL, "worker-1", 100, 1*time.Second)
+	sub, err := nats.NewNatsSubscriber(env.NatsURL, "worker-1", topic, 100, 1*time.Second)
 	require.NoError(t, err)
 	defer sub.Close()
 

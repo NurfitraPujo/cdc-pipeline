@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Trendyol/go-pq-cdc/logger"
+	"github.com/Trendyol/go-pq-cdc/pq"
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
 )
@@ -28,6 +29,7 @@ type Config struct {
 	Metric           MetricConfig       `json:"metric" yaml:"metric"`
 	DebugMode        bool               `json:"debugMode" yaml:"debugMode"`
 	ExtensionSupport ExtensionSupport   `json:"extensionSupport" yaml:"extensionSupport"`
+	StartLSN         pq.LSN             `json:"-" yaml:"-"`
 }
 
 type MetricConfig struct {

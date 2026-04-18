@@ -115,7 +115,8 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 			durableName = fmt.Sprintf("%s-%s", f.WorkerGroup, durableName)
 		}
 
-		sub, err := nats.NewNatsSubscriber(f.NatsURL, durableName, maxAckPending, 30*time.Second)
+		streamName := fmt.Sprintf("cdc_pipeline_%s_ingest", id)
+		sub, err := nats.NewNatsSubscriber(f.NatsURL, durableName, streamName, maxAckPending, 30*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create subscriber for sink %s: %w", sinkID, err)
 		}
@@ -132,7 +133,8 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	if f.WorkerGroup != "" {
 		prodDurableName = fmt.Sprintf("%s-%s", f.WorkerGroup, prodDurableName)
 	}
-	prodSub, err := nats.NewNatsSubscriber(f.NatsURL, prodDurableName, 100, 30*time.Second)
+	prodStreamName := protocol.AcksTopic(id)
+	prodSub, err := nats.NewNatsSubscriber(f.NatsURL, prodDurableName, prodStreamName, 100, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subscriber for producer %s: %w", id, err)
 	}

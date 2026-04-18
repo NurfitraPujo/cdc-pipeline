@@ -33,7 +33,7 @@ func TestProviderLifecycle(t *testing.T) {
 	})
 
 	t.Run("NATS Subscriber Lifecycle", func(t *testing.T) {
-		sub, _ := nats.NewNatsSubscriber(env.NatsURL, "q1", 100, 30*time.Second)
+		sub, _ := nats.NewNatsSubscriber(env.NatsURL, "q1", "cdc_pipeline_p1_ingest", 100, 30*time.Second)
 		assert.Nil(t, sub.Close())
 	})
 }
