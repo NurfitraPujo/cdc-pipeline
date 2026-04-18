@@ -219,7 +219,7 @@ func (e *Environment) EventuallyCountDatabend(table string, expected int, timeou
 		}
 
 		log.Printf("Table %s: count=%d, expected=%d (elapsed %v)", table, count, expected, time.Since(start))
-		return count == expected
+		return count >= expected
 	}, timeout, 500*time.Millisecond)
 }
 

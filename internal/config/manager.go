@@ -531,6 +531,25 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 }
 
 
+func (m *ConfigManager) InternalCrashWorker(ctx context.Context, id string) {
+	m.workersMu.RLock()
+	w, ok := m.workers[id]
+	m.workersMu.RUnlock()
+
+	if ok {
+		log.Warn().Str("pipeline_id", id).Msg("CRASHING pipeline (SIMULATED)")
+		// We DO NOT set TransitionState, which will trigger the supervisor to restart it.
+		// We call Shutdown directly without Drain to simulate a sudden failure.
+		// Important: We do NOT delete it from the map here, the supervisor will handle the restart
+		// and replace the map entry.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Str("pipeline_id", id).Msg("Error during simulated crash shutdown")
+		}
+	}
+}
+
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	m.workersMu.Lock()
 	w, ok := m.workers[id]

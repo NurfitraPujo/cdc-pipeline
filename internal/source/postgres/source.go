@@ -331,11 +331,11 @@ func (s *PostgresSource) startConnector(sourceCtx context.Context, checkpoint pr
 		}
 	}()
 
-	s.connector.Start(sourceCtx)
-
 	if checkpoint.IngressLSN > 0 {
 		s.connector.UpdateXLogPos(pq.LSN(checkpoint.IngressLSN))
 	}
+
+	s.connector.Start(sourceCtx)
 
 	go func() {
 		<-sourceCtx.Done()

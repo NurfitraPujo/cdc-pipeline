@@ -289,7 +289,8 @@ func (c *connector) Start(ctx context.Context) {
 	err := c.stream.Open(ctx)
 	if err != nil {
 		if goerrors.Is(err, replication.ErrorSlotInUse) {
-			logger.Info("capture failed")
+			logger.Info("capture failed, slot in use. Retrying in 1s...")
+			time.Sleep(1 * time.Second)
 			c.Start(ctx)
 			return
 		}
