@@ -34,7 +34,7 @@ func StartPostgres(ctx context.Context) (*postgres.PostgresContainer, error) {
 				WithStartupTimeout(30*time.Second)),
 		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{
-				Cmd: []string{"-c", "wal_level=logical"},
+				Cmd: []string{"-c", "wal_level=logical", "-c", "max_wal_senders=100", "-c", "max_replication_slots=100"},
 			},
 			ProviderType: testContainerProvider,
 		}),
