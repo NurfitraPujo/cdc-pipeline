@@ -65,11 +65,10 @@ func Setup(t *testing.T) *Environment {
 	require.NoError(t, err)
 	js, _ := nc.JetStream()
 	
-	bucketName := fmt.Sprintf("cdc-test-%s", strings.ToLower(t.Name()))
-	// Limit length if needed, but for E2E it should be fine
+	bucketName := fmt.Sprintf("cdc-test-%s", strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")))
 	kv, _ := js.CreateKeyValue(&go_nats.KeyValueConfig{Bucket: bucketName})
 
-	// Set small timeouts for faster E2E transitions, but enough for Postgres to release slots
+	// Set small timeouts for faster E2E transitions
 	globalCfg := protocol.GlobalConfig{
 		BatchSize:          1000,
 		BatchWait:          100 * time.Millisecond,
@@ -141,10 +140,6 @@ func Setup(t *testing.T) *Environment {
 		DatabendC: dbC,
 	}
 
-	t.Cleanup(func() {
-		env.Cleanup()
-	})
-
 	return env
 }
 
@@ -181,10 +176,6 @@ func (e *Environment) Close() {
 	e.Cleanup()
 }
 
-func (e *Environment) GetKV() go_nats.KeyValue {
-	return e.KV
-}
-
 func (e *Environment) StartWorker() {
 	pub, _ := nats.NewNatsPublisher(e.NatsURL)
 	pipelineFactory := &engine.PipelineFactory{
@@ -211,7 +202,7 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 func (e *Environment) EventuallyCountDatabend(table string, expected int, timeout time.Duration) {
 	start := time.Now()
 	require.Eventually(e.T, func() bool {
-		var count int
+		var count uint64
 		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
 		if err != nil {
 			log.Printf("Databend query failed for %s (elapsed %v): %v", table, time.Since(start), err)
@@ -219,7 +210,7 @@ func (e *Environment) EventuallyCountDatabend(table string, expected int, timeou
 		}
 
 		log.Printf("Table %s: count=%d, expected=%d (elapsed %v)", table, count, expected, time.Since(start))
-		return count >= expected
+		return count >= uint64(expected)
 	}, timeout, 500*time.Millisecond)
 }
 
@@ -357,4 +348,39 @@ func (e *Environment) checkMatch(table string, filterCol string, filterVal any, 
 		}
 	}
 	return true
+}
+
+func (e *Environment) GetDatabendRowCount(table string) (uint64, error) {
+	var count uint64
+	err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
+	return count, err
+}
+
+func (e *Environment) SetPipelineConfig(id string, cfg protocol.PipelineConfig) error {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = e.KV.Put(protocol.PipelineConfigKey(id), data)
+	return err
+}
+
+func (e *Environment) GetDefaultPipelineConfig(id string) protocol.PipelineConfig {
+	return protocol.PipelineConfig{
+		ID:        id,
+		Name:      "E2E Pipeline " + id,
+		Sources:   []string{e.PgConfig.ID},
+		Sinks:     []string{e.DbConfig.ID},
+		Tables:    []string{},
+		BatchSize: 10,
+		BatchWait: 10 * time.Millisecond,
+	}
+}
+
+func (e *Environment) Teardown(ctx context.Context) {
+	e.Cleanup()
+}
+
+func (e *Environment) GetKV() go_nats.KeyValue {
+	return e.KV
 }
