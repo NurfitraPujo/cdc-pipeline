@@ -1,6 +1,9 @@
 package protocol
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 //go:generate msgp
 
@@ -57,4 +60,9 @@ func UnmarshalMessageBatch(b []byte, batch *[]Message) ([]byte, error) {
 	}
 	*batch = []Message(m)
 	return rest, nil
+}
+
+// IsInternalTable returns true if the table is used internally by the CDC engine.
+func IsInternalTable(tableName string) bool {
+	return strings.HasPrefix(tableName, "cdc_snapshot_")
 }
