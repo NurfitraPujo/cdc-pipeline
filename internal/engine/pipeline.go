@@ -17,19 +17,17 @@ type Pipeline struct {
 	config            protocol.PipelineConfig
 	ctx               context.Context
 	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	finished          chan struct{}
-	dynamicTablesChan chan []string
+	wg       sync.WaitGroup
+	finished chan struct{}
 }
 
 func NewPipeline(id string, prod *Producer, consumers []*Consumer, cfg protocol.PipelineConfig) *Pipeline {
 	return &Pipeline{
-		id:                id,
-		producer:          prod,
-		consumers:         consumers,
-		config:            cfg,
-		finished:          make(chan struct{}),
-		dynamicTablesChan: make(chan []string),
+		id:        id,
+		producer:  prod,
+		consumers: consumers,
+		config:    cfg,
+		finished:  make(chan struct{}),
 	}
 }
 
@@ -118,9 +116,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			cons.LoadStats(sourceID, p.config.Tables)
 		}
 
-		// 4. Setup dynamic table handling
-		p.producer.SetDynamicTablesChan(p.dynamicTablesChan)
-
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
 		if err != nil && err != context.Canceled {
 			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed. Shutting down pipeline (fail-fast).")
@@ -168,14 +163,6 @@ func (p *Pipeline) Shutdown(ctx context.Context) error {
 }
 
 func (p *Pipeline) SignalDynamicTables(tables []string) {
-	select {
-	case p.dynamicTablesChan <- tables:
-		log.Info().Str("pipeline_id", p.id).Int("num_tables", len(tables)).Msg("Dynamic tables signal received")
-	case <-p.ctx.Done():
-		log.Warn().Str("pipeline_id", p.id).Msg("Pipeline context cancelled, cannot signal dynamic tables")
-	}
-}
-
-func (p *Pipeline) DynamicTablesChan() <-chan []string {
-	return p.dynamicTablesChan
+	log.Info().Str("pipeline_id", p.id).Int("num_tables", len(tables)).Msg("Dynamic tables signal received")
+	p.producer.HandleDynamicTables(tables)
 }
