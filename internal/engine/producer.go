@@ -700,15 +700,11 @@ func (p *Producer) SetSourceConfig(cfg protocol.SourceConfig) {
 	p.sourceConfig = cfg
 }
 
-func (p *Producer) SetDynamicTablesChan(ch <-chan []string) {
-	go func() {
-		for tables := range ch {
-			p.mu.RLock()
-			sid := p.sourceConfig.ID
-			p.mu.RUnlock()
-			p.handleDynamicTables(sid, tables)
-		}
-	}()
+func (p *Producer) HandleDynamicTables(newTables []string) {
+	p.mu.RLock()
+	sid := p.sourceConfig.ID
+	p.mu.RUnlock()
+	p.handleDynamicTables(sid, newTables)
 }
 
 func (p *Producer) handleDynamicTables(sourceID string, newTables []string) {
