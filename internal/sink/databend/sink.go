@@ -306,15 +306,29 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 		}
 		colList := strings.Join(quotedColumns, ", ")
 
-		query := fmt.Sprintf("REPLACE INTO %s (%s) ON (%s) VALUES ", quotedTable, colList, pkList)
+		var queryBuilder strings.Builder
+		queryBuilder.Grow(len(quotedTable) + len(colList) + len(pkList) + len(records)*(len(columns)*3+2) + 100)
+		queryBuilder.WriteString("REPLACE INTO ")
+		queryBuilder.WriteString(quotedTable)
+		queryBuilder.WriteString(" (")
+		queryBuilder.WriteString(colList)
+		queryBuilder.WriteString(") ON (")
+		queryBuilder.WriteString(pkList)
+		queryBuilder.WriteString(") VALUES ")
 
-		valueStrings := make([]string, 0, len(records))
 		valueArgs := make([]any, 0, len(records)*len(columns))
 
-		for _, data := range records {
-			placeholders := make([]string, len(columns))
+		for i, data := range records {
+			if i > 0 {
+				queryBuilder.WriteString(", ")
+			}
+			queryBuilder.WriteByte('(')
 			for j, col := range columns {
-				placeholders[j] = "?"
+				if j > 0 {
+					queryBuilder.WriteString(", ")
+				}
+				queryBuilder.WriteByte('?')
+
 				val := data[col]
 				if val != nil {
 					switch v := val.(type) {
@@ -326,10 +340,9 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 				}
 				valueArgs = append(valueArgs, val)
 			}
-			valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
+			queryBuilder.WriteByte(')')
 		}
-
-		query += strings.Join(valueStrings, ", ")
+		query := queryBuilder.String()
 
 		log.Debug().Str("table", table).Str("query", query).Int("num_records", len(records)).Any("array", valueArgs).Msg("DatabendSink: Executing Upsert")
 
