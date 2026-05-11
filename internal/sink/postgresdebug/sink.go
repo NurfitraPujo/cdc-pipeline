@@ -281,10 +281,25 @@ func extractPayload(m protocol.Message) (map[string]interface{}, error) {
 		return m.Data, nil
 	}
 	if m.Payload != nil {
+		if len(m.Payload) == 0 {
+			return nil, fmt.Errorf("payload is empty")
+		}
 		var data map[string]interface{}
-		if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
-			if err2 := json.Unmarshal(m.Payload, &data); err2 != nil {
-				return nil, fmt.Errorf("failed to unmarshal payload: %w", err2)
+		if m.Payload[0] == '{' {
+			// Likely JSON
+			if err := json.Unmarshal(m.Payload, &data); err != nil {
+				// Fallback to msgpack if JSON fails
+				if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal payload (json/msgpack): %w", err)
+				}
+			}
+		} else {
+			// Likely msgpack
+			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+				// Fallback to JSON if msgpack fails
+				if err := json.Unmarshal(m.Payload, &data); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal payload (msgpack/json): %w", err)
+				}
 			}
 		}
 		return data, nil
