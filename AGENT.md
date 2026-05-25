@@ -5,6 +5,7 @@ A high-performance, modular CDC (Change Data Capture) data pipeline from Postgre
 ## AGENT instructions!
 - all plans must be saved into [`./plans`](./plans) directory
 - all summaries of diagnostics, debugs, reviews or anything else must be saved into [`./summaries`](./summaries) directory under subfolder based on the type
+- when working (reviewing, debugging, analyzing, testing or implement) and you found an architectural issue, potential bugs, or potential improvement that need to be addressed by repo maintainer but it is not urgent and can be deferred save them in [`./docs/todos`](./docs/todos) with format of Title > Context > The Problem > Action Items (see one of existing)
 
 ## Project Overview
 
