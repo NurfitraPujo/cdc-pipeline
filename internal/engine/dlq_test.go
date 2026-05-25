@@ -38,7 +38,7 @@ func TestConsumer_DLQ(t *testing.T) {
 		msg := protocol.Message{
 			SourceID: "s1",
 			Table:    "t1",
-			Op:       "insert",
+			Op:       protocol.OpInsert,
 			Payload:  []byte(`{"id":1}`),
 		}
 		batch := protocol.MessageBatch{msg}

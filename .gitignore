@@ -2,6 +2,7 @@ bin/
 out/
 
 plans/
+summaries/
 .superpowers/
 
 web/node_modules/

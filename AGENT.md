@@ -2,6 +2,10 @@
 
 A high-performance, modular CDC (Change Data Capture) data pipeline from PostgreSQL to Databend using NATS JetStream. Built for production-grade reliability, zero-allocation efficiency, and autonomous self-healing.
 
+## AGENT instructions!
+- all plans must be saved into [`./plans`](./plans) directory
+- all summaries of diagnostics, debugs, reviews or anything else must be saved into [`./summaries`](./summaries) directory under subfolder based on the type
+
 ## Project Overview
 
 The project consists of a distributed system designed for reliable data replication:
