@@ -1,3 +1,3 @@
-# Internal API: Control Plane
+# Automated Testing Suite
 
 Refer to [AGENT.md](./AGENT.md)

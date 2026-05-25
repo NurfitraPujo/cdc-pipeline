@@ -51,6 +51,13 @@ Detailed technical documentation is organized by directory:
     - **[`sink/`](internal/sink/AGENT.md)**: Data egress (Databend analytical store).
     - **[`stream/`](internal/stream/AGENT.md)**: Messaging infrastructure (Watermill & NATS).
     - **[`test/e2e/`](internal/test/e2e/AGENT.md)**: End-to-end integration testing suite.
+- **[`web/`](web/AGENT.md)**: Web frontend dashboard architecture, tools, and scripts.
+    - **[`api/`](web/src/api/AGENT.md)**: Typesafe API integration client wrappers.
+    - **[`components/`](web/src/components/AGENT.md)**: Reusable UI layout and primitive design components.
+    - **[`hooks/`](web/src/hooks/AGENT.md)**: Custom React hooks (e.g., `useSSE` for real-time metrics).
+    - **[`routes/`](web/src/routes/AGENT.md)**: Navigation paths and dynamic page layouts.
+    - **[`stores/`](web/src/stores/AGENT.md)**: Zustand global client state management.
+    - **[`test/`](web/src/test/AGENT.md)**: Vitest automated unit and integration testing.
 
 ## Development Conventions (High-Level)
 

@@ -1,3 +1,3 @@
-# Internal API: Control Plane
+# Global State Stores
 
 Refer to [AGENT.md](./AGENT.md)

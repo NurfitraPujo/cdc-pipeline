@@ -1,3 +1,3 @@
-# Internal API: Control Plane
+# Custom React Hooks
 
 Refer to [AGENT.md](./AGENT.md)
