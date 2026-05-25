@@ -13,3 +13,5 @@ vendor/
 !internal/vendor/go-pq-cdc/
 
 logs
+.antigravitycli/
+.kilo/
