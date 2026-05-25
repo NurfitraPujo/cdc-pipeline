@@ -19,6 +19,14 @@ type TransformerFactory func(options map[string]interface{}) (Transformer, error
 var transformerRegistry = make(map[string]TransformerFactory)
 
 // RegisterTransformer adds a new transformer factory to the global registry.
+//
+// Directory Mapping Pattern: when a subfolder transformer calls RegisterTransformer,
+// it must include its directory in the type name. For example, a transformer in
+// the "ddl" subfolder registering itself should call:
+//   RegisterTransformer("ddl/add_column", factoryFunc)
+//
+// This allows users to specify "type: \"ddl/add_column\"" in pipeline configuration
+// to reference transformers by their full path from the transformer root directory.
 func RegisterTransformer(transformerType string, factory TransformerFactory) {
 	transformerRegistry[transformerType] = factory
 }

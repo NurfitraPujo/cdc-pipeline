@@ -61,10 +61,10 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 	deletes := make(map[string][]protocol.Message)
 
 	for _, m := range messages {
-		if m.Op == "schema_change" || m.Op == "drain_marker" {
+		if m.Op == protocol.OpSchemaChange || m.Op == "drain_marker" {
 			continue
 		}
-		if m.Op == "delete" {
+		if m.Op == protocol.OpDelete {
 			deletes[m.Table] = append(deletes[m.Table], m)
 		} else {
 			upserts[m.Table] = append(upserts[m.Table], m)

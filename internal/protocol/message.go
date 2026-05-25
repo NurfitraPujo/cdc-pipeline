@@ -4,6 +4,17 @@ import "time"
 
 //go:generate msgp
 
+type OperationType string
+
+const (
+	OpInsert          OperationType = "insert"
+	OpUpdate          OperationType = "update"
+	OpDelete          OperationType = "delete"
+	OpSnapshot        OperationType = "snapshot"
+	OpSchemaChange    OperationType = "schema_change"
+	OpSchemaChangeAck OperationType = "schema_change_ack"
+)
+
 type SchemaMetadata struct {
 	Table     string            `msg:"tbl" json:"table"`
 	Schema    string            `msg:"sch" json:"schema"`
@@ -30,7 +41,7 @@ type SchemaDiff struct {
 type Message struct {
 	SourceID      string                 `msg:"sid"`
 	Table         string                 `msg:"tbl"`
-	Op            string                 `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
+	Op            OperationType         `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
 	LSN           uint64                 `msg:"lsn"`
 	PK            string                 `msg:"pk"`
 	UUID          string                 `msg:"uuid"`
@@ -41,11 +52,6 @@ type Message struct {
 	CorrelationID string                 `msg:"c_id,omitempty" json:"correlation_id,omitempty"`
 	Diff          *SchemaDiff            `msg:"diff,omitempty" json:"diff,omitempty"`
 }
-
-const (
-	OpSchemaChange    = "schema_change"
-	OpSchemaChangeAck = "schema_change_ack"
-)
 
 type MessageBatch []Message
 

@@ -46,14 +46,14 @@ func TestDatabendSink(t *testing.T) {
 			},
 			PKColumns: []string{"id"},
 		}
-		err = sink.ApplySchema(ctx, protocol.Message{Op: "schema_change", Schema: &schema})
+		err = sink.ApplySchema(ctx, protocol.Message{Op: protocol.OpSchemaChange, Schema: &schema})
 		assert.NoError(t, err)
 
 		batch := []protocol.Message{
 			{
 				SourceID: "s1",
 				Table:    "test_sink",
-				Op:       "insert",
+				Op:       protocol.OpInsert,
 				Payload:  []byte(`{"id":1, "name":"a"}`),
 			},
 		}

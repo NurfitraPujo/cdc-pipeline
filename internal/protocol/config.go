@@ -177,9 +177,10 @@ func (r RetryConfig) Validate() error {
 }
 
 type ProcessorConfig struct {
-	Name    string                 `msg:"name" yaml:"name" json:"name"`
-	Type    string                 `msg:"type" yaml:"type" json:"type"` // e.g., "mask", "filter", "custom"
-	Options map[string]interface{} `msg:"options" yaml:"options" json:"options"`
+	Name           string                 `msg:"name" yaml:"name" json:"name"`
+	Type           string                 `msg:"type" yaml:"type" json:"type"` // e.g., "mask", "filter", "custom"
+	Options        map[string]interface{} `msg:"options" yaml:"options" json:"options"`
+	OperationTypes []OperationType        `msg:"operation_types" yaml:"operation_types" json:"operation_types"`
 }
 
 func (p ProcessorConfig) Validate() error {

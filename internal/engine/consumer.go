@@ -19,13 +19,18 @@ import (
 
 const retryCleanupInterval = 5 * time.Minute
 
+type ConfiguredTransformer struct {
+	Transformer    transformer.Transformer
+	OperationTypes []protocol.OperationType
+}
+
 type Consumer struct {
 	pipelineID       string
 	sinkID           string
 	subscriber       stream.Subscriber
 	publisher        stream.Publisher // for DLQ
 	sink             sink.Sink
-	transformers     []transformer.Transformer
+	transformers     []ConfiguredTransformer
 	transformerNames []string // NEW: pre-computed names for audit trail
 	kv               nats.KeyValue
 	batchSize        int
@@ -52,10 +57,10 @@ type retryEntry struct {
 	lastRetry time.Time
 }
 
-func NewConsumer(pipelineID, sinkID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []transformer.Transformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig, preHook sink.PreTransformHook, postHook sink.PostTransformHook) *Consumer {
+func NewConsumer(pipelineID, sinkID string, sub stream.Subscriber, pub stream.Publisher, snk sink.Sink, transformers []ConfiguredTransformer, kv nats.KeyValue, batchSize int, batchWait time.Duration, retry protocol.RetryConfig, preHook sink.PreTransformHook, postHook sink.PostTransformHook) *Consumer {
 	names := make([]string, len(transformers))
 	for i, t := range transformers {
-		names[i] = t.Name()
+		names[i] = t.Transformer.Name()
 	}
 
 	return &Consumer{
@@ -116,9 +121,22 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 		var err error
 
 		for _, t := range c.transformers {
-			current, keep, err = t.Transform(ctx, current)
+			if len(t.OperationTypes) == 0 {
+				continue
+			}
+			skip := true
+			for _, opType := range t.OperationTypes {
+				if m.Op == opType {
+					skip = false
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+			current, keep, err = t.Transformer.Transform(ctx, current)
 			if err != nil {
-				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("transformer", t.Name()).Msg("Transformation error")
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("transformer", t.Transformer.Name()).Msg("Transformation error")
 			}
 			if !keep {
 				break

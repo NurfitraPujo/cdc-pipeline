@@ -856,6 +856,25 @@ func (z *ProcessorConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				}
 				z.Options[za0001] = za0002
 			}
+		case "operation_types":
+			var zb0003 uint32
+			zb0003, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "OperationTypes")
+				return
+			}
+			if cap(z.OperationTypes) >= int(zb0003) {
+				z.OperationTypes = (z.OperationTypes)[:zb0003]
+			} else {
+				z.OperationTypes = make([]OperationType, zb0003)
+			}
+			for za0003 := range z.OperationTypes {
+				err = z.OperationTypes[za0003].DecodeMsg(dc)
+				if err != nil {
+					err = msgp.WrapError(err, "OperationTypes", za0003)
+					return
+				}
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -869,9 +888,9 @@ func (z *ProcessorConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *ProcessorConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 3
+	// map header, size 4
 	// write "name"
-	err = en.Append(0x83, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
+	err = en.Append(0x84, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
 	if err != nil {
 		return
 	}
@@ -912,15 +931,32 @@ func (z *ProcessorConfig) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
+	// write "operation_types"
+	err = en.Append(0xaf, 0x6f, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x74, 0x79, 0x70, 0x65, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.OperationTypes)))
+	if err != nil {
+		err = msgp.WrapError(err, "OperationTypes")
+		return
+	}
+	for za0003 := range z.OperationTypes {
+		err = z.OperationTypes[za0003].EncodeMsg(en)
+		if err != nil {
+			err = msgp.WrapError(err, "OperationTypes", za0003)
+			return
+		}
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *ProcessorConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 3
+	// map header, size 4
 	// string "name"
-	o = append(o, 0x83, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
+	o = append(o, 0x84, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
 	o = msgp.AppendString(o, z.Name)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -933,6 +969,16 @@ func (z *ProcessorConfig) MarshalMsg(b []byte) (o []byte, err error) {
 		o, err = msgp.AppendIntf(o, za0002)
 		if err != nil {
 			err = msgp.WrapError(err, "Options", za0001)
+			return
+		}
+	}
+	// string "operation_types"
+	o = append(o, 0xaf, 0x6f, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x74, 0x79, 0x70, 0x65, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.OperationTypes)))
+	for za0003 := range z.OperationTypes {
+		o, err = z.OperationTypes[za0003].MarshalMsg(o)
+		if err != nil {
+			err = msgp.WrapError(err, "OperationTypes", za0003)
 			return
 		}
 	}
@@ -997,6 +1043,25 @@ func (z *ProcessorConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				}
 				z.Options[za0001] = za0002
 			}
+		case "operation_types":
+			var zb0003 uint32
+			zb0003, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "OperationTypes")
+				return
+			}
+			if cap(z.OperationTypes) >= int(zb0003) {
+				z.OperationTypes = (z.OperationTypes)[:zb0003]
+			} else {
+				z.OperationTypes = make([]OperationType, zb0003)
+			}
+			for za0003 := range z.OperationTypes {
+				bts, err = z.OperationTypes[za0003].UnmarshalMsg(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "OperationTypes", za0003)
+					return
+				}
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -1017,6 +1082,10 @@ func (z *ProcessorConfig) Msgsize() (s int) {
 			_ = za0002
 			s += msgp.StringPrefixSize + len(za0001) + msgp.GuessSize(za0002)
 		}
+	}
+	s += 16 + msgp.ArrayHeaderSize
+	for za0003 := range z.OperationTypes {
+		s += z.OperationTypes[za0003].Msgsize()
 	}
 	return
 }

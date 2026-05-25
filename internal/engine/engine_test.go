@@ -83,7 +83,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 		mockSub.EXPECT().Subscribe(gomock.Any(), "topic1").Return(msgChan, nil)
 
 		// Create a batch
-		m := protocol.Message{SourceID: "s1", Table: "t1", Op: "insert"}
+		m := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpInsert}
 		batch := []protocol.Message{m}
 		data, _ := protocol.MessageBatch(batch).MarshalMsg(nil)
 
@@ -117,7 +117,7 @@ func TestConsumer_FailurePaths(t *testing.T) {
 		msgChan := make(chan *message.Message, 1)
 		mockSub.EXPECT().Subscribe(gomock.Any(), "topic2").Return(msgChan, nil)
 
-		m := protocol.Message{SourceID: "s1", Table: "t1", Op: "schema_change", Schema: &protocol.SchemaMetadata{Table: "t1"}}
+		m := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpSchemaChange, Schema: &protocol.SchemaMetadata{Table: "t1"}}
 		batch := []protocol.Message{m}
 		data, _ := protocol.MessageBatch(batch).MarshalMsg(nil)
 
@@ -170,7 +170,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 		ackChan := make(chan struct{}, 1)
 		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil)
 
-		srcMsgChan <- []protocol.Message{{SourceID: "s1", Table: "t1", Op: "insert"}}
+		srcMsgChan <- []protocol.Message{{SourceID: "s1", Table: "t1", Op: protocol.OpInsert}}
 
 		// Publish fails
 		mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(errors.New("nats down")).AnyTimes()
@@ -264,3 +264,96 @@ func (m mockEntry) Created() time.Time         { return time.Now() }
 func (m mockEntry) Delta() uint64              { return 0 }
 func (m mockEntry) Operation() nats.KeyValueOp { return 0 }
 func (m mockEntry) Bucket() string             { return "" }
+
+type mockTransformer struct {
+	name         string
+	callCount    int
+	ops          []protocol.OperationType
+	transformErr error
+}
+
+func (m *mockTransformer) Name() string { return m.name }
+func (m *mockTransformer) Transform(ctx context.Context, msg *protocol.Message) (*protocol.Message, bool, error) {
+	m.callCount++
+	return msg, true, m.transformErr
+}
+
+func TestConsumer_TransformerFiltering(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	retryCfg := protocol.RetryConfig{
+		MaxRetries:      2,
+		InitialInterval: 1 * time.Millisecond,
+		MaxInterval:     2 * time.Millisecond,
+		EnableDLQ:       false,
+	}
+
+	insertTf := &mockTransformer{name: "insert-only", ops: []protocol.OperationType{protocol.OpInsert}}
+	allOpsTf := &mockTransformer{name: "all-ops", ops: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete}}
+	emptyTf := &mockTransformer{name: "empty-ops", ops: nil}
+
+	transformers := []ConfiguredTransformer{
+		{Transformer: insertTf, OperationTypes: []protocol.OperationType{protocol.OpInsert}},
+		{Transformer: allOpsTf, OperationTypes: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete}},
+		{Transformer: emptyTf, OperationTypes: nil},
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 10, 50*time.Millisecond, retryCfg, nil, nil)
+
+	msgs := []protocol.Message{
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"id":1}`)},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpUpdate, Payload: []byte(`{"id":1}`)},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpDelete, Payload: []byte(`{"id":1}`)},
+	}
+
+	processed := c.processMessages(context.Background(), msgs)
+
+	assert.Equal(t, 3, len(processed), "all messages should pass through (not filtered)")
+
+	assert.Equal(t, 1, insertTf.callCount, "insert-only transformer should be called once (for insert msg)")
+	assert.Equal(t, 3, allOpsTf.callCount, "all-ops transformer should be called 3 times (for all ops)")
+	assert.Equal(t, 0, emptyTf.callCount, "empty-ops transformer should never be called (passthrough)")
+}
+
+func TestConsumer_TransformerFiltering_NotMatched(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	retryCfg := protocol.RetryConfig{
+		MaxRetries:      2,
+		InitialInterval: 1 * time.Millisecond,
+		MaxInterval:     2 * time.Millisecond,
+		EnableDLQ:       false,
+	}
+
+	schemaChangeTf := &mockTransformer{name: "ddl-only", ops: []protocol.OperationType{protocol.OpSchemaChange}}
+	insertTf := &mockTransformer{name: "insert-only", ops: []protocol.OperationType{protocol.OpInsert}}
+
+	transformers := []ConfiguredTransformer{
+		{Transformer: schemaChangeTf, OperationTypes: []protocol.OperationType{protocol.OpSchemaChange}},
+		{Transformer: insertTf, OperationTypes: []protocol.OperationType{protocol.OpInsert}},
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 10, 50*time.Millisecond, retryCfg, nil, nil)
+
+	dmlMsg := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"id":1}`)}
+	ddlMsg := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpSchemaChange, Payload: []byte(`{}`)}
+
+	processed := c.processMessages(context.Background(), []protocol.Message{dmlMsg, ddlMsg})
+
+	assert.Equal(t, 2, len(processed), "both messages should pass through")
+
+	assert.Equal(t, 1, insertTf.callCount, "insert transformer called only for insert msg")
+	assert.Equal(t, 1, schemaChangeTf.callCount, "ddl transformer called only for schema_change msg")
+}

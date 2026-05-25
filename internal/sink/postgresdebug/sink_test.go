@@ -78,7 +78,7 @@ func TestDebugSink_Integration(t *testing.T) {
 		msg := protocol.Message{
 			SourceID: "source1",
 			Table:    "orders",
-			Op:       "schema_change",
+			Op:       protocol.OpSchemaChange,
 			Schema: &protocol.SchemaMetadata{
 				Table:  "orders",
 				Schema: "public",
@@ -108,7 +108,7 @@ func TestDebugSink_Integration(t *testing.T) {
 			{
 				SourceID:  "source1",
 				Table:     "orders",
-				Op:        "insert",
+				Op:        protocol.OpInsert,
 				LSN:       100,
 				PK:        "1",
 				UUID:      "msg-uuid-1",
@@ -133,7 +133,7 @@ func TestDebugSink_Integration(t *testing.T) {
 			{
 				SourceID:  "source1",
 				Table:     "orders",
-				Op:        "insert",
+				Op:        protocol.OpInsert,
 				LSN:       101,
 				PK:        "2",
 				UUID:      "msg-uuid-2",
@@ -146,7 +146,7 @@ func TestDebugSink_Integration(t *testing.T) {
 			{
 				SourceID:  "source1",
 				Table:     "orders",
-				Op:        "insert",
+				Op:        protocol.OpInsert,
 				LSN:       101,
 				PK:        "2",
 				UUID:      "msg-uuid-2",
@@ -191,13 +191,13 @@ func TestDebugSink_Integration(t *testing.T) {
 
 		// Insert message - should be captured
 		insertMsg := []protocol.Message{
-			{SourceID: "s1", Table: "t1", Op: "insert", Data: map[string]interface{}{"id": 1}},
+			{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Data: map[string]interface{}{"id": 1}},
 		}
 		sink2.CaptureBefore(ctx, "p1", []string{}, insertMsg)
 
 		// Delete message - should NOT be captured
 		deleteMsg := []protocol.Message{
-			{SourceID: "s1", Table: "t1", Op: "delete", Data: map[string]interface{}{"id": 2}},
+			{SourceID: "s1", Table: "t1", Op: protocol.OpDelete, Data: map[string]interface{}{"id": 2}},
 		}
 		sink2.CaptureBefore(ctx, "p1", []string{}, deleteMsg)
 
@@ -240,13 +240,13 @@ func TestDebugSink_Integration(t *testing.T) {
 
 		// Orders should be captured
 		ordersMsg := []protocol.Message{
-			{SourceID: "s1", Table: "orders", Op: "insert", Data: map[string]interface{}{"id": 1}},
+			{SourceID: "s1", Table: "orders", Op: protocol.OpInsert, Data: map[string]interface{}{"id": 1}},
 		}
 		sink3.CaptureBefore(ctx, "p1", []string{}, ordersMsg)
 
 		// Users should NOT be captured
 		usersMsg := []protocol.Message{
-			{SourceID: "s1", Table: "users", Op: "insert", Data: map[string]interface{}{"id": 1}},
+			{SourceID: "s1", Table: "users", Op: protocol.OpInsert, Data: map[string]interface{}{"id": 1}},
 		}
 		sink3.CaptureBefore(ctx, "p1", []string{}, usersMsg)
 

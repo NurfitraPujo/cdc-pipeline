@@ -46,8 +46,9 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 		Tables:  []string{"multi_test"},
 		Processors: []protocol.ProcessorConfig{
 			{
-				Name: "mask_name",
-				Type: "mask",
+				Name:           "mask_name",
+				Type:           "mask",
+				OperationTypes: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete},
 				Options: map[string]interface{}{
 					"fields": []interface{}{"name"},
 				},

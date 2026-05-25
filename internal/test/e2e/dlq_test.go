@@ -85,9 +85,9 @@ func TestE2E_DLQ(t *testing.T) {
 
 	// 5. Publish 3 messages: [Good, Bad, Good]
 	msgs := []protocol.Message{
-		{SourceID: "s1", Table: "t1", Op: "insert", Payload: []byte(`{"val":"good1"}`), UUID: "u1"},
-		{SourceID: "s1", Table: "t1", Op: "insert", Payload: []byte(`{"val":"poison"}`), UUID: "u2"},
-		{SourceID: "s1", Table: "t1", Op: "insert", Payload: []byte(`{"val":"good2"}`), UUID: "u3"},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"val":"good1"}`), UUID: "u1"},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"val":"poison"}`), UUID: "u2"},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"val":"good2"}`), UUID: "u3"},
 	}
 
 	// We must publish them as a single batch to simulate the bulk failure

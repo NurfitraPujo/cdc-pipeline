@@ -187,7 +187,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			tableToBuffer := make(map[string]protocol.MessageBatch)
 
 			for _, m := range msgs {
-				if m.Op == "schema_change" && m.Schema != nil {
+				if m.Op == protocol.OpSchemaChange && m.Schema != nil {
 					discoveredTables = append(discoveredTables, m)
 				}
 				if m.LSN > lastLSN {
@@ -212,7 +212,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					continue
 				}
 
-				if m.Op == "insert" || m.Op == "update" || m.Op == "snapshot" {
+				if m.Op == protocol.OpInsert || m.Op == protocol.OpUpdate || m.Op == protocol.OpSnapshot {
 					if diff, changed := p.detectSchemaChange(m); changed {
 						log.Info().Str("table", m.Table).Msg("Schema change detected, freezing table and emitting OpSchemaChange")
 						// Emit OpSchemaChange
@@ -894,7 +894,7 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 			batch = append(batch, protocol.Message{
 				SourceID:  sourceID,
 				Table:     tableName,
-				Op:        "snapshot",
+				Op:        protocol.OpSnapshot,
 				Timestamp: time.Now(),
 				Data:      data,
 				PK:        string(pkJSON),

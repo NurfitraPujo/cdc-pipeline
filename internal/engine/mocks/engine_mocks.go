@@ -112,3 +112,17 @@ func (mr *MockSourceMockRecorder) Stop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockSource)(nil).Stop))
 }
+
+// UpdateXLogPos mocks base method.
+func (m *MockSource) UpdateXLogPos(ctx context.Context, lsn uint64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateXLogPos", ctx, lsn)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateXLogPos indicates an expected call of UpdateXLogPos.
+func (mr *MockSourceMockRecorder) UpdateXLogPos(ctx, lsn any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateXLogPos", reflect.TypeOf((*MockSource)(nil).UpdateXLogPos), ctx, lsn)
+}

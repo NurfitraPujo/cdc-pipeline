@@ -95,7 +95,7 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 				return
 			}
 			sani := sanitizePayload(msg.Decoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "insert", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 
 		case *format.Update:
 			tableName = msg.TableName
@@ -112,7 +112,7 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 				return
 			}
 			sani := sanitizePayload(msg.NewDecoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "update", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 
 		case *format.Snapshot:
 			if msg.EventType != format.SnapshotEventTypeData {
@@ -128,7 +128,7 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 				return
 			}
 			sani := sanitizePayload(msg.Data)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "snapshot", Data: sani, Timestamp: msg.ServerTime, LSN: uint64(msg.LSN), UUID: uuid.New().String()}
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: uint64(msg.LSN), UUID: uuid.New().String()}
 
 		case *format.Delete:
 			tableName = msg.TableName
@@ -145,7 +145,7 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 				return
 			}
 			sani := sanitizePayload(msg.OldDecoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: "delete", Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		}
 
 		if m.SourceID != "" {
@@ -295,7 +295,7 @@ func (s *PostgresSource) startConnector(sourceCtx context.Context, checkpoint pr
 		cols, pks, err := s.getTableMetadata(sourceCtx, s.db, "public", cleanTable)
 		if err == nil {
 			m := protocol.Message{
-				SourceID: srcConfig.ID, Table: cleanTable, Op: "schema_change", Timestamp: time.Now(),
+				SourceID: srcConfig.ID, Table: cleanTable, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
 				Schema: &protocol.SchemaMetadata{Table: cleanTable, Schema: "public", Columns: cols, PKColumns: pks},
 			}
 			mu.Lock()
@@ -585,7 +585,7 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 			}
 
 			m := protocol.Message{
-				SourceID: srcConfig.ID, Table: tableName, Op: "schema_change", Timestamp: time.Now(),
+				SourceID: srcConfig.ID, Table: tableName, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
 				Schema: &protocol.SchemaMetadata{Table: tableName, Schema: "public", Columns: cols, PKColumns: pks},
 			}
 			mu.Lock()

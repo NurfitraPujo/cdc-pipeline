@@ -16,10 +16,10 @@ func TestShouldCaptureMessage_IncludeTables(t *testing.T) {
 	}
 	s := &DebugSink{config: cfg}
 
-	msg := protocol.Message{Table: "orders", Op: "insert"}
+	msg := protocol.Message{Table: "orders", Op: protocol.OpInsert}
 	assert.True(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "products", Op: "insert"}
+	msg = protocol.Message{Table: "products", Op: protocol.OpInsert}
 	assert.False(t, s.shouldCaptureMessage(msg))
 }
 
@@ -31,13 +31,13 @@ func TestShouldCaptureMessage_ExcludeTables(t *testing.T) {
 	}
 	s := &DebugSink{config: cfg}
 
-	msg := protocol.Message{Table: "orders", Op: "insert"}
+	msg := protocol.Message{Table: "orders", Op: protocol.OpInsert}
 	assert.True(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "logs", Op: "insert"}
+	msg = protocol.Message{Table: "logs", Op: protocol.OpInsert}
 	assert.False(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "temp_table", Op: "insert"}
+	msg = protocol.Message{Table: "temp_table", Op: protocol.OpInsert}
 	assert.False(t, s.shouldCaptureMessage(msg))
 }
 
@@ -49,13 +49,13 @@ func TestShouldCaptureMessage_IncludeOperations(t *testing.T) {
 	}
 	s := &DebugSink{config: cfg}
 
-	msg := protocol.Message{Table: "orders", Op: "insert"}
+	msg := protocol.Message{Table: "orders", Op: protocol.OpInsert}
 	assert.True(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "orders", Op: "update"}
+	msg = protocol.Message{Table: "orders", Op: protocol.OpUpdate}
 	assert.True(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "orders", Op: "delete"}
+	msg = protocol.Message{Table: "orders", Op: protocol.OpDelete}
 	assert.False(t, s.shouldCaptureMessage(msg))
 }
 
@@ -68,13 +68,13 @@ func TestShouldCaptureMessage_CombinedFilters(t *testing.T) {
 	}
 	s := &DebugSink{config: cfg}
 
-	msg := protocol.Message{Table: "orders", Op: "insert"}
+	msg := protocol.Message{Table: "orders", Op: protocol.OpInsert}
 	assert.True(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "orders", Op: "delete"}
+	msg = protocol.Message{Table: "orders", Op: protocol.OpDelete}
 	assert.False(t, s.shouldCaptureMessage(msg))
 
-	msg = protocol.Message{Table: "users", Op: "insert"}
+	msg = protocol.Message{Table: "users", Op: protocol.OpInsert}
 	assert.False(t, s.shouldCaptureMessage(msg))
 }
 

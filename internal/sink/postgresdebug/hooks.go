@@ -28,7 +28,7 @@ func (s *DebugSink) CaptureBefore(ctx context.Context, pipelineID string, transf
 
 	for i, m := range messages {
 		// Never capture internal control messages
-		if m.Op == "drain_marker" || m.Op == "schema_change" {
+		if m.Op == "drain_marker" || m.Op == protocol.OpSchemaChange {
 			continue
 		}
 
@@ -61,7 +61,7 @@ func (s *DebugSink) CaptureBefore(ctx context.Context, pipelineID string, transf
 			SinkID:           s.name,
 			TableName:        m.Table,
 			SchemaName:       s.getSchemaName(m),
-			OperationType:    m.Op,
+			OperationType:    string(m.Op),
 			LSN:              m.LSN,
 			PrimaryKey:       m.PK,
 			MessageUUID:      m.UUID,
@@ -154,8 +154,8 @@ func (s *DebugSink) CaptureAfter(ctx context.Context, pipelineID string, correla
 			SourceID:            m.SourceID,
 			SinkID:              s.name,
 			TableName:           m.Table,
-			SchemaName:          s.getSchemaName(m),
-			OperationType:       m.Op,
+SchemaName:          s.getSchemaName(m),
+			OperationType:       string(m.Op),
 			LSN:                 m.LSN,
 			PrimaryKey:          m.PK,
 			MessageUUID:         m.UUID,
@@ -312,7 +312,7 @@ func (s *DebugSink) shouldCaptureMessage(m protocol.Message) bool {
 	if len(includeOps) > 0 {
 		found := false
 		for _, op := range includeOps {
-			if op == m.Op {
+			if op == string(m.Op) {
 				found = true
 				break
 			}

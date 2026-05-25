@@ -161,7 +161,7 @@ func (s *DebugSink) ensureTable() error {
 
 func (s *DebugSink) BatchUpload(ctx context.Context, messages []protocol.Message) error {
 	for _, m := range messages {
-		if m.Op == "schema_change" {
+		if m.Op == protocol.OpSchemaChange {
 			if err := s.captureSchemaChange(ctx, m); err != nil {
 				log.Error().Err(err).Msg("Debug sink: failed to capture schema_change")
 			}

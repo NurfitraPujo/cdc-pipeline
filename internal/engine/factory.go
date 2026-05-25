@@ -160,7 +160,7 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 		preHook := preHooks[i]
 		postHook := postHooks[i]
 
-		var consumerTransformers []transformer.Transformer
+		var consumerTransformers []ConfiguredTransformer
 		for _, pCfg := range cfg.Processors {
 			tf, ok := transformer.GetTransformer(pCfg.Type)
 			if !ok {
@@ -172,7 +172,10 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 				log.Error().Err(err).Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Failed to create transformer")
 				continue
 			}
-			consumerTransformers = append(consumerTransformers, t)
+			consumerTransformers = append(consumerTransformers, ConfiguredTransformer{
+				Transformer:    t,
+				OperationTypes: pCfg.OperationTypes,
+			})
 		}
 
 		cons := NewConsumer(id, sinkID, sub, f.Publisher, snk, consumerTransformers, f.KV, cfg.BatchSize, cfg.BatchWait, retry, preHook, postHook)

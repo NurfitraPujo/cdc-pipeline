@@ -47,8 +47,9 @@ func TestE2E_ConfigHotReload(t *testing.T) {
 	t.Log("Dynamically adding mask processor to config...")
 	pCfg.Processors = []protocol.ProcessorConfig{
 		{
-			Name: "mask-secret",
-			Type: "mask",
+			Name:           "mask-secret",
+			Type:           "mask",
+			OperationTypes: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete},
 			Options: map[string]interface{}{
 				"fields": []interface{}{"secret"},
 				"salt":   "test-salt",
