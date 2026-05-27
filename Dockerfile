@@ -8,14 +8,22 @@ RUN apk add --no-cache git gcc musl-dev
 
 # Copy go mod and sum
 COPY go.mod go.sum ./
-COPY vendor ./vendor
+
+# Copy internal/vendor directory due to replace directive in go.mod
+COPY internal/vendor ./internal/vendor
+
+# Download dependencies
+RUN go mod download
 
 # Copy source code
 COPY . .
 
+# Copy config.example.yaml into pipeline cmd directory for embedding
+RUN cp config.example.yaml cmd/pipeline/config.example.yaml
+
 # Build both binaries
-RUN go build -mod=vendor -ldflags="-w -s" -o /app/bin/api ./cmd/api/main.go
-RUN go build -mod=vendor -ldflags="-w -s" -o /app/bin/worker ./cmd/pipeline/main.go
+RUN go build -ldflags="-w -s" -o /app/bin/api ./cmd/api/main.go
+RUN go build -ldflags="-w -s" -o /app/bin/worker ./cmd/pipeline/main.go
 
 # Stage 2: Runtime
 FROM alpine:latest

@@ -173,6 +173,81 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 		return err
 	}
 
+	// Dynamically override config values using environment variables at runtime
+	for i := range seed.Sources {
+		if seed.Sources[i].Type == "postgres" {
+			if h := os.Getenv("POSTGRES_SOURCE_HOST"); h != "" {
+				seed.Sources[i].Host = h
+			}
+			if p := os.Getenv("POSTGRES_SOURCE_PORT"); p != "" {
+				var port int
+				if _, err := fmt.Sscanf(p, "%d", &port); err == nil {
+					seed.Sources[i].Port = port
+				}
+			}
+			if u := os.Getenv("POSTGRES_SOURCE_USER"); u != "" {
+				seed.Sources[i].User = u
+			} else if u := os.Getenv("POSTGRES_USER"); u != "" {
+				seed.Sources[i].User = u
+			}
+			if pw := os.Getenv("POSTGRES_SOURCE_PASSWORD"); pw != "" {
+				seed.Sources[i].PassEncrypted = pw
+			} else if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
+				seed.Sources[i].PassEncrypted = pw
+			}
+			if db := os.Getenv("POSTGRES_SOURCE_DB"); db != "" {
+				seed.Sources[i].Database = db
+			} else if db := os.Getenv("POSTGRES_DB"); db != "" {
+				seed.Sources[i].Database = db
+			}
+		}
+	}
+
+	for i := range seed.Sinks {
+		if seed.Sinks[i].Type == "databend" {
+			if dsn := os.Getenv("DATABEND_DSN"); dsn != "" {
+				seed.Sinks[i].DSN = dsn
+			} else {
+				dbHost := os.Getenv("DATABEND_HOST")
+				if dbHost != "" {
+					dbPort := os.Getenv("DATABEND_PORT")
+					if dbPort == "" {
+						dbPort = "8000"
+					}
+					seed.Sinks[i].DSN = fmt.Sprintf("http://root:@%s:%s", dbHost, dbPort)
+				}
+			}
+		} else if seed.Sinks[i].Type == "postgres_debug" {
+			if dsn := os.Getenv("POSTGRES_DEBUG_DSN"); dsn != "" {
+				seed.Sinks[i].DSN = dsn
+			} else {
+				dbHost := os.Getenv("POSTGRES_DEBUG_HOST")
+				if dbHost != "" {
+					dbPort := os.Getenv("POSTGRES_DEBUG_PORT")
+					if dbPort == "" {
+						dbPort = "5432"
+					}
+					dbUser := os.Getenv("POSTGRES_DEBUG_USER")
+					if dbUser == "" {
+						dbUser = "postgres"
+					}
+					dbPass := os.Getenv("POSTGRES_DEBUG_PASSWORD")
+					if dbPass == "" {
+						dbPass = os.Getenv("POSTGRES_PASSWORD")
+					}
+					if dbPass == "" {
+						dbPass = "postgres"
+					}
+					dbName := os.Getenv("POSTGRES_DEBUG_DB")
+					if dbName == "" {
+						dbName = "debug_db"
+					}
+					seed.Sinks[i].DSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
+				}
+			}
+		}
+	}
+
 	// Hash the default password before storage
 	hashed, err := bcrypt.GenerateFromPassword([]byte(seed.Auth.Password), bcrypt.DefaultCost)
 	if err == nil {

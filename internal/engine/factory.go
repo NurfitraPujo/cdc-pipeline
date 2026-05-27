@@ -8,6 +8,8 @@ import (
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
+	_ "github.com/NurfitraPujo/cdc-pipeline/internal/sink/databend"
+	_ "github.com/NurfitraPujo/cdc-pipeline/internal/sink/postgresdebug"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source/postgres"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"

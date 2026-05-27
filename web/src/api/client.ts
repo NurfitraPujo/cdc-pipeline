@@ -20,11 +20,16 @@ class ApiClient {
 	}
 
 	private getToken(): string | null {
+		if (typeof window === "undefined") {
+			return null;
+		}
 		return localStorage.getItem(TOKEN_KEY);
 	}
 
 	private clearAuth(): void {
-		localStorage.removeItem(TOKEN_KEY);
+		if (typeof window !== "undefined") {
+			localStorage.removeItem(TOKEN_KEY);
+		}
 	}
 
 	private buildUrl(path: string): string {
@@ -64,7 +69,9 @@ class ApiClient {
 
 			if (response.status === 401) {
 				this.clearAuth();
-				window.location.href = "/login";
+				if (typeof window !== "undefined") {
+					window.location.href = "/login";
+				}
 				throw new Error("Unauthorized");
 			}
 

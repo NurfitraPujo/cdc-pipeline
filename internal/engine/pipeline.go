@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
@@ -90,7 +91,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		// Ensure unique slot for every worker instance to avoid contention on reload
 		// Use pipeline ID suffix for stable slot naming across restarts (preserves LSN continuity)
 		if srcCfg.Type == "postgres" && srcCfg.SlotName != "" {
-			srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, p.id)
+			srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, strings.ReplaceAll(p.id, "-", "_"))
 		}
 
 		// 2. Get Checkpoints for all tables (use EgressLSN for resume safety)

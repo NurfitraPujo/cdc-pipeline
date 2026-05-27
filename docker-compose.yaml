@@ -1,0 +1,163 @@
+
+
+services:
+  # 1. NATS JetStream Messaging Backbone & KV Config Store
+  nats:
+    image: nats:2.10-alpine
+    container_name: cdc-nats
+    command: ["-js"]
+    ports:
+      - "4222:4222" # Client port
+      - "8222:8222" # HTTP monitoring console
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cdc-network
+
+  # 2. PostgreSQL Source Database (Logical Replication Enabled)
+  postgres-source:
+    image: postgres:16-alpine
+    container_name: cdc-postgres-source
+    command: ["-c", "wal_level=logical", "-c", "max_wal_senders=100", "-c", "max_replication_slots=100"]
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-production_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432" # Standard Postgres host port
+    volumes:
+      - postgres_source_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d production_db || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cdc-network
+
+  # 3. PostgreSQL Debug Sink Database
+  postgres-debug:
+    image: postgres:16-alpine
+    container_name: cdc-postgres-debug
+    environment:
+      - POSTGRES_DB=${POSTGRES_DEBUG_DB:-debug_db}
+      - POSTGRES_USER=${POSTGRES_DEBUG_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5433:5432" # Map to host port 5433 to avoid collision
+    volumes:
+      - postgres_debug_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d debug_db || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cdc-network
+
+  # 4. Databend Analytical Database Sink
+  databend:
+    image: datafuselabs/databend:latest
+    container_name: cdc-databend
+    ports:
+      - "8000:8000" # HTTP query interface
+      - "3307:3307" # MySQL query interface
+    volumes:
+      - databend_data:/var/lib/databend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://127.0.0.1:8080/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - cdc-network
+
+  # 5. Go API Control Plane
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-api
+    restart: unless-stopped
+    entrypoint: ["/app/api"]
+    ports:
+      - "8080:8080" # REST API port
+    environment:
+      - NATS_URL=nats://nats:4222
+      - PORT=8080
+      - ENV=development
+      - LOG_LEVEL=debug
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-long!}
+      - JWT_SECRET=${JWT_SECRET:-my-super-secret-jwt-key!}
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - cdc-network
+
+  # 6. Go Pipeline Worker (Orchestrator)
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-pipeline
+    restart: unless-stopped
+    entrypoint: ["/app/worker"]
+    ports:
+      - "8081:8081" # Metrics & Healthcheck port
+    environment:
+      - NATS_URL=nats://nats:4222
+      - HEALTH_PORT=8081
+      - ENV=development
+      - LOG_LEVEL=debug
+      - WORKER_GROUP=local
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-long!}
+      # Runtime overrides for bootstrapping
+      - POSTGRES_SOURCE_HOST=postgres-source
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-production_db}
+      - DATABEND_HOST=databend
+      - POSTGRES_DEBUG_HOST=postgres-debug
+      - POSTGRES_DEBUG_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres-source:
+        condition: service_healthy
+      databend:
+        condition: service_healthy
+      postgres-debug:
+        condition: service_healthy
+    networks:
+      - cdc-network
+
+  # 7. Web Dashboard
+  web-dashboard:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: cdc-web-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000" # React Dashboard port
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8080/api/v1}
+      - VITE_INTERNAL_API_BASE_URL=${VITE_INTERNAL_API_BASE_URL:-http://api:8080/api/v1}
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - cdc-network
+
+networks:
+  cdc-network:
+    driver: bridge
+
+volumes:
+  postgres_source_data:
+  postgres_debug_data:
+  databend_data:
