@@ -14,6 +14,7 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
+	_ "github.com/NurfitraPujo/cdc-pipeline/internal/transformer/nats"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 )

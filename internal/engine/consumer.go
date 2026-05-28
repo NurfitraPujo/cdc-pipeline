@@ -99,7 +99,7 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 	}
 }
 
-func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message) []protocol.Message {
+func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message) ([]protocol.Message, error) {
 	var correlationIDs []string
 	if c.preTransformHook != nil {
 		correlationIDs = c.preTransformHook(ctx, c.pipelineID, c.transformerNames, msgs)
@@ -109,21 +109,19 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 		if c.postTransformHook != nil {
 			c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, msgs, nil)
 		}
-		return msgs
+		return msgs, nil
 	}
 
-	processed := make([]protocol.Message, 0, len(msgs))
+	processed := msgs
 	filteredIndices := make([]int, 0)
 
-	for i, m := range msgs {
-		current := &m
-		keep := true
-		var err error
+	for _, t := range c.transformers {
+		if len(t.OperationTypes) == 0 {
+			continue
+		}
 
-		for _, t := range c.transformers {
-			if len(t.OperationTypes) == 0 {
-				continue
-			}
+		matchingIndices := make([]int, 0, len(processed))
+		for i, m := range processed {
 			skip := true
 			for _, opType := range t.OperationTypes {
 				if m.Op == opType {
@@ -131,23 +129,69 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 					break
 				}
 			}
-			if skip {
-				continue
-			}
-			current, keep, err = t.Transformer.Transform(ctx, current)
-			if err != nil {
-				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("transformer", t.Transformer.Name()).Msg("Transformation error")
-			}
-			if !keep {
-				break
+			if !skip {
+				matchingIndices = append(matchingIndices, i)
 			}
 		}
 
-		if !keep || current == nil {
-			filteredIndices = append(filteredIndices, i)
+		if len(matchingIndices) == 0 {
+			continue
 		}
-		if keep && current != nil {
-			processed = append(processed, *current)
+
+		matchingMsgs := make([]protocol.Message, len(matchingIndices))
+		matchingUUIDs := make(map[string]bool, len(matchingMsgs))
+		for j, idx := range matchingIndices {
+			matchingMsgs[j] = processed[idx]
+			matchingUUIDs[matchingMsgs[j].UUID] = true
+		}
+
+		if bt, ok := t.Transformer.(transformer.BatchTransformer); ok {
+			transformed, err := bt.TransformBatch(ctx, matchingMsgs)
+			if err != nil {
+				return nil, fmt.Errorf("batch transformer %s failed: %w", t.Transformer.Name(), err)
+			}
+			transformedByUUID := make(map[string]protocol.Message, len(transformed))
+			for _, tm := range transformed {
+				transformedByUUID[tm.UUID] = tm
+			}
+			newProcessed := make([]protocol.Message, 0, len(processed))
+			for i, m := range processed {
+				if matchingUUIDs[m.UUID] {
+					if tm, ok := transformedByUUID[m.UUID]; ok {
+						newProcessed = append(newProcessed, tm)
+					} else {
+						filteredIndices = append(filteredIndices, i)
+					}
+				} else {
+					newProcessed = append(newProcessed, m)
+				}
+			}
+			processed = newProcessed
+		} else {
+			droppedInThisStep := make(map[int]bool)
+			for j, idx := range matchingIndices {
+				current := &matchingMsgs[j]
+				keep := true
+				var err error
+				current, keep, err = t.Transformer.Transform(ctx, current)
+				if err != nil {
+					return nil, fmt.Errorf("transformer %s failed: %w", t.Transformer.Name(), err)
+				}
+				if !keep || current == nil {
+					filteredIndices = append(filteredIndices, idx)
+					droppedInThisStep[idx] = true
+				} else {
+					matchingMsgs[j] = *current
+					processed[idx] = *current
+				}
+			}
+			newProcessed := make([]protocol.Message, 0, len(processed)-len(droppedInThisStep))
+			for i, m := range processed {
+				if !droppedInThisStep[i] {
+					newProcessed = append(newProcessed, m)
+				}
+			}
+			processed = newProcessed
 		}
 	}
 
@@ -155,7 +199,7 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 		c.postTransformHook(ctx, c.pipelineID, correlationIDs, c.transformerNames, msgs, processed, filteredIndices)
 	}
 
-	return processed
+	return processed, nil
 }
 
 func (c *Consumer) Run(ctx context.Context, topic string) error {
@@ -253,11 +297,23 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 					}
 
 					if m.Schema != nil {
-						if err := c.sink.ApplySchema(ctx, *m); err != nil {
-							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
+						transformedMsgs, err := c.processMessages(ctx, []protocol.Message{*m})
+						if err != nil {
+							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error transforming schema change")
 							c.updateTableError(m.SourceID, m.Table)
 							wmMsg.Nack()
-							return fmt.Errorf("failed to apply schema change: %w", err)
+							return fmt.Errorf("failed to transform schema change: %w", err)
+						}
+						if len(transformedMsgs) > 0 {
+							transformed := transformedMsgs[0]
+							if err := c.sink.ApplySchema(ctx, transformed); err != nil {
+								log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
+								c.updateTableError(m.SourceID, m.Table)
+								wmMsg.Nack()
+								return fmt.Errorf("failed to apply schema change: %w", err)
+							}
+						} else {
+							log.Warn().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Schema change filtered out by transformer")
 						}
 					}
 
@@ -331,7 +387,12 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 	if len(batch) == 0 {
 		return
 	}
-	toUpload := c.processMessages(ctx, batch)
+	toUpload, err := c.processMessages(ctx, batch)
+	if err != nil {
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Transformation failed, handling as batch error")
+		c.handleSinkError(ctx, batch, wmMsgs, err)
+		return
+	}
 	if len(toUpload) == 0 {
 		for _, m := range wmMsgs {
 			m.Ack()
@@ -546,7 +607,12 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 			continue
 		}
 
-		toUpload := c.processMessages(ctx, msgs)
+		toUpload, err := c.processMessages(ctx, msgs)
+		if err != nil {
+			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Transformation failed in isolation, routing to DLQ")
+			c.routeToDLQ(wmMsg)
+			continue
+		}
 		if len(toUpload) == 0 {
 			wmMsg.Ack()
 			c.retryMu.Lock()

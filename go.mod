@@ -1,10 +1,13 @@
 module github.com/NurfitraPujo/cdc-pipeline
 
-go 1.26.1
+go 1.26.3
 
 replace github.com/Trendyol/go-pq-cdc => ./internal/vendor/go-pq-cdc
 
+replace bitbucket.org/daya-engineering/daya-contracts => /home/fitrapujo/works/daya-contracts
+
 require (
+	bitbucket.org/daya-engineering/daya-contracts v0.0.0-00010101000000-000000000000
 	github.com/ThreeDotsLabs/watermill v1.3.7
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.1.3
 	github.com/Trendyol/go-pq-cdc v1.6.8
@@ -29,11 +32,14 @@ require (
 	github.com/tinylib/msgp v1.6.3
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/mock v0.6.0
+	golang.org/x/crypto v0.49.0
 	golang.org/x/sync v0.20.0
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/BurntSushi/toml v1.2.1 // indirect
@@ -135,13 +141,11 @@ require (
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

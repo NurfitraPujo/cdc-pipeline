@@ -13,6 +13,15 @@ type Transformer interface {
 	Transform(ctx context.Context, m *protocol.Message) (*protocol.Message, bool, error)
 }
 
+// BatchTransformer is an optional interface for transformers that can process
+// multiple messages in a single batch operation (e.g., for network efficiency).
+// If a transformer does not implement this interface, the consumer will fall
+// back to calling Transform sequentially.
+type BatchTransformer interface {
+	Transformer
+	TransformBatch(ctx context.Context, msgs []protocol.Message) ([]protocol.Message, error)
+}
+
 // TransformerFactory is a function that creates a Transformer from config.
 type TransformerFactory func(options map[string]interface{}) (Transformer, error)
 

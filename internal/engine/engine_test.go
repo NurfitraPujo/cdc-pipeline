@@ -312,8 +312,8 @@ func TestConsumer_TransformerFiltering(t *testing.T) {
 		{SourceID: "s1", Table: "t1", Op: protocol.OpDelete, Payload: []byte(`{"id":1}`)},
 	}
 
-	processed := c.processMessages(context.Background(), msgs)
-
+	processed, err := c.processMessages(context.Background(), msgs)
+	assert.NoError(t, err)
 	assert.Equal(t, 3, len(processed), "all messages should pass through (not filtered)")
 
 	assert.Equal(t, 1, insertTf.callCount, "insert-only transformer should be called once (for insert msg)")
@@ -350,10 +350,189 @@ func TestConsumer_TransformerFiltering_NotMatched(t *testing.T) {
 	dmlMsg := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, Payload: []byte(`{"id":1}`)}
 	ddlMsg := protocol.Message{SourceID: "s1", Table: "t1", Op: protocol.OpSchemaChange, Payload: []byte(`{}`)}
 
-	processed := c.processMessages(context.Background(), []protocol.Message{dmlMsg, ddlMsg})
-
+	processed, err := c.processMessages(context.Background(), []protocol.Message{dmlMsg, ddlMsg})
+	assert.NoError(t, err)
 	assert.Equal(t, 2, len(processed), "both messages should pass through")
 
 	assert.Equal(t, 1, insertTf.callCount, "insert transformer called only for insert msg")
 	assert.Equal(t, 1, schemaChangeTf.callCount, "ddl transformer called only for schema_change msg")
+}
+
+type mockFuncTransformer struct {
+	name          string
+	transformFunc func(msg *protocol.Message) (*protocol.Message, bool, error)
+}
+
+func (m *mockFuncTransformer) Name() string { return m.name }
+func (m *mockFuncTransformer) Transform(ctx context.Context, msg *protocol.Message) (*protocol.Message, bool, error) {
+	return m.transformFunc(msg)
+}
+
+type mockBatchTransformer struct {
+	mockTransformer
+	batchCallCount int
+	batchErr       error
+}
+
+func (m *mockBatchTransformer) TransformBatch(ctx context.Context, msgs []protocol.Message) ([]protocol.Message, error) {
+	m.batchCallCount++
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	return msgs, nil
+}
+
+type mockFilteringTransformer struct {
+	name string
+}
+
+func (m *mockFilteringTransformer) Name() string { return m.name }
+func (m *mockFilteringTransformer) Transform(ctx context.Context, msg *protocol.Message) (*protocol.Message, bool, error) {
+	if msg.UUID == "1" {
+		return nil, false, nil
+	}
+	return msg, true, nil
+}
+
+func TestConsumer_DDL_Transformation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	tf := &mockFuncTransformer{
+		name: "schema-modifier",
+		transformFunc: func(msg *protocol.Message) (*protocol.Message, bool, error) {
+			if msg.Op == protocol.OpSchemaChange && msg.Schema != nil {
+				msg.Schema.Columns["extra"] = "text"
+			}
+			return msg, true, nil
+		},
+	}
+
+	transformers := []ConfiguredTransformer{
+		{Transformer: tf, OperationTypes: []protocol.OperationType{protocol.OpSchemaChange}},
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 1, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3}, nil, nil)
+
+	ddlMsg := protocol.Message{
+		SourceID: "s1",
+		Table:    "t1",
+		Op:       protocol.OpSchemaChange,
+		Schema: &protocol.SchemaMetadata{
+			Table:   "t1",
+			Columns: map[string]string{"id": "int"},
+		},
+	}
+
+	transformed, err := c.processMessages(context.Background(), []protocol.Message{ddlMsg})
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(transformed))
+	assert.Equal(t, "text", transformed[0].Schema.Columns["extra"])
+}
+
+func TestConsumer_DDL_Resilience(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	tf := &mockTransformer{name: "failing-tf", transformErr: errors.New("NATS timeout")}
+	transformers := []ConfiguredTransformer{
+		{Transformer: tf, OperationTypes: []protocol.OperationType{protocol.OpSchemaChange}},
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 1, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3}, nil, nil)
+
+	ddlMsg := protocol.Message{
+		SourceID: "s1",
+		Table:    "t1",
+		Op:       protocol.OpSchemaChange,
+		Schema: &protocol.SchemaMetadata{
+			Table: "t1",
+		},
+	}
+
+	_, err := c.processMessages(context.Background(), []protocol.Message{ddlMsg})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "NATS timeout")
+}
+
+func TestConsumer_BatchTransformerSupport(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	bt := &mockBatchTransformer{
+		mockTransformer: mockTransformer{name: "batch-tf"},
+	}
+
+	transformers := []ConfiguredTransformer{
+		{Transformer: bt, OperationTypes: []protocol.OperationType{protocol.OpInsert}},
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 1, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3}, nil, nil)
+
+	msgs := []protocol.Message{
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, UUID: "1"},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, UUID: "2"},
+	}
+
+	processed, err := c.processMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(processed))
+	assert.Equal(t, 1, bt.batchCallCount, "TransformBatch should be called exactly once")
+}
+
+func TestConsumer_HooksAndFilteredIndices(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	filteringTf := &mockFilteringTransformer{name: "filter-even"}
+	transformers := []ConfiguredTransformer{
+		{Transformer: filteringTf, OperationTypes: []protocol.OperationType{protocol.OpInsert}},
+	}
+
+	var preCalled, postCalled bool
+	var capturedFiltered []int
+
+	preHook := func(ctx context.Context, pipelineID string, transformerNames []string, msgs []protocol.Message) []string {
+		preCalled = true
+		return []string{"corr-1"}
+	}
+
+	postHook := func(ctx context.Context, pipelineID string, correlationIDs []string, transformerNames []string, msgs []protocol.Message, processed []protocol.Message, filtered []int) {
+		postCalled = true
+		capturedFiltered = filtered
+	}
+
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, transformers, mockKV, 1, 100*time.Millisecond, protocol.RetryConfig{MaxRetries: 3}, preHook, postHook)
+
+	msgs := []protocol.Message{
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, UUID: "1"},
+		{SourceID: "s1", Table: "t1", Op: protocol.OpInsert, UUID: "2"},
+	}
+
+	processed, err := c.processMessages(context.Background(), msgs)
+	assert.NoError(t, err)
+	assert.True(t, preCalled)
+	assert.True(t, postCalled)
+	assert.Equal(t, 1, len(processed))
+	assert.Equal(t, []int{0}, capturedFiltered, "index 0 should be filtered")
 }
