@@ -30,6 +30,12 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "SourceID")
 				return
 			}
+		case "snk":
+			z.SinkID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
 		case "tbl":
 			z.Table, err = dc.ReadString()
 			if err != nil {
@@ -160,24 +166,28 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 // EncodeMsg implements msgp.Encodable
 func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 	// check for omitted fields
-	zb0001Len := uint32(12)
-	var zb0001Mask uint16 /* 12 bits */
+	zb0001Len := uint32(13)
+	var zb0001Mask uint16 /* 13 bits */
 	_ = zb0001Mask
+	if z.SinkID == "" {
+		zb0001Len--
+		zb0001Mask |= 0x2
+	}
 	if z.Data == nil {
 		zb0001Len--
-		zb0001Mask |= 0x40
+		zb0001Mask |= 0x80
 	}
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x200
+		zb0001Mask |= 0x400
 	}
 	if z.CorrelationID == "" {
 		zb0001Len--
-		zb0001Mask |= 0x400
+		zb0001Mask |= 0x800
 	}
 	if z.Diff == nil {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x1000
 	}
 	// variable map header, size zb0001Len
 	err = en.Append(0x80 | uint8(zb0001Len))
@@ -196,6 +206,18 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 		if err != nil {
 			err = msgp.WrapError(err, "SourceID")
 			return
+		}
+		if (zb0001Mask & 0x2) == 0 { // if not omitted
+			// write "snk"
+			err = en.Append(0xa3, 0x73, 0x6e, 0x6b)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(z.SinkID)
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
 		}
 		// write "tbl"
 		err = en.Append(0xa3, 0x74, 0x62, 0x6c)
@@ -247,7 +269,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "UUID")
 			return
 		}
-		if (zb0001Mask & 0x40) == 0 { // if not omitted
+		if (zb0001Mask & 0x80) == 0 { // if not omitted
 			// write "data"
 			err = en.Append(0xa4, 0x64, 0x61, 0x74, 0x61)
 			if err != nil {
@@ -291,7 +313,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "Timestamp")
 			return
 		}
-		if (zb0001Mask & 0x200) == 0 { // if not omitted
+		if (zb0001Mask & 0x400) == 0 { // if not omitted
 			// write "meta"
 			err = en.Append(0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if err != nil {
@@ -310,7 +332,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x400) == 0 { // if not omitted
+		if (zb0001Mask & 0x800) == 0 { // if not omitted
 			// write "c_id"
 			err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
 			if err != nil {
@@ -322,7 +344,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				return
 			}
 		}
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// write "diff"
 			err = en.Append(0xa4, 0x64, 0x69, 0x66, 0x66)
 			if err != nil {
@@ -349,24 +371,28 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// check for omitted fields
-	zb0001Len := uint32(12)
-	var zb0001Mask uint16 /* 12 bits */
+	zb0001Len := uint32(13)
+	var zb0001Mask uint16 /* 13 bits */
 	_ = zb0001Mask
+	if z.SinkID == "" {
+		zb0001Len--
+		zb0001Mask |= 0x2
+	}
 	if z.Data == nil {
 		zb0001Len--
-		zb0001Mask |= 0x40
+		zb0001Mask |= 0x80
 	}
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x200
+		zb0001Mask |= 0x400
 	}
 	if z.CorrelationID == "" {
 		zb0001Len--
-		zb0001Mask |= 0x400
+		zb0001Mask |= 0x800
 	}
 	if z.Diff == nil {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x1000
 	}
 	// variable map header, size zb0001Len
 	o = append(o, 0x80|uint8(zb0001Len))
@@ -376,6 +402,11 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "sid"
 		o = append(o, 0xa3, 0x73, 0x69, 0x64)
 		o = msgp.AppendString(o, z.SourceID)
+		if (zb0001Mask & 0x2) == 0 { // if not omitted
+			// string "snk"
+			o = append(o, 0xa3, 0x73, 0x6e, 0x6b)
+			o = msgp.AppendString(o, z.SinkID)
+		}
 		// string "tbl"
 		o = append(o, 0xa3, 0x74, 0x62, 0x6c)
 		o = msgp.AppendString(o, z.Table)
@@ -391,7 +422,7 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "uuid"
 		o = append(o, 0xa4, 0x75, 0x75, 0x69, 0x64)
 		o = msgp.AppendString(o, z.UUID)
-		if (zb0001Mask & 0x40) == 0 { // if not omitted
+		if (zb0001Mask & 0x80) == 0 { // if not omitted
 			// string "data"
 			o = append(o, 0xa4, 0x64, 0x61, 0x74, 0x61)
 			o = msgp.AppendMapHeader(o, uint32(len(z.Data)))
@@ -410,7 +441,7 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "ts"
 		o = append(o, 0xa2, 0x74, 0x73)
 		o = msgp.AppendTime(o, z.Timestamp)
-		if (zb0001Mask & 0x200) == 0 { // if not omitted
+		if (zb0001Mask & 0x400) == 0 { // if not omitted
 			// string "meta"
 			o = append(o, 0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if z.Schema == nil {
@@ -423,12 +454,12 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x400) == 0 { // if not omitted
+		if (zb0001Mask & 0x800) == 0 { // if not omitted
 			// string "c_id"
 			o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
 			o = msgp.AppendString(o, z.CorrelationID)
 		}
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// string "diff"
 			o = append(o, 0xa4, 0x64, 0x69, 0x66, 0x66)
 			if z.Diff == nil {
@@ -467,6 +498,12 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			z.SourceID, bts, err = msgp.ReadStringBytes(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "SourceID")
+				return
+			}
+		case "snk":
+			z.SinkID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
 				return
 			}
 		case "tbl":
@@ -597,7 +634,7 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *Message) Msgsize() (s int) {
-	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(string(z.Op)) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 5 + msgp.StringPrefixSize + len(z.UUID) + 5 + msgp.MapHeaderSize
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.SinkID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(string(z.Op)) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 5 + msgp.StringPrefixSize + len(z.UUID) + 5 + msgp.MapHeaderSize
 	if z.Data != nil {
 		for za0001, za0002 := range z.Data {
 			_ = za0002

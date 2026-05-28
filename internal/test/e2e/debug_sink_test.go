@@ -48,7 +48,7 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 			{
 				Name:           "mask_name",
 				Type:           "mask",
-				OperationTypes: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete},
+				OperationTypes: []protocol.OperationType{protocol.OpInsert, protocol.OpUpdate, protocol.OpDelete, protocol.OpSnapshot},
 				Options: map[string]interface{}{
 					"fields": []interface{}{"name"},
 				},

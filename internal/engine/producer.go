@@ -25,13 +25,14 @@ import (
 )
 
 type tableEvolution struct {
-	Status         string            `json:"status"`
-	Revision       uint64            `json:"revision"`
-	CorrelationID  string            `json:"correlation_id"`
-	CachedSchema   map[string]string `json:"cached_schema"`
-	LastCheckAt    time.Time         `json:"last_check_at"`
-	ChangesThisMin int               `json:"changes_this_min"`
-	LastChangeAt   time.Time         `json:"last_change_at"`
+	Status           string            `json:"status"`
+	Revision         uint64            `json:"revision"`
+	CorrelationID    string            `json:"correlation_id"`
+	CachedSchema     map[string]string `json:"cached_schema"`
+	LastCheckAt      time.Time         `json:"last_check_at"`
+	ChangesThisMin   int               `json:"changes_this_min"`
+	LastChangeAt     time.Time         `json:"last_change_at"`
+	AcknowledgedSinks map[string]bool  `json:"acknowledged_sinks"`
 }
 
 type Producer struct {
@@ -347,6 +348,9 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 		if err == nil {
 			var st tableEvolution
 			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+				if st.AcknowledgedSinks == nil {
+					st.AcknowledgedSinks = make(map[string]bool)
+				}
 				st.Revision = entry.Revision()
 				p.muEvo.Lock()
 				p.evoStates[table] = &st
@@ -408,14 +412,16 @@ func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
 		return
 	}
 
-	// Ack matches! Transition to DRAINING and start background flush
-	log.Info().Str("table", ack.Table).Msg("Schema ack received, draining buffer")
-	state.Status = protocol.SchemaStatusDraining
-
-	// Flush buffer in background
-	go p.flushBuffer(ctx, ack.Table)
-
+	state.AcknowledgedSinks[ack.SinkID] = true
 	p.persistEvoState(ack.Table, state)
+
+	if len(state.AcknowledgedSinks) >= len(p.config.Sinks) {
+		log.Info().Str("table", ack.Table).Msg("All sinks acknowledged, draining buffer")
+		state.Status = protocol.SchemaStatusDraining
+		p.persistEvoState(ack.Table, state)
+		go p.flushBuffer(ctx, ack.Table)
+	}
+
 	p.muEvo.Unlock()
 }
 
@@ -502,9 +508,10 @@ func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff,
 			cols[k] = "unknown"
 		}
 		state = &tableEvolution{
-			Status:       protocol.SchemaStatusStable,
-			CachedSchema: cols,
-			LastCheckAt:  time.Now(),
+			Status:           protocol.SchemaStatusStable,
+			CachedSchema:     cols,
+			LastCheckAt:      time.Now(),
+			AcknowledgedSinks: make(map[string]bool),
 		}
 		p.evoStates[m.Table] = state
 		return nil, false
@@ -560,6 +567,7 @@ func (p *Producer) performSchemaEvolution(tableName, sourceID string, added map[
 	// Transition to FROZEN
 	state.Status = protocol.SchemaStatusFrozen
 	state.CorrelationID = diff.CorrelationID
+	state.AcknowledgedSinks = make(map[string]bool)
 	for k, v := range added {
 		state.CachedSchema[k] = v
 	}

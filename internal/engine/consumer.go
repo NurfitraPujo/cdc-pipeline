@@ -268,6 +268,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 							CorrelationID: m.CorrelationID,
 							Table:         m.Table,
 							SourceID:      m.SourceID,
+							SinkID:        c.sinkID,
 							Timestamp:     time.Now(),
 						}
 						ackData, _ := ack.MarshalMsg(nil)

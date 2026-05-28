@@ -40,6 +40,7 @@ type SchemaDiff struct {
 
 type Message struct {
 	SourceID      string                 `msg:"sid"`
+	SinkID        string                 `msg:"snk,omitempty" json:"sink_id,omitempty"`
 	Table         string                 `msg:"tbl"`
 	Op            OperationType         `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
 	LSN           uint64                 `msg:"lsn"`
