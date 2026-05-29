@@ -12,6 +12,9 @@ import (
 )
 
 func TestDatabendSink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 	// Using stable Databend nightly image known to work better in constrained envs
 	req := testcontainers.ContainerRequest{

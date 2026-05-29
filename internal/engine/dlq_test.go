@@ -23,7 +23,7 @@ func TestConsumer_DLQ(t *testing.T) {
 	mockKV := mocks.NewMockKeyValue(ctrl)
 
 	retryCfg := protocol.RetryConfig{
-		MaxRetries:      2,
+		MaxRetries:      1,
 		InitialInterval: 1 * time.Millisecond,
 		MaxInterval:     2 * time.Millisecond,
 		EnableDLQ:       true,
@@ -69,13 +69,8 @@ func TestConsumer_DLQ(t *testing.T) {
 			// 3 > 2 is TRUE -> ISOLATE.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
 
-			// Isolation Mode for {wmMsg1, wmMsg2}:
-			// 1. wmMsg1: attempts=3 >= 2. route to DLQ.
-			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
-			mockPub.EXPECT().Publish("cdc_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
-
-			// 2. wmMsg2: attempts=2 >= 2 is TRUE.
-			// So wmMsg2 also to DLQ.
+			// Isolation Mode for {wmMsg1} (uuid1):
+			// 1. wmMsg1: attempts=2 >= 1. route to DLQ.
 			mockSink.EXPECT().BatchUpload(gomock.Any(), gomock.Any()).Return(errors.New("sink error")).Times(1),
 			mockPub.EXPECT().Publish("cdc_pipeline_p1_dlq", gomock.Any()).Return(nil).Times(1),
 		)

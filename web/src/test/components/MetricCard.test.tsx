@@ -1,17 +1,13 @@
-import { describe, it, expect } from "vitest";
 import { screen } from "@testing-library/react";
-import { renderWithProviders } from "../utils";
-import { MetricCard } from "@/components/MetricCard";
 import { Activity } from "lucide-react";
+import { describe, expect, it } from "vitest";
+import { MetricCard } from "@/components/MetricCard";
+import { renderWithProviders } from "../utils";
 
 describe("MetricCard Component", () => {
 	it("should render with title and value", () => {
 		renderWithProviders(
-			<MetricCard
-				title="Total Pipelines"
-				value={5}
-				icon={Activity}
-			/>
+			<MetricCard title="Total Pipelines" value={5} icon={Activity} />,
 		);
 
 		expect(screen.getByText("Total Pipelines")).toBeInTheDocument();
@@ -25,7 +21,7 @@ describe("MetricCard Component", () => {
 				value={0}
 				icon={Activity}
 				isLoading={true}
-			/>
+			/>,
 		);
 
 		// Check for skeleton element by data attribute or class
@@ -40,10 +36,12 @@ describe("MetricCard Component", () => {
 				value={5}
 				icon={Activity}
 				description="Active pipeline configurations"
-			/>
+			/>,
 		);
 
-		expect(screen.getByText("Active pipeline configurations")).toBeInTheDocument();
+		expect(
+			screen.getByText("Active pipeline configurations"),
+		).toBeInTheDocument();
 	});
 
 	it("should show trend indicator", () => {
@@ -53,7 +51,7 @@ describe("MetricCard Component", () => {
 				value={5}
 				icon={Activity}
 				trend={{ value: 10, isPositive: true, label: "from last week" }}
-			/>
+			/>,
 		);
 
 		expect(screen.getByText("+10%")).toBeInTheDocument();
@@ -62,22 +60,12 @@ describe("MetricCard Component", () => {
 
 	it("should format large numbers", () => {
 		const { rerender } = renderWithProviders(
-			<MetricCard
-				title="Rows"
-				value={1500000}
-				icon={Activity}
-			/>
+			<MetricCard title="Rows" value={1500000} icon={Activity} />,
 		);
 
 		expect(screen.getByText("1.5M")).toBeInTheDocument();
 
-		rerender(
-			<MetricCard
-				title="Rows"
-				value={2500}
-				icon={Activity}
-			/>
-		);
+		rerender(<MetricCard title="Rows" value={2500} icon={Activity} />);
 
 		expect(screen.getByText("2.5K")).toBeInTheDocument();
 	});

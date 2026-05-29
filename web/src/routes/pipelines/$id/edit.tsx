@@ -159,10 +159,10 @@ function EditPipelinePage() {
 			{/* Header */}
 			<div className="mb-8">
 				<Button asChild variant="outline" size="sm">
-				<Link to="/pipelines/$id" params={{ id }}>
-					<ArrowLeft className="mr-2 h-4 w-4" />
-					Back to Pipeline
-				</Link>
+					<Link to="/pipelines/$id" params={{ id }}>
+						<ArrowLeft className="mr-2 h-4 w-4" />
+						Back to Pipeline
+					</Link>
 				</Button>
 				<h1 className="mt-4 text-3xl font-bold tracking-tight">
 					Edit Pipeline

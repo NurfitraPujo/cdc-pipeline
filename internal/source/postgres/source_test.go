@@ -9,6 +9,9 @@ import (
 )
 
 func TestPostgresSource(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 	pgC, err := tc_postgres.Run(ctx,
 		"postgres:16-alpine",

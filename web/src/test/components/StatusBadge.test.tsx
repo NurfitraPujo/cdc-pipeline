@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
 import { screen } from "@testing-library/react";
-import { renderWithProviders } from "../utils";
+import { describe, expect, it } from "vitest";
 import { StatusBadge } from "@/components/StatusBadge";
+import { renderWithProviders } from "../utils";
 
 describe("StatusBadge Component", () => {
 	it.each([

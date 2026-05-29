@@ -136,7 +136,12 @@ function CreatePipelinePage() {
 				tables: Array.from(selectedTables),
 			},
 			sink: {
-				type: sink.type as "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook",
+				type: sink.type as
+					| "postgres"
+					| "mysql"
+					| "elasticsearch"
+					| "kafka"
+					| "webhook",
 				name: sink.name,
 				connection: sink.connection,
 			},

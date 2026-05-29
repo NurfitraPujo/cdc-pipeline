@@ -1,8 +1,8 @@
 import type {
 	LoginResponse,
 	Pipeline,
-	Source,
 	Sink,
+	Source,
 	StatsSummary,
 	TableStats,
 } from "@/api/types";
@@ -144,7 +144,9 @@ export const mockPipelines: Pipeline[] = [
 	},
 ];
 
-export const createMockPipeline = (overrides?: Partial<Pipeline>): Pipeline => ({
+export const createMockPipeline = (
+	overrides?: Partial<Pipeline>,
+): Pipeline => ({
 	id: `pipeline-${Date.now()}`,
 	name: "New Pipeline",
 	status: "stopped",

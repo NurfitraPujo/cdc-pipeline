@@ -12,6 +12,9 @@ import (
 )
 
 func TestNatsStreaming(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 	natsC, err := tc_nats.Run(ctx,
 		"nats:2.10-alpine",

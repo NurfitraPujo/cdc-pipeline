@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithRouter } from "../utils";
 
 // Mock localStorage
@@ -25,7 +25,9 @@ describe("Login Integration", () => {
 		// Check for form elements - username/password labels confirm we're on login page
 		expect(await screen.findByLabelText(/username/i)).toBeInTheDocument();
 		expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: /sign in/i }),
+		).toBeInTheDocument();
 	});
 
 	// NOTE: Skipped due to TanStack Devtools cleanup issue in test environment

@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
-import { renderWithRouter } from "../utils";
-import { server } from "../mocks/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandlers } from "../mocks/handlers";
+import { server } from "../mocks/server";
+import { renderWithRouter } from "../utils";
 
 describe("Dashboard Integration", () => {
 	beforeEach(() => {
@@ -13,7 +13,9 @@ describe("Dashboard Integration", () => {
 		renderWithRouter("/dashboard", { authenticated: true });
 
 		// Wait for page title (specifically the h1 heading)
-		expect(await screen.findByRole("heading", { name: "Dashboard", level: 1 })).toBeInTheDocument();
+		expect(
+			await screen.findByRole("heading", { name: "Dashboard", level: 1 }),
+		).toBeInTheDocument();
 
 		// Check metric cards - they should appear once data loads
 		await waitFor(() => {
@@ -41,6 +43,8 @@ describe("Dashboard Integration", () => {
 		renderWithRouter("/dashboard", { authenticated: true });
 
 		// Should still render the dashboard title even on error
-		expect(await screen.findByRole("heading", { name: "Dashboard", level: 1 })).toBeInTheDocument();
+		expect(
+			await screen.findByRole("heading", { name: "Dashboard", level: 1 }),
+		).toBeInTheDocument();
 	});
 });

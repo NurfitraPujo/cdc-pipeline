@@ -44,6 +44,9 @@ func TestNatsProtoTransformer_RouterFiltering(t *testing.T) {
 }
 
 func TestNatsProtoTransformer_ProtobufMapping(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 
 	defer func() {

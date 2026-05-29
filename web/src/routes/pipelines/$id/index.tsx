@@ -6,15 +6,20 @@ import {
 	ArrowLeft,
 	Database,
 	Edit,
+	Monitor,
 	RefreshCw,
 	Table,
 	Wifi,
 	WifiOff,
-	Monitor,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { pipelinesApi } from "@/api/pipelines";
-import type { PipelineStatus, TableStats, SSEMessage, PipelineStatusResponse } from "@/api/types";
+import type {
+	PipelineStatus,
+	PipelineStatusResponse,
+	SSEMessage,
+	TableStats,
+} from "@/api/types";
 import { MetricCard } from "@/components/MetricCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,7 +51,9 @@ function PipelineDetailPage() {
 	const queryClient = useQueryClient();
 
 	const [tables, setTables] = useState<Record<string, TableStats>>({});
-	const [sinks, setSinks] = useState<Record<string, Record<string, TableStats>>>({});
+	const [sinks, setSinks] = useState<
+		Record<string, Record<string, TableStats>>
+	>({});
 	const [lastUpdate, setLastUpdate] = useState<string | null>(null);
 
 	const {
@@ -74,61 +81,58 @@ function PipelineDetailPage() {
 	}, [initialStatus]);
 
 	// Handle real-time updates
-	const { isConnected } = useSSE<SSEMessage>(
-		`/pipelines/${id}/metrics`,
-		{
-			onMessage: (msg) => {
-				if (!msg || !msg.key) return;
-				
-				const key = msg.key;
-				const data = msg.data as TableStats;
-				
-				if (key.endsWith(".stats")) {
-					setLastUpdate(new Date().toISOString());
-					
-					// Extract table name from key or data if available
-					// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
-					const parts = key.split(".");
-					const tableName = parts[8] || data.tableName;
-					const sinkID = msg.sink_id;
+	const { isConnected } = useSSE<SSEMessage>(`/pipelines/${id}/metrics`, {
+		onMessage: (msg) => {
+			if (!msg || !msg.key) return;
 
-					if (sinkID) {
-						// Update per-sink stats
-						setSinks(prev => ({
-							...prev,
-							[sinkID]: {
-								...(prev[sinkID] || {}),
-								[tableName]: data
+			const key = msg.key;
+			const data = msg.data as TableStats;
+
+			if (key.endsWith(".stats")) {
+				setLastUpdate(new Date().toISOString());
+
+				// Extract table name from key or data if available
+				// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
+				const parts = key.split(".");
+				const tableName = parts[8] || data.tableName;
+				const sinkID = msg.sink_id;
+
+				if (sinkID) {
+					// Update per-sink stats
+					setSinks((prev) => ({
+						...prev,
+						[sinkID]: {
+							...(prev[sinkID] || {}),
+							[tableName]: data,
+						},
+					}));
+
+					// Update aggregated table stats (exclude debug)
+					if (!msg.is_debug) {
+						setTables((prev) => {
+							const current = prev[tableName] || { total_synced: 0, lag_ms: 0 };
+							const next = { ...data, tableName };
+
+							// Simple aggregation: max for count and lag
+							if (data.total_synced > current.total_synced) {
+								next.total_synced = data.total_synced;
+							} else {
+								next.total_synced = current.total_synced;
 							}
-						}));
 
-						// Update aggregated table stats (exclude debug)
-						if (!msg.is_debug) {
-							setTables(prev => {
-								const current = prev[tableName] || { total_synced: 0, lag_ms: 0 };
-								const next = { ...data, tableName };
-								
-								// Simple aggregation: max for count and lag
-								if (data.total_synced > current.total_synced) {
-									next.total_synced = data.total_synced;
-								} else {
-									next.total_synced = current.total_synced;
-								}
-								
-								if (data.lag_ms > current.lag_ms) {
-									next.lag_ms = data.lag_ms;
-								} else {
-									next.lag_ms = current.lag_ms;
-								}
-								
-								return { ...prev, [tableName]: next };
-							});
-						}
+							if (data.lag_ms > current.lag_ms) {
+								next.lag_ms = data.lag_ms;
+							} else {
+								next.lag_ms = current.lag_ms;
+							}
+
+							return { ...prev, [tableName]: next };
+						});
 					}
 				}
 			}
-		}
-	);
+		},
+	});
 
 	const restartMutation = useMutation({
 		mutationFn: () => pipelinesApi.restart(id),
@@ -174,7 +178,10 @@ function PipelineDetailPage() {
 	}
 
 	const tableList = Object.values(tables);
-	const totalEvents = tableList.reduce((sum, t) => sum + (t.total_synced || 0), 0);
+	const totalEvents = tableList.reduce(
+		(sum, t) => sum + (t.total_synced || 0),
+		0,
+	);
 	const avgLag = tableList.length
 		? Math.round(
 				tableList.reduce((sum, t) => sum + (t.lag_ms || 0), 0) /
@@ -266,11 +273,7 @@ function PipelineDetailPage() {
 				/>
 				<MetricCard
 					title="Last Update"
-					value={
-						lastUpdate
-							? new Date(lastUpdate).toLocaleTimeString()
-							: "--"
-					}
+					value={lastUpdate ? new Date(lastUpdate).toLocaleTimeString() : "--"}
 					description="Metrics timestamp"
 					icon={Activity}
 					isLoading={!lastUpdate && isConnected}
@@ -358,7 +361,9 @@ function PipelineDetailPage() {
 				<Card className="mb-8">
 					<CardHeader>
 						<CardTitle>Production Table Metrics</CardTitle>
-						<CardDescription>Aggregated real-time metrics (excluding debug sinks)</CardDescription>
+						<CardDescription>
+							Aggregated real-time metrics (excluding debug sinks)
+						</CardDescription>
 					</CardHeader>
 					<CardContent>
 						<div className="overflow-x-auto">
@@ -368,18 +373,12 @@ function PipelineDetailPage() {
 										<th className="text-left py-3 px-4 font-medium">
 											Table Name
 										</th>
-										<th className="text-right py-3 px-4 font-medium">
-											Status
-										</th>
+										<th className="text-right py-3 px-4 font-medium">Status</th>
 										<th className="text-right py-3 px-4 font-medium">
 											Total Synced
 										</th>
-										<th className="text-right py-3 px-4 font-medium">
-											RPS
-										</th>
-										<th className="text-right py-3 px-4 font-medium">
-											Lag
-										</th>
+										<th className="text-right py-3 px-4 font-medium">RPS</th>
+										<th className="text-right py-3 px-4 font-medium">Lag</th>
 										<th className="text-right py-3 px-4 font-medium">
 											Last Update
 										</th>
@@ -395,7 +394,13 @@ function PipelineDetailPage() {
 												{table.tableName}
 											</td>
 											<td className="text-right py-3 px-4">
-												<Badge variant={table.status === "ACTIVE" ? "success" : "destructive"}>
+												<Badge
+													variant={
+														table.status === "ACTIVE"
+															? "success"
+															: "destructive"
+													}
+												>
 													{table.status}
 												</Badge>
 											</td>
@@ -409,7 +414,9 @@ function PipelineDetailPage() {
 												{table.lag_ms}ms
 											</td>
 											<td className="text-right py-3 px-4 text-xs text-muted-foreground">
-												{table.updated_at ? new Date(table.updated_at).toLocaleTimeString() : "--"}
+												{table.updated_at
+													? new Date(table.updated_at).toLocaleTimeString()
+													: "--"}
 											</td>
 										</tr>
 									))}
@@ -432,7 +439,9 @@ function PipelineDetailPage() {
 							<Card key={sinkId}>
 								<CardHeader className="pb-3">
 									<CardTitle className="text-lg flex items-center justify-between">
-										<span>Sink: <span className="text-primary">{sinkId}</span></span>
+										<span>
+											Sink: <span className="text-primary">{sinkId}</span>
+										</span>
 										{sinkId.includes("debug") && (
 											<Badge variant="secondary">Debug Sink</Badge>
 										)}
@@ -443,27 +452,40 @@ function PipelineDetailPage() {
 										<table className="w-full text-sm">
 											<thead>
 												<tr className="border-b text-muted-foreground">
-													<th className="text-left py-2 px-4 font-medium">Table</th>
-													<th className="text-right py-2 px-4 font-medium">Synced</th>
-													<th className="text-right py-2 px-4 font-medium">Lag</th>
-													<th className="text-right py-2 px-4 font-medium">Errors</th>
+													<th className="text-left py-2 px-4 font-medium">
+														Table
+													</th>
+													<th className="text-right py-2 px-4 font-medium">
+														Synced
+													</th>
+													<th className="text-right py-2 px-4 font-medium">
+														Lag
+													</th>
+													<th className="text-right py-2 px-4 font-medium">
+														Errors
+													</th>
 												</tr>
 											</thead>
 											<tbody>
-												{Object.entries(sinkTables).map(([tableName, stats]) => (
-													<tr key={tableName} className="border-b last:border-0">
-														<td className="py-2 px-4">{tableName}</td>
-														<td className="text-right py-2 px-4 font-medium">
-															{stats.total_synced?.toLocaleString()}
-														</td>
-														<td className="text-right py-2 px-4 font-mono">
-															{stats.lag_ms}ms
-														</td>
-														<td className="text-right py-2 px-4 text-destructive">
-															{stats.error_count || 0}
-														</td>
-													</tr>
-												))}
+												{Object.entries(sinkTables).map(
+													([tableName, stats]) => (
+														<tr
+															key={tableName}
+															className="border-b last:border-0"
+														>
+															<td className="py-2 px-4">{tableName}</td>
+															<td className="text-right py-2 px-4 font-medium">
+																{stats.total_synced?.toLocaleString()}
+															</td>
+															<td className="text-right py-2 px-4 font-mono">
+																{stats.lag_ms}ms
+															</td>
+															<td className="text-right py-2 px-4 text-destructive">
+																{stats.error_count || 0}
+															</td>
+														</tr>
+													),
+												)}
 											</tbody>
 										</table>
 									</div>

@@ -14,6 +14,9 @@ import (
 )
 
 func TestDebugSink_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 
 	// Start PostgreSQL container

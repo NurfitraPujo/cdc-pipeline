@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { HttpResponse, http } from "msw";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apiClient } from "@/api/client";
 import { API_BASE_URL, TOKEN_KEY } from "@/lib/constants";
 import { server } from "../mocks/server";
-import { http, HttpResponse } from "msw";
 
 // Mock localStorage
 const localStorageMock = {
@@ -32,7 +32,7 @@ describe("API Client", () => {
 			server.use(
 				http.get(`${API_BASE_URL}/test`, () => {
 					return HttpResponse.json({ data: "test" });
-				})
+				}),
 			);
 
 			const result = await apiClient.get("/test");
@@ -44,7 +44,7 @@ describe("API Client", () => {
 				http.post(`${API_BASE_URL}/test`, async ({ request }) => {
 					const body = await request.json();
 					return HttpResponse.json({ received: body });
-				})
+				}),
 			);
 
 			const body = { name: "test" };
@@ -57,7 +57,7 @@ describe("API Client", () => {
 				http.put(`${API_BASE_URL}/test`, async ({ request }) => {
 					const body = await request.json();
 					return HttpResponse.json({ updated: body });
-				})
+				}),
 			);
 
 			const body = { id: 1, name: "updated" };
@@ -69,7 +69,7 @@ describe("API Client", () => {
 			server.use(
 				http.delete(`${API_BASE_URL}/test`, () => {
 					return HttpResponse.json({ deleted: true });
-				})
+				}),
 			);
 
 			const result = await apiClient.delete("/test");
@@ -87,7 +87,7 @@ describe("API Client", () => {
 				http.get(`${API_BASE_URL}/protected`, ({ request }) => {
 					requestHeaders = request.headers;
 					return HttpResponse.json({ data: "protected" });
-				})
+				}),
 			);
 
 			await apiClient.get("/protected");
@@ -100,11 +100,8 @@ describe("API Client", () => {
 
 			server.use(
 				http.get(`${API_BASE_URL}/protected`, () => {
-					return HttpResponse.json(
-						{ error: "Unauthorized" },
-						{ status: 401 }
-					);
-				})
+					return HttpResponse.json({ error: "Unauthorized" }, { status: 401 });
+				}),
 			);
 
 			await expect(apiClient.get("/protected")).rejects.toThrow();
@@ -120,9 +117,9 @@ describe("API Client", () => {
 				http.get(`${API_BASE_URL}/error`, () => {
 					return HttpResponse.json(
 						{ error: "Something went wrong" },
-						{ status: 500 }
+						{ status: 500 },
 					);
-				})
+				}),
 			);
 
 			await expect(apiClient.get("/error")).rejects.toThrow("HTTP 500");
@@ -132,7 +129,7 @@ describe("API Client", () => {
 			server.use(
 				http.get(`${API_BASE_URL}/network-error`, () => {
 					return HttpResponse.error();
-				})
+				}),
 			);
 
 			await expect(apiClient.get("/network-error")).rejects.toThrow();

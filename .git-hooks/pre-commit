@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+echo "========================================="
+echo "   Running Pre-commit Harness Sensors    "
+echo "========================================="
+
+# 1. Run go vet (Go Static Correctness)
+if [ -f "go.mod" ]; then
+    echo "🔍 Running go vet..."
+    go vet ./...
+fi
+
+# 2. Run golangci-lint (Backend Linter + Depguard Architecture Rules)
+if command -v golangci-lint &> /dev/null; then
+    echo "🔍 Running golangci-lint..."
+    golangci-lint run ./...
+else
+    echo "⚠️  golangci-lint not found. Skipping extended Go linting. Please install it for full architecture fencing."
+fi
+
+# 3. Run Biome lint & format check (Frontend Sensor)
+if [ -d "web" ] && [ -f "web/package.json" ]; then
+    echo "🔍 Running Biome check..."
+    (cd web && pnpm check)
+fi
+
+# 4. Run fast Go Unit Tests (Regression Sensor)
+if [ -f "go.mod" ]; then
+    echo "🧪 Running fast unit tests..."
+    go test -short $(go list ./... | grep -v /test/e2e)
+fi
+
+echo "✅ All sensors passed! Commit allowed."
+echo "========================================="

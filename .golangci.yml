@@ -1,0 +1,88 @@
+run:
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gosec
+    - gocyclo
+    - revive
+    - depguard
+    - govet
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  
+  depguard:
+    rules:
+      main:
+        listMode: strict
+        allow:
+          - $gostd
+          - github.com/NurfitraPujo/cdc-pipeline
+          - github.com/ThreeDotsLabs/watermill
+          - github.com/ThreeDotsLabs/watermill-nats/v2
+          - github.com/Trendyol/go-pq-cdc
+          - github.com/datafuselabs/databend-go
+          - github.com/gin-gonic/gin
+          - github.com/go-ozzo/ozzo-validation/v4
+          - github.com/golang-jwt/jwt/v5
+          - github.com/google/uuid
+          - github.com/jackc/pgx/v5
+          - github.com/lib/pq
+          - github.com/nats-io/nats.go
+          - github.com/prometheus/client_golang
+          - github.com/rs/zerolog
+          - github.com/sony/gobreaker
+          - github.com/stretchr/testify
+          - github.com/swaggo/files
+          - github.com/swaggo/gin-swagger
+          - github.com/swaggo/swag
+          - github.com/testcontainers/testcontainers-go
+          - github.com/tinylib/msgp
+          - github.com/vmihailenco/msgpack/v5
+          - go.uber.org/mock
+          - golang.org/x/crypto
+          - golang.org/x/sync
+          - google.golang.org/protobuf
+          - gopkg.in/yaml.v3
+          - bitbucket.org/daya-engineering/daya-contracts
+      
+      # Core pipeline boundaries: Prevents API imports from core components
+      core_architecture:
+        listMode: denylist
+        deny:
+          - pkg: github.com/NurfitraPujo/cdc-pipeline/internal/api
+            desc: "Core pipeline packages (engine, source, sink, stream) are prohibited from importing internal/api to preserve the dependency hierarchy."
+        files:
+          - "**/internal/engine/**/*.go"
+          - "**/internal/source/**/*.go"
+          - "**/internal/sink/**/*.go"
+          - "**/internal/stream/**/*.go"
+          - "**/internal/metrics/**/*.go"
+
+      # Core domain isolation: sink and source should be highly modular
+      domain_isolation_sink:
+        listMode: denylist
+        deny:
+          - pkg: github.com/NurfitraPujo/cdc-pipeline/internal/source
+            desc: "The sink layer must be modular and independent of the source layer."
+        files:
+          - "**/internal/sink/**/*.go"
+
+      domain_isolation_source:
+        listMode: denylist
+        deny:
+          - pkg: github.com/NurfitraPujo/cdc-pipeline/internal/sink
+            desc: "The source layer must be modular and independent of the sink layer."
+        files:
+          - "**/internal/source/**/*.go"
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0

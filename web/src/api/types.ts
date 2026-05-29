@@ -100,7 +100,13 @@ export interface Source {
 
 export interface Sink {
 	id: string;
-	type: "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook" | "databend";
+	type:
+		| "postgres"
+		| "mysql"
+		| "elasticsearch"
+		| "kafka"
+		| "webhook"
+		| "databend";
 	name: string;
 	connection: {
 		host: string;

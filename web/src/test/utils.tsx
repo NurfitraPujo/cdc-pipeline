@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createRouter } from "@tanstack/react-router";
-import { render } from "@testing-library/react";
+import { createRouter, RouterProvider } from "@tanstack/react-router";
 import type { RenderOptions } from "@testing-library/react";
-import { type ReactElement, type ReactNode } from "react";
-import { routeTree } from "../routeTree.gen";
+import { render } from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import { useAuthStore } from "@/stores/authStore";
+import { routeTree } from "../routeTree.gen";
 
 // Create a test query client
 export function createTestQueryClient() {
@@ -27,9 +27,7 @@ interface ProvidersProps {
 export function TestProviders({ children, queryClient }: ProvidersProps) {
 	const client = queryClient ?? createTestQueryClient();
 
-	return (
-		<QueryClientProvider client={client}>{children}</QueryClientProvider>
-	);
+	return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
 interface RenderWithProvidersOptions extends Omit<RenderOptions, "wrapper"> {
@@ -38,7 +36,7 @@ interface RenderWithProvidersOptions extends Omit<RenderOptions, "wrapper"> {
 
 export function renderWithProviders(
 	ui: ReactElement,
-	options: RenderWithProvidersOptions = {}
+	options: RenderWithProvidersOptions = {},
 ) {
 	const { queryClient, ...renderOptions } = options;
 	const testQueryClient = queryClient ?? createTestQueryClient();
@@ -59,7 +57,7 @@ interface RenderWithRouterOptions {
 // Helper to render with router
 export function renderWithRouter(
 	initialUrl: string = "/",
-	options: RenderWithRouterOptions = {}
+	options: RenderWithRouterOptions = {},
 ) {
 	const { queryClient, authenticated = false } = options;
 	const testQueryClient = queryClient ?? createTestQueryClient();
@@ -89,7 +87,7 @@ export function renderWithRouter(
 		...render(
 			<QueryClientProvider client={testQueryClient}>
 				<RouterProvider router={router} />
-			</QueryClientProvider>
+			</QueryClientProvider>,
 		),
 		router,
 		queryClient: testQueryClient,

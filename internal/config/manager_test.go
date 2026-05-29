@@ -54,6 +54,9 @@ func (m *MockWorker) SignalDynamicTables(tables []string) {
 }
 
 func TestConfigManager_Transitions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ctx := context.Background()
 
 	// 1. Start NATS Container

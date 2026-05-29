@@ -1,36 +1,27 @@
-import { http, HttpResponse } from "msw";
-import type {
-	LoginRequest,
-	Pipeline,
-} from "@/api/types";
+import { HttpResponse, http } from "msw";
+import type { LoginRequest, Pipeline } from "@/api/types";
 import {
-	mockLoginResponse,
-	mockStatsSummary,
-	mockPipelines,
-	mockSources,
-	mockSinks,
 	createMockPipeline,
+	mockLoginResponse,
+	mockPipelines,
+	mockSinks,
+	mockSources,
+	mockStatsSummary,
 } from "./data";
 
 const API_BASE = "http://localhost:8080/api/v1";
 
 export const handlers = [
 	// Auth
-	http.post(
-		`${API_BASE}/login`,
-		async ({ request }) => {
-			const body = (await request.json()) as LoginRequest;
+	http.post(`${API_BASE}/login`, async ({ request }) => {
+		const body = (await request.json()) as LoginRequest;
 
-			if (body.username === "admin" && body.password === "admin") {
-				return HttpResponse.json(mockLoginResponse);
-			}
-
-			return HttpResponse.json(
-				{ error: "Invalid credentials" },
-				{ status: 401 }
-			);
+		if (body.username === "admin" && body.password === "admin") {
+			return HttpResponse.json(mockLoginResponse);
 		}
-	),
+
+		return HttpResponse.json({ error: "Invalid credentials" }, { status: 401 });
+	}),
 
 	// Stats
 	http.get(`${API_BASE}/stats/summary`, () => {
@@ -55,7 +46,7 @@ export const handlers = [
 			filtered = filtered.filter(
 				(p) =>
 					p.name.toLowerCase().includes(search.toLowerCase()) ||
-					p.id.toLowerCase().includes(search.toLowerCase())
+					p.id.toLowerCase().includes(search.toLowerCase()),
 			);
 		}
 
@@ -81,73 +72,73 @@ export const handlers = [
 
 	http.get<{ id: string }>(`${API_BASE}/pipelines/:id`, ({ params }) => {
 		const pipeline = mockPipelines.find((p) => p.id === params.id);
-		
+
 		if (!pipeline) {
 			return HttpResponse.json(
 				{ error: "Pipeline not found" },
-				{ status: 404 }
+				{ status: 404 },
 			);
 		}
-		
+
 		return HttpResponse.json(pipeline);
 	}),
 
-	http.post<never, Pipeline>(
-		`${API_BASE}/pipelines`,
-		async ({ request }) => {
-			const body = await request.json() as Omit<Pipeline, "id">;
-			const newPipeline = createMockPipeline(body);
-			mockPipelines.push(newPipeline);
-			return HttpResponse.json(newPipeline, { status: 201 });
-		}
-	),
+	http.post<never, Pipeline>(`${API_BASE}/pipelines`, async ({ request }) => {
+		const body = (await request.json()) as Omit<Pipeline, "id">;
+		const newPipeline = createMockPipeline(body);
+		mockPipelines.push(newPipeline);
+		return HttpResponse.json(newPipeline, { status: 201 });
+	}),
 
 	http.put<{ id: string }, Partial<Pipeline>>(
 		`${API_BASE}/pipelines/:id`,
 		async ({ params, request }) => {
 			const body = await request.json();
 			const index = mockPipelines.findIndex((p) => p.id === params.id);
-			
+
 			if (index === -1) {
 				return HttpResponse.json(
 					{ error: "Pipeline not found" },
-					{ status: 404 }
+					{ status: 404 },
 				);
 			}
-			
+
 			mockPipelines[index] = { ...mockPipelines[index], ...body };
 			return HttpResponse.json(mockPipelines[index]);
-		}
+		},
 	),
 
 	http.delete<{ id: string }>(`${API_BASE}/pipelines/:id`, ({ params }) => {
 		const index = mockPipelines.findIndex((p) => p.id === params.id);
-		
+
 		if (index === -1) {
 			return HttpResponse.json(
 				{ error: "Pipeline not found" },
-				{ status: 404 }
+				{ status: 404 },
 			);
 		}
-		
+
 		mockPipelines.splice(index, 1);
 		return HttpResponse.json({ success: true });
 	}),
 
-	http.post<{ id: string }>(`${API_BASE}/pipelines/:id/restart`, ({ params }) => {
-		const pipeline = mockPipelines.find((p) => p.id === params.id);
-		
-		if (!pipeline) {
-			return HttpResponse.json(
-				{ error: "Pipeline not found" },
-				{ status: 404 }
-			);
-		}
-		
-		pipeline.status = "running";
-		pipeline.lastRunAt = new Date().toISOString();
-		return HttpResponse.json({ success: true });
-	}),
+	http.post<{ id: string }>(
+		`${API_BASE}/pipelines/:id/restart`,
+		({ params }) => {
+			const pipeline = mockPipelines.find((p) => p.id === params.id);
+
+			if (!pipeline) {
+				return HttpResponse.json(
+					{ error: "Pipeline not found" },
+					{ status: 404 },
+				);
+			}
+
+			pipeline.status = "running";
+			pipeline.lastRunAt = new Date().toISOString();
+			return HttpResponse.json({ success: true });
+		},
+	),
 
 	// Sources
 	http.get(`${API_BASE}/sources`, () => {
@@ -185,16 +176,13 @@ export const handlers = [
 // Error handlers for testing error states
 export const errorHandlers = {
 	loginError: http.post(`${API_BASE}/login`, () => {
-		return HttpResponse.json(
-			{ error: "Invalid credentials" },
-			{ status: 401 }
-		);
+		return HttpResponse.json({ error: "Invalid credentials" }, { status: 401 });
 	}),
 
 	serverError: http.get(`${API_BASE}/stats/summary`, () => {
 		return HttpResponse.json(
 			{ error: "Internal server error" },
-			{ status: 500 }
+			{ status: 500 },
 		);
 	}),
 

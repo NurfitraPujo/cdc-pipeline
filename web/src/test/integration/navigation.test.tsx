@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { renderWithRouter } from "../utils";
 
 describe("Navigation Integration", () => {
@@ -7,7 +7,9 @@ describe("Navigation Integration", () => {
 		renderWithRouter("/dashboard", { authenticated: true });
 
 		// Wait for dashboard page heading (h1) to be loaded first
-		expect(await screen.findByRole("heading", { name: "Dashboard", level: 1 })).toBeInTheDocument();
+		expect(
+			await screen.findByRole("heading", { name: "Dashboard", level: 1 }),
+		).toBeInTheDocument();
 
 		// Check sidebar navigation links are present
 		expect(screen.getAllByText("Dashboard").length).toBeGreaterThanOrEqual(1);
