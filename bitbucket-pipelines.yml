@@ -16,7 +16,12 @@ definitions:
     - &dockerLoginHcsSwr >-
       docker login -u $BBPP_HCS_REGION@$BBPP_HCS_ACCESS_KEY -p $BBPP_HCS_SHA256_SECRET_KEY swr.$BBPP_HCS_REGION.myhuaweicloud.com
     - &setupNetrc >-
-      echo "machine bitbucket.org login $BITBUCKET_USERNAME password $BITBUCKET_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      if [ -z "$BITBUCKET_USERNAME" ] || [ -z "$BITBUCKET_TOKEN" ]; then echo "❌ WARNING: BITBUCKET_USERNAME or BITBUCKET_TOKEN is empty! Please define them in Bitbucket Repository Variables."; fi &&
+      echo "machine bitbucket.org login ${BITBUCKET_USERNAME} password ${BITBUCKET_TOKEN}" > ~/.netrc &&
+      mkdir -p /root /go &&
+      cp ~/.netrc /root/.netrc 2>/dev/null || true &&
+      cp ~/.netrc /go/.netrc 2>/dev/null || true &&
+      chmod 600 ~/.netrc /root/.netrc /go/.netrc 2>/dev/null || true
     - &goBuild >-
       goBuild() {
         if [ "$(cat /etc/os-release | grep -i alpine)" ]; then
