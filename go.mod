@@ -4,10 +4,8 @@ go 1.26.3
 
 replace github.com/Trendyol/go-pq-cdc => ./internal/vendor/go-pq-cdc
 
-replace bitbucket.org/daya-engineering/daya-contracts => /home/fitrapujo/works/daya-contracts
-
 require (
-	bitbucket.org/daya-engineering/daya-contracts v0.0.0-00010101000000-000000000000
+	bitbucket.org/daya-engineering/daya-contracts v1.0.1
 	github.com/ThreeDotsLabs/watermill v1.3.7
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.1.3
 	github.com/Trendyol/go-pq-cdc v1.6.8

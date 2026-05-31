@@ -1,3 +1,5 @@
+bitbucket.org/daya-engineering/daya-contracts v1.0.1 h1:BOKTBaU5SpuCAIE73zxcA0bPOup0PXN4rtcw8fe1wG4=
+bitbucket.org/daya-engineering/daya-contracts v1.0.1/go.mod h1:vzOFi/dhzdk39R84w0nhudlme24gPYMtfTB4C9EwD2g=
 buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1 h1:s6hzCXtND/ICdGPTMGk7C+/BFlr2Jg5GyH0NKf4XGXg=
 buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1/go.mod h1:tvtbpgaVXZX4g6Pn+AnzFycuRK3MOz5HJfEGeEllXYM=
 dario.cat/mergo v1.0.2 h1:85+piFYR1tMbRrLcDwR18y4UKJ3aH1Tbzi24VRW1TK8=
