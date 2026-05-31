@@ -46,8 +46,10 @@ spec:
                 name: "{{ .Values.api.name }}"
             - configMapRef:
                 name: "shared-configs"
+            {{- if .Values.api.env.secrets }}
             - secretRef:
                 name: "{{ .Values.api.name }}"
+            {{- end }}
             - secretRef:
                 name: "shared-secrets"
           imagePullPolicy: {{ .Values.api.image.policy | default "IfNotPresent" }}

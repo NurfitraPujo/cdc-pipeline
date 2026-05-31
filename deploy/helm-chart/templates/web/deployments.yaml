@@ -41,8 +41,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: "{{ .Values.web.name }}"
+            {{- if .Values.web.env.secrets }}
             - secretRef:
                 name: "{{ .Values.web.name }}"
+            {{- end }}
           imagePullPolicy: {{ .Values.web.image.policy | default "IfNotPresent" }}
           ports:
             {{- toYaml .Values.web.ports | nindent 12 }}
