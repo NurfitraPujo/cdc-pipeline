@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.web.name }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.web.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.web.name }}
+      app.kubernetes.io/environment: {{ .Values.environment }}
+  template:
+    metadata:
+      {{- with .Values.web.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8}}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ .Values.web.name }}
+        app.kubernetes.io/environment: {{ .Values.environment }}
+    spec:
+      {{- with .Values.web.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: "{{ .Values.web.name }}"
+      securityContext:
+        {{- toYaml .Values.web.securityContext | nindent 8 }}
+      containers:
+        - name: {{ .Values.web.name }}
+          securityContext:
+            {{- toYaml .Values.web.podSecurityContext | nindent 12 }}
+          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
+          {{- if .Values.web.args }}
+          args:
+            {{- toYaml .Values.web.args | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: "{{ .Values.web.name }}"
+            - secretRef:
+                name: "{{ .Values.web.name }}"
+          imagePullPolicy: {{ .Values.web.image.policy | default "IfNotPresent" }}
+          ports:
+            {{- toYaml .Values.web.ports | nindent 12 }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerantions }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.global.dnsConfig }}
+      dnsConfig:
+        {{- toYaml .Values.global.dnsConfig | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.strategy }}
+      strategy:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

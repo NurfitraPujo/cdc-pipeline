@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.web.name }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.web.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Values.web.env.configmap }}
+data:
+{{ toYaml . | indent 2 }}
+{{- end }}

@@ -1,21 +1,29 @@
-FROM node:22-slim
-
+# Stage 1: Build
+FROM node:24-slim AS builder
 WORKDIR /app
-
-# Install pnpm
 RUN npm install -g pnpm
 
-# Copy the entire source code (including node_modules if present on the host)
+# Copy package config and lock files
+COPY package.json pnpm-lock.yaml* ./
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source code and compile TanStack Start project
 COPY . .
+RUN pnpm run build
 
-# Set CI environment variable to avoid TTY issues
-ENV CI=true
+# Stage 2: Runner
+FROM node:24-slim AS runner
+WORKDIR /app
 
-# Only run pnpm install if node_modules does not exist (reusing host node_modules if available)
-RUN if [ ! -d "node_modules" ]; then pnpm install --config.confirm-modules-purge=false; fi
+ENV NODE_ENV=production
+ENV PORT=3000
 
-# Expose port 3000
+# Copy build/SSR artifacts and config
+COPY --from=builder /app/.output ./.output
+COPY --from=builder /app/package.json ./package.json
+
 EXPOSE 3000
 
-# Start Vite dev server after ensuring all dependencies are reconciled without frozen-lockfile issues
-CMD ["sh", "-c", "pnpm install --no-frozen-lockfile && pnpm dev --host"]
+CMD ["node", ".output/server/index.mjs"]

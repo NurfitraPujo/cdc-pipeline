@@ -1,0 +1,6 @@
+node_modules
+.output
+.vinxi
+tsconfig.tsbuildinfo
+.vscode
+.env

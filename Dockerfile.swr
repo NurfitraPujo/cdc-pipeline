@@ -1,0 +1,12 @@
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+
+# Copy pre-compiled binaries from the host build context
+COPY api /app/api
+COPY worker /app/worker
+
+ENV LOG_LEVEL=info
+ENV ENV=production
+EXPOSE 8080 8081
+ENTRYPOINT ["/app/worker"]

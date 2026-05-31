@@ -1,0 +1,33 @@
+# The CCE Standard Cluster doesn't support to reach service from outside the cluster
+# So we need to create an external service for each service, and then create endpoints for them
+# The external service will mapping to the internal service on master node
+{{- range .Values.externalServices }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  labels:
+    app.kubernetes.io/name: {{ .name }}
+    app.kubernetes.io/environment: {{ $.Values.environment }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .port }}
+      targetPort: {{ .targetPort | default .port }}
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: {{ .name }}
+  labels:
+    app.kubernetes.io/name: {{ .name }}
+    app.kubernetes.io/environment: {{ $.Values.environment }}
+subsets:
+  - addresses:
+      - ip: {{ .ip }}
+    ports:
+      - port: {{ .port }}
+        protocol: TCP
+{{- end }}

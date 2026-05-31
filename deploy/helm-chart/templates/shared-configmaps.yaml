@@ -1,0 +1,12 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-configs
+  labels:
+    app.kubernetes.io/name: shared-configs
+    app.kubernetes.io/environment: {{ .Values.environment }}
+{{- with .Values.sharedConfigs.configs }}
+data:
+{{ toYaml . | indent 2 }}
+{{- end }}

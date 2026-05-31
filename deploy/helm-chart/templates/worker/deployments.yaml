@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.worker.name }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.worker.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+spec:
+  {{- if not .Values.worker.hpa.enabled }}
+  replicas: {{ .Values.worker.hpa.minReplicas }}
+  {{- end }}
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.worker.name }}
+      app.kubernetes.io/environment: {{ .Values.environment }}
+  template:
+    metadata:
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8}}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ .Values.worker.name }}
+        app.kubernetes.io/environment: {{ .Values.environment }}
+    spec:
+      {{- with .Values.worker.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: "{{ .Values.worker.name }}"
+      securityContext:
+        {{- toYaml .Values.worker.securityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.worker.probe.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Values.worker.name }}
+          securityContext:
+            {{- toYaml .Values.worker.podSecurityContext | nindent 12 }}
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          {{- if .Values.worker.args }}
+          args:
+            {{- toYaml .Values.worker.args | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: "{{ .Values.worker.name }}"
+            - configMapRef:
+                name: "shared-configs"
+            - secretRef:
+                name: "{{ .Values.worker.name }}"
+            - secretRef:
+                name: "shared-secrets"
+          imagePullPolicy: {{ .Values.worker.image.policy | default "IfNotPresent" }}
+          ports:
+            {{- toYaml .Values.worker.ports | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.worker.probe.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.worker.probe.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- with .Values.worker.probe.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerantions }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.global.dnsConfig }}
+      dnsConfig:
+        {{- toYaml .Values.global.dnsConfig | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.strategy }}
+      strategy:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
