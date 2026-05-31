@@ -5,8 +5,9 @@ options:
   docker: true
   size: 4x
 definitions:
-  docker:
-    memory: 8096
+  services:
+    docker:
+      memory: 8096
   caches:
     external-install: /usr/local/bin/
     go-build-cache: /opt/atlassian/pipelines/agent/build/go-build-cache/
