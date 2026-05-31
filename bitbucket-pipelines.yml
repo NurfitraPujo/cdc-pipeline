@@ -41,7 +41,7 @@ definitions:
         export GOPRIVATE="bitbucket.org/daya-engineering/*"
 
         # Configure Git to dynamically supply the pipeline token for any private repo HTTPS prompt
-        git config --global credential.helper "!f() { echo \"username=x-token-auth\"; echo \"password=${BITBUCKET_TOKEN}\"; }; f"
+        git config --global credential.helper "!f() { echo \"username=${BITBUCKET_USERNAME}\"; echo \"password=${BITBUCKET_TOKEN}\"; }; f"
 
         export GOCACHE="$(pwd)/go-build-cache"
         go mod download
