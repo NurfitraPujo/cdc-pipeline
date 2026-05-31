@@ -35,7 +35,7 @@ definitions:
         local makefileEntrypoint="$1"
 
         export GOPRIVATE="bitbucket.org/daya-engineering/*"
-        git config --global url."https://${BITBUCKET_USERNAME}:${BITBUCKET_TOKEN}@bitbucket.org/".insteadOf "https://bitbucket.org/"
+        git config --global url."https://x-token-auth:${BITBUCKET_TOKEN}@bitbucket.org/".insteadOf "https://bitbucket.org/"
 
         export GOCACHE="$(pwd)/go-build-cache"
         go mod download
