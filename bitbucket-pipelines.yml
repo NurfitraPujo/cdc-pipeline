@@ -21,16 +21,15 @@ definitions:
       goBuild() {
         if [ "$(cat /etc/os-release | grep -i alpine)" ]; then
             echo "Alpine Linux detected. Installing dependencies..."
-            apk update && apk add --no-cache git make gcc musl-dev openssh
+            apk update && apk add --no-cache git make gcc musl-dev
         else
             echo "Debian Linux detected. Installing dependencies..."
-            apt-get update && apt-get install -y git make gcc musl-dev openssh-client
+            apt-get update && apt-get install -y git make gcc musl-dev
         fi
 
         local makefileEntrypoint="$1"
 
         export GOPRIVATE="bitbucket.org/daya-engineering/*"
-        git config --global url."git@bitbucket.org:".insteadOf "https://bitbucket.org/"
 
         export GOCACHE="$(pwd)/go-build-cache"
         go mod download
