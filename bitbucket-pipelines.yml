@@ -15,9 +15,13 @@ definitions:
       export BITBUCKET_COMMIT_SHORT="${BITBUCKET_COMMIT::7}"
     - &dockerLoginHcsSwr >-
       docker login -u $BBPP_HCS_REGION@$BBPP_HCS_ACCESS_KEY -p $BBPP_HCS_SHA256_SECRET_KEY swr.$BBPP_HCS_REGION.myhuaweicloud.com
-    - &setupNetrc >-
+    - &setupNetrc |-
       if [ -z "$BITBUCKET_TOKEN" ]; then echo "❌ WARNING: BITBUCKET_TOKEN is empty! Please define it in Bitbucket Repository Variables."; fi &&
-      echo "machine bitbucket.org login x-token-auth password ${BITBUCKET_TOKEN}" > ~/.netrc &&
+      cat << EOF > ~/.netrc
+      machine bitbucket.org
+      login $BITBUCKET_USERNAME
+      password $BITBUCKET_TOKEN
+      EOF
       mkdir -p /root /go &&
       cp ~/.netrc /root/.netrc 2>/dev/null || true &&
       cp ~/.netrc /go/.netrc 2>/dev/null || true &&
