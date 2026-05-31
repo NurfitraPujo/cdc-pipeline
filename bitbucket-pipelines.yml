@@ -29,6 +29,9 @@ definitions:
 
         local makefileEntrypoint="$1"
 
+        export GOPRIVATE="bitbucket.org/daya-engineering/*"
+        git config --global url."git@bitbucket.org:".insteadOf "https://bitbucket.org/"
+
         export GOCACHE="$(pwd)/go-build-cache"
         go mod download
         go mod tidy
