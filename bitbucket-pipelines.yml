@@ -40,6 +40,9 @@ definitions:
 
         export GOPRIVATE="bitbucket.org/daya-engineering/*"
 
+        # Force Git to use SSH instead of HTTPS for private repositories
+        git config --global url."git@bitbucket.org:".insteadOf "https://bitbucket.org/"
+
         # Configure Git to dynamically supply the pipeline token for any private repo HTTPS prompt
         git config --global credential.helper "!f() { echo \"username=${BITBUCKET_USERNAME}\"; echo \"password=${BITBUCKET_TOKEN}\"; }; f"
 
