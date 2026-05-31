@@ -21,10 +21,10 @@ definitions:
       goBuild() {
         if [ "$(cat /etc/os-release | grep -i alpine)" ]; then
             echo "Alpine Linux detected. Installing dependencies..."
-            apk update && apk add --no-cache git make gcc musl-dev
+            apk update && apk add --no-cache git make gcc musl-dev openssh
         else
             echo "Debian Linux detected. Installing dependencies..."
-            apt-get update && apt-get install -y git make gcc musl-dev
+            apt-get update && apt-get install -y git make gcc musl-dev openssh-client
         fi
 
         local makefileEntrypoint="$1"
