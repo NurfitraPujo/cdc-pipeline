@@ -20,10 +20,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy build/SSR artifacts and config
-COPY --from=builder /app/.output ./.output
+# Copy build/SSR artifacts and dependencies
+COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
 
 EXPOSE 3000
 
-CMD ["node", ".output/server/index.mjs"]
+# Serve the Cloudflare Worker build locally using wrangler dev
+CMD ["npx", "wrangler", "dev", "--port", "3000", "--ip", "0.0.0.0", "--config", "dist/server/wrangler.json"]
