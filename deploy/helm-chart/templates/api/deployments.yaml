@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.api.name }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.api.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+spec:
+  {{- if not .Values.api.hpa.enabled }}
+  replicas: {{ .Values.api.hpa.minReplicas }}
+  {{- end }}
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.api.name }}
+      app.kubernetes.io/environment: {{ .Values.environment }}
+  template:
+    metadata:
+      {{- with .Values.api.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8}}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ .Values.api.name }}
+        app.kubernetes.io/environment: {{ .Values.environment }}
+    spec:
+      {{- with .Values.api.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: "{{ .Values.api.name }}"
+      securityContext:
+        {{- toYaml .Values.api.securityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.api.probe.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Values.api.name }}
+          securityContext:
+            {{- toYaml .Values.api.podSecurityContext | nindent 12 }}
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          {{- if .Values.api.args }}
+          args:
+            {{- toYaml .Values.api.args | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: "{{ .Values.api.name }}"
+            - configMapRef:
+                name: "shared-configs"
+            - secretRef:
+                name: "{{ .Values.api.name }}"
+            - secretRef:
+                name: "shared-secrets"
+          imagePullPolicy: {{ .Values.api.image.policy | default "IfNotPresent" }}
+          ports:
+            {{- toYaml .Values.api.ports | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.api.probe.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.api.probe.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          {{- with .Values.api.probe.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerantions }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.global.dnsConfig }}
+      dnsConfig:
+        {{- toYaml .Values.global.dnsConfig | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.strategy }}
+      strategy:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

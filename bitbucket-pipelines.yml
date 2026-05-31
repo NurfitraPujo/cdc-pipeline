@@ -1,0 +1,299 @@
+image: atlassian/default-image:4
+clone:
+  depth: 5
+options:
+  docker: true
+  size: 4x
+definitions:
+  docker:
+    memory: 8096
+  caches:
+    external-install: /usr/local/bin/
+    go-build-cache: /opt/atlassian/pipelines/agent/build/go-build-cache/
+  yaml-anchors:
+    - &setBitbucketShortCommit >-
+      export BITBUCKET_COMMIT_SHORT="${BITBUCKET_COMMIT::7}"
+    - &dockerLoginHcsSwr >-
+      docker login -u $BBPP_HCS_REGION@$BBPP_HCS_ACCESS_KEY -p $BBPP_HCS_SHA256_SECRET_KEY swr.$BBPP_HCS_REGION.myhuaweicloud.com
+    - &setupNetrc >-
+      echo "machine bitbucket.org login $BITBUCKET_USERNAME password $BITBUCKET_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+    - &goBuild >-
+      goBuild() {
+        if [ "$(cat /etc/os-release | grep -i alpine)" ]; then
+            echo "Alpine Linux detected. Installing dependencies..."
+            apk update && apk add --no-cache git make gcc musl-dev
+        else
+            echo "Debian Linux detected. Installing dependencies..."
+            apt-get update && apt-get install -y git make gcc musl-dev
+        fi
+
+        local makefileEntrypoint="$1"
+
+        export GOCACHE="$(pwd)/go-build-cache"
+        go mod download
+        go mod tidy
+        go mod verify
+
+        make "$makefileEntrypoint"
+        if [ $? -ne 0 ]; then
+            echo "Failed to build $makefileEntrypoint"
+            exit 1
+        fi
+
+        cp bin/* .
+      }
+    - &installDeploymentRequirements >-
+      for req in jq curl wget; do
+        command -v $req >/dev/null 2>&1 && echo "$req is already installed." || (apt-get update && apt-get install -y $req)
+      done && \
+      command -v yq >/dev/null 2>&1 && echo "yq is already installed." || (wget https://github.com/mikefarah/yq/releases/download/v4.34.2/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq) && \
+      command -v argocd >/dev/null 2>&1 && echo "ArgoCD CLI is already installed." || (curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 && chmod +x /usr/local/bin/argocd)
+    - &argocdLogin >-
+      argocd login $ARGOCD_URL --username $ARGOCD_USER --password $ARGOCD_PASSWORD --skip-test-tls --grpc-web
+    - &deployK8s
+      caches:
+        - external-install
+      script:
+        - *installDeploymentRequirements
+        - *argocdLogin
+        - *setBitbucketShortCommit
+        - |
+          # Sync ArgoCD app
+          argocdAppSync() {
+            argocd app sync $ARGOCD_APP_NAME
+            argocd app wait $ARGOCD_APP_NAME --grpc-web --sync --timeout 600
+            argocd app wait $ARGOCD_APP_NAME --grpc-web --operation --timeout 600
+          }
+
+          # Deploy components
+          deployComponents() {
+            echo "Setting API image tag to $TAG"
+            argocd app set $ARGOCD_APP_NAME -p api.image.tag=$TAG
+
+            echo "Setting Worker image tag to $TAG"
+            argocd app set $ARGOCD_APP_NAME -p worker.image.tag=$TAG
+
+            echo "Setting Web image tag to $TAG"
+            argocd app set $ARGOCD_APP_NAME -p web.image.tag=$TAG
+          }
+
+          # Handle staging deployment
+          if [ "$BITBUCKET_DEPLOYMENT_ENVIRONMENT" = "staging" ]; then
+            echo "Deploying to staging environment"
+            if [ -n "$BITBUCKET_TAG" ]; then
+              TAG=$BITBUCKET_TAG
+            else
+              TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
+            fi
+            deployComponents
+            argocdAppSync
+            exit 0
+          fi
+
+          # Handle production deployment
+          if [ "$BITBUCKET_DEPLOYMENT_ENVIRONMENT" = "production" ]; then
+            echo "Deploying to production environment"
+            TAG=$BITBUCKET_TAG
+            deployComponents
+            argocdAppSync
+            exit 0
+          fi
+    - &lintKubeYaml
+      image: golang:1.26-alpine
+      script:
+        - apk update && apk add helm
+        - go install golang.stackrox.io/kube-linter/cmd/kube-linter@v0.6.5
+        - timestamp=$(date +%s) && mkdir -p tmp
+        - |
+          generateManifests() {
+            helm template cdc-pipeline ./deploy/helm-chart --values ./deploy/helm-chart/$1 > ./tmp/$1-$timestamp.yaml
+            if [ $? -ne 0 ]; then
+              echo "Failed to generate manifests from latest Helm chart with $1 values file."
+              exit 1
+            fi
+          }
+
+          executeLint() {
+            lint_output=$(kube-linter lint ./tmp/$1-$timestamp.yaml >> lint-$1.log || true)
+
+            if [ -z "$lint_output" ]; then
+              cat lint-$1.log
+            else
+              echo "Failed to lint generated manifests."
+            fi
+          }
+
+          manifests="values.production.yml values.staging.yml"
+
+          for manifest in $manifests; do
+            generateManifests $manifest
+            executeLint $manifest
+          done
+
+pipelines:
+  branches:
+    release/*:
+      - parallel:
+          - step:
+              name: Test Build Go Backend (no push)
+              image: golang:1.26-alpine
+              max-time: 15
+              size: 4x
+              script:
+                - *setupNetrc
+                - *goBuild
+                - *setBitbucketShortCommit
+                - goBuild build-all
+                - export DOCKER_BUILDKIT=1
+                - docker build --platform linux/amd64 -t cdc-data-pipeline:test . -f Dockerfile.swr
+              services:
+                - docker
+              caches:
+                - docker
+                - go-build-cache
+          - step:
+              name: Test Build Web Dashboard (no push)
+              max-time: 15
+              size: 4x
+              script:
+                - export DOCKER_BUILDKIT=1
+                - docker build --platform linux/amd64 -t cdc-web-dashboard:test ./web -f web/Dockerfile
+              services:
+                - docker
+              caches:
+                - docker
+          - step:
+              name: Lint Kubernetes YAML
+              condition:
+                changesets:
+                  includePaths:
+                    - deploy/helm-chart/**
+              <<: *lintKubeYaml
+
+  tags:
+    "v*-staging":
+      - step:
+          name: Lint Kubernetes YAML
+          condition:
+            changesets:
+              includePaths:
+                - deploy/helm-chart/**
+          <<: *lintKubeYaml
+      - parallel:
+          - step:
+              name: Build & Push Go Backend
+              image: golang:1.26-alpine
+              max-time: 15
+              size: 4x
+              script:
+                - *setupNetrc
+                - *goBuild
+                - *setBitbucketShortCommit
+                - *dockerLoginHcsSwr
+                - goBuild build-all
+                - |
+                  if [ -n "$BITBUCKET_TAG" ]; then
+                    TAG=$BITBUCKET_TAG
+                  else
+                    TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
+                  fi
+                  export DOCKER_BUILDKIT=1
+                  docker build --platform linux/amd64 -t cdc-data-pipeline:$TAG . -f Dockerfile.swr
+                  docker tag cdc-data-pipeline:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-data-pipeline:$TAG
+                  docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-data-pipeline:$TAG
+              services:
+                - docker
+              caches:
+                - docker
+                - go-build-cache
+          - step:
+              name: Build & Push Web Dashboard
+              max-time: 15
+              size: 4x
+              script:
+                - *setBitbucketShortCommit
+                - *dockerLoginHcsSwr
+                - |
+                  if [ -n "$BITBUCKET_TAG" ]; then
+                    TAG=$BITBUCKET_TAG
+                  else
+                    TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
+                  fi
+                  export DOCKER_BUILDKIT=1
+                  docker build --platform linux/amd64 -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
+                  docker tag cdc-web-dashboard:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
+                  docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
+              services:
+                - docker
+              caches:
+                - docker
+      - step:
+          name: Deploy Staging Environment
+          deployment: staging
+          variables:
+            ARGOCD_APP_NAME: "cdc-pipeline-staging"
+          <<: *deployK8s
+
+    "v*":
+      - step:
+          name: Lint Kubernetes YAML
+          condition:
+            changesets:
+              includePaths:
+                - deploy/helm-chart/**
+          <<: *lintKubeYaml
+      - parallel:
+          - step:
+              name: Build & Push Go Backend
+              image: golang:1.26-alpine
+              max-time: 15
+              size: 4x
+              script:
+                - *setupNetrc
+                - *goBuild
+                - *setBitbucketShortCommit
+                - *dockerLoginHcsSwr
+                - goBuild build-all
+                - |
+                  if [ -n "$BITBUCKET_TAG" ]; then
+                    TAG=$BITBUCKET_TAG
+                  else
+                    TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
+                  fi
+                  export DOCKER_BUILDKIT=1
+                  docker build --platform linux/amd64 -t cdc-data-pipeline:$TAG . -f Dockerfile.swr
+                  docker tag cdc-data-pipeline:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-data-pipeline:$TAG
+                  docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-data-pipeline:$TAG
+              services:
+                - docker
+              caches:
+                - docker
+                - go-build-cache
+          - step:
+              name: Build & Push Web Dashboard
+              max-time: 15
+              size: 4x
+              script:
+                - *setBitbucketShortCommit
+                - *dockerLoginHcsSwr
+                - |
+                  if [ -n "$BITBUCKET_TAG" ]; then
+                    TAG=$BITBUCKET_TAG
+                  else
+                    TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
+                  fi
+                  export DOCKER_BUILDKIT=1
+                  docker build --platform linux/amd64 -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
+                  docker tag cdc-web-dashboard:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
+                  docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
+              services:
+                - docker
+              caches:
+                - docker
+      - step:
+          name: Deploy Production Environment
+          deployment: production
+          trigger: manual
+          variables:
+            ARGOCD_APP_NAME: "cdc-pipeline-production"
+          <<: *deployK8s

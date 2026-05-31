@@ -1,0 +1,23 @@
+{{- range .Values.api.services }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ .name }}"
+  labels:
+    app.kubernetes.io/name: "{{ $.Values.api.name }}"
+    app.kubernetes.io/environment: "{{ $.Values.environment }}"
+spec:
+  type: "{{ .type }}"
+  ports:
+    - port: {{ .port }}
+      targetPort: {{ .targetPort | default "http" }}
+      {{- if and (eq .type "NodePort") .nodePort }}
+      nodePort: {{ .nodePort }}
+      {{- end }}
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: "{{ $.Values.api.name }}"
+    app.kubernetes.io/environment: "{{ $.Values.environment }}"
+{{- end }}

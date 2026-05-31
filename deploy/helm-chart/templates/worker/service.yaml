@@ -1,0 +1,20 @@
+{{- range .Values.worker.services }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ .name }}"
+  labels:
+    app.kubernetes.io/name: "{{ $.Values.worker.name }}"
+    app.kubernetes.io/environment: "{{ $.Values.environment }}"
+spec:
+  type: "{{ .type }}"
+  ports:
+    - port: {{ .port }}
+      targetPort: {{ .targetPort | default "metrics" }}
+      protocol: TCP
+      name: metrics
+  selector:
+    app.kubernetes.io/name: "{{ $.Values.worker.name }}"
+    app.kubernetes.io/environment: "{{ $.Values.environment }}"
+{{- end }}

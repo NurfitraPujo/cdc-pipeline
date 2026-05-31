@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cdc-pipeline-cd
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@bitbucket.org:daya-engineering/cdc-pipeline.git
+    path: deploy/helm-chart/argocd-app
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    syncOptions:
+      - Validate=false
+      - CreateNamespace=true
+      - PrunePropagationPolicy=background
+      - PruneLast=true
+    retry:
+      limit: 6
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
