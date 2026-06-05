@@ -50,8 +50,10 @@ spec:
             - secretRef:
                 name: "{{ .Values.worker.name }}"
             {{- end }}
+            {{- if .Values.sharedConfigs.secrets }}
             - secretRef:
                 name: "shared-secrets"
+            {{- end }}
           imagePullPolicy: {{ .Values.worker.image.policy | default "IfNotPresent" }}
           ports:
             {{- toYaml .Values.worker.ports | nindent 12 }}

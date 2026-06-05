@@ -50,8 +50,10 @@ spec:
             - secretRef:
                 name: "{{ .Values.api.name }}"
             {{- end }}
+            {{- if .Values.sharedConfigs.secrets }}
             - secretRef:
                 name: "shared-secrets"
+            {{- end }}
           imagePullPolicy: {{ .Values.api.image.policy | default "IfNotPresent" }}
           ports:
             {{- toYaml .Values.api.ports | nindent 12 }}
