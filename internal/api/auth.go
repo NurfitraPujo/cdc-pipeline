@@ -10,6 +10,7 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/nats-io/nats.go"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -113,4 +114,51 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// EnsureDevAuth seeds a default admin user into NATS KV when one is not already
+// present. It is a no-op in production. Intended to be called once at API
+// startup so local development and E2E tests can authenticate immediately.
+//
+// The default credentials can be overridden via env vars:
+//   - DEV_ADMIN_USERNAME  (default: "admin")
+//   - DEV_ADMIN_PASSWORD  (default: "admin")
+func EnsureDevAuth(kv nats.KeyValue) error {
+	if os.Getenv("ENV") == "production" {
+		return nil
+	}
+
+	if _, err := kv.Get(protocol.KeyAuthConfig); err == nil {
+		return nil
+	}
+
+	username := os.Getenv("DEV_ADMIN_USERNAME")
+	if username == "" {
+		username = "admin"
+	}
+	password := os.Getenv("DEV_ADMIN_PASSWORD")
+	if password == "" {
+		password = "admin"
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash dev password: %w", err)
+	}
+
+	cfg := protocol.UserConfig{Username: username, Password: string(hashed)}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate dev user: %w", err)
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal dev user: %w", err)
+	}
+
+	if _, err := kv.Put(protocol.KeyAuthConfig, data); err != nil {
+		return fmt.Errorf("put dev user: %w", err)
+	}
+
+	return nil
 }

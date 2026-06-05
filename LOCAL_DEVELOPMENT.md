@@ -4,6 +4,29 @@ This guide outlines how to set up, run, and test the CDC Data Pipeline locally. 
 
 ---
 
+## Enabling the Local CI Safety Nets (Required)
+
+After cloning the repository, you **must** run:
+
+```bash
+make setup-hooks
+```
+
+This configures Git to use the hooks in `.git-hooks/` (instead of `.git/hooks/`) and makes them executable. From this point on, every commit and push is gated by local checks:
+
+- **`pre-commit`** — runs `go vet`, `golangci-lint` (if installed), `pnpm check` (Biome + tsc), and fast Go unit tests. A failing check **blocks the commit**.
+- **`pre-push`** — runs Go + frontend unit tests, rebuilds the `cdc-pipeline-api` and `cdc-pipeline-web-dashboard` container images, and runs the full Playwright E2E suite. A failing check **blocks the push**.
+
+To skip the slow container rebuild + E2E stage (e.g. for a local-only change) without disabling unit tests, prefix the commit subject with `[E2E NOT CHECKED]`, e.g.:
+
+```bash
+git commit -m "[E2E NOT CHECKED] docs: fix typo in README"
+```
+
+This is logged in the Git history so reviewers know the push was not fully CI-gated.
+
+---
+
 ## Running Services Separately (Bare Metal)
 
 ### Backend (Go)

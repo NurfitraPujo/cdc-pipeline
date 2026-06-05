@@ -27,8 +27,8 @@ function DashboardPage() {
 		refetchInterval: REFRESH_INTERVAL,
 	});
 
-	const healthyPercent = data?.total_pipelines
-		? `${Math.round((data.healthy_count / data.total_pipelines) * 100)}%`
+	const healthyPercent = data?.totalPipelines
+		? `${Math.round((data.healthyCount / data.totalPipelines) * 100)}%`
 		: null;
 
 	return (
@@ -52,15 +52,15 @@ function DashboardPage() {
 			<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
 				<MetricCard
 					title="Total Pipelines"
-					value={data?.total_pipelines ?? 0}
-					description={`${data?.healthy_count ?? 0} healthy, ${data?.error_count ?? 0} errors`}
+					value={data?.totalPipelines ?? 0}
+					description={`${data?.healthyCount ?? 0} healthy, ${data?.errorCount ?? 0} errors`}
 					icon={Database}
 					isLoading={isLoading}
 				/>
 
 				<MetricCard
 					title="Rows Synchronized"
-					value={data?.total_rows_synchronized ?? 0}
+					value={data?.totalRowsSynchronized ?? 0}
 					description="Total rows processed across all pipelines"
 					icon={Rows3}
 					isLoading={isLoading}
@@ -69,14 +69,14 @@ function DashboardPage() {
 				<MetricCard
 					title="Healthy"
 					value={healthyPercent ?? "0%"}
-					description={`${data?.healthy_count ?? 0} of ${data?.total_pipelines ?? 0} pipelines`}
+					description={`${data?.healthyCount ?? 0} of ${data?.totalPipelines ?? 0} pipelines`}
 					icon={Activity}
 					isLoading={isLoading}
 				/>
 
 				<MetricCard
 					title="Average Lag"
-					value={data ? formatLag(data.avg_lag_ms) : "0ms"}
+					value={data ? formatLag(data.avgLagMs) : "0ms"}
 					description="Average processing latency"
 					icon={Clock}
 					isLoading={isLoading}

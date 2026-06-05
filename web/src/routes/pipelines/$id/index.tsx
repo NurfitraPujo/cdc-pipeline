@@ -14,12 +14,8 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { pipelinesApi } from "@/api/pipelines";
-import type {
-	PipelineStatus,
-	PipelineStatusResponse,
-	SSEMessage,
-	TableStats,
-} from "@/api/types";
+import { sourcesApi } from "@/api/sources";
+import type { SSEMessage, TableStats } from "@/api/types";
 import { MetricCard } from "@/components/MetricCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,16 +31,6 @@ import { useSSE } from "@/hooks/useSSE";
 export const Route = createFileRoute("/pipelines/$id/")({
 	component: PipelineDetailPage,
 });
-
-const statusVariantMap: Record<
-	PipelineStatus,
-	"success" | "destructive" | "warning" | "secondary"
-> = {
-	running: "success",
-	stopped: "secondary",
-	error: "destructive",
-	paused: "warning",
-};
 
 function PipelineDetailPage() {
 	const { id } = Route.useParams();
@@ -65,8 +51,15 @@ function PipelineDetailPage() {
 		queryFn: () => pipelinesApi.get(id),
 	});
 
+	const { data: sources = [] } = useQuery({
+		queryKey: ["sources"],
+		queryFn: () => sourcesApi.list(),
+	});
+
+	const sourceById = new Map(sources.map((s) => [s.id, s]));
+
 	// Fetch initial status
-	const { data: initialStatus } = useQuery<PipelineStatusResponse>({
+	const { data: initialStatus } = useQuery({
 		queryKey: ["pipeline-status", id],
 		queryFn: () => pipelinesApi.getStatus(id),
 		enabled: !!id,
@@ -75,14 +68,18 @@ function PipelineDetailPage() {
 	// Initialize state from initial status
 	useEffect(() => {
 		if (initialStatus) {
-			setTables(initialStatus.tables || {});
-			setSinks(initialStatus.sinks || {});
+			setTables((initialStatus.tables as Record<string, TableStats>) || {});
+			setSinks(
+				(initialStatus.sinks as Record<string, Record<string, TableStats>>) ||
+					{},
+			);
 		}
 	}, [initialStatus]);
 
 	// Handle real-time updates
 	const { isConnected } = useSSE<SSEMessage>(`/pipelines/${id}/metrics`, {
-		onMessage: (msg) => {
+		onMessage: (raw) => {
+			const msg = raw as SSEMessage;
 			if (!msg || !msg.key) return;
 
 			const key = msg.key;
@@ -95,7 +92,7 @@ function PipelineDetailPage() {
 				// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
 				const parts = key.split(".");
 				const tableName = parts[8] || data.tableName;
-				const sinkID = msg.sink_id;
+				const sinkID = msg.sinkId;
 
 				if (sinkID) {
 					// Update per-sink stats
@@ -108,22 +105,22 @@ function PipelineDetailPage() {
 					}));
 
 					// Update aggregated table stats (exclude debug)
-					if (!msg.is_debug) {
+					if (!msg.isDebug) {
 						setTables((prev) => {
-							const current = prev[tableName] || { total_synced: 0, lag_ms: 0 };
+							const current = prev[tableName] || { totalSynced: 0, lagMs: 0 };
 							const next = { ...data, tableName };
 
 							// Simple aggregation: max for count and lag
-							if (data.total_synced > current.total_synced) {
-								next.total_synced = data.total_synced;
+							if (data.totalSynced > current.totalSynced) {
+								next.totalSynced = data.totalSynced;
 							} else {
-								next.total_synced = current.total_synced;
+								next.totalSynced = current.totalSynced;
 							}
 
-							if (data.lag_ms > current.lag_ms) {
-								next.lag_ms = data.lag_ms;
+							if (data.lagMs > current.lagMs) {
+								next.lagMs = data.lagMs;
 							} else {
-								next.lag_ms = current.lag_ms;
+								next.lagMs = current.lagMs;
 							}
 
 							return { ...prev, [tableName]: next };
@@ -179,12 +176,12 @@ function PipelineDetailPage() {
 
 	const tableList = Object.values(tables);
 	const totalEvents = tableList.reduce(
-		(sum, t) => sum + (t.total_synced || 0),
+		(sum, t) => sum + (t.totalSynced || 0),
 		0,
 	);
 	const avgLag = tableList.length
 		? Math.round(
-				tableList.reduce((sum, t) => sum + (t.lag_ms || 0), 0) /
+				tableList.reduce((sum, t) => sum + (t.lagMs || 0), 0) /
 					tableList.length,
 			)
 		: 0;
@@ -200,9 +197,7 @@ function PipelineDetailPage() {
 							Back
 						</Link>
 					</Button>
-					<Badge variant={statusVariantMap[pipeline.status]}>
-						{pipeline.status}
-					</Badge>
+					<Badge variant="secondary">Configured</Badge>
 					{isConnected ? (
 						<Badge variant="success" className="gap-1">
 							<Wifi className="h-3 w-3" />
@@ -266,7 +261,7 @@ function PipelineDetailPage() {
 				/>
 				<MetricCard
 					title="Tables"
-					value={pipeline.source.tables.length}
+					value={pipeline.tables.length}
 					description="Monitored tables"
 					icon={Table}
 					isLoading={isLoadingPipeline}
@@ -287,40 +282,34 @@ function PipelineDetailPage() {
 					<CardHeader>
 						<div className="flex items-center gap-2">
 							<Database className="h-5 w-5 text-muted-foreground" />
-							<CardTitle>Source</CardTitle>
+							<CardTitle>Sources</CardTitle>
 						</div>
 						<CardDescription>
-							{pipeline.source.type.toUpperCase()} - {pipeline.source.name}
+							{pipeline.sources.length} configured source
+							{pipeline.sources.length === 1 ? "" : "s"}
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-4">
-						<div className="grid grid-cols-2 gap-4">
-							<div>
-								<p className="text-sm text-muted-foreground">Host</p>
-								<p className="font-medium">{pipeline.source.connection.host}</p>
-							</div>
-							<div>
-								<p className="text-sm text-muted-foreground">Port</p>
-								<p className="font-medium">{pipeline.source.connection.port}</p>
-							</div>
-							<div>
-								<p className="text-sm text-muted-foreground">Database</p>
-								<p className="font-medium">
-									{pipeline.source.connection.database}
-								</p>
-							</div>
-							<div>
-								<p className="text-sm text-muted-foreground">Username</p>
-								<p className="font-medium">
-									{pipeline.source.connection.username}
-								</p>
-							</div>
+						<div className="flex flex-wrap gap-2">
+							{pipeline.sources.map((sourceId) => {
+								const src = sourceById.get(sourceId);
+								return (
+									<Badge
+										key={sourceId}
+										variant="secondary"
+										className="px-3 py-1"
+									>
+										<Database className="mr-2 h-3 w-3" />
+										{src ? `${sourceId} (${src.type})` : sourceId}
+									</Badge>
+								);
+							})}
 						</div>
 						<div>
 							<p className="text-sm text-muted-foreground mb-2">Tables</p>
 							<div className="flex flex-wrap gap-2">
-								{pipeline.source.tables.map((table) => (
-									<Badge key={table} variant="secondary">
+								{pipeline.tables.map((table) => (
+									<Badge key={table} variant="outline">
 										{table}
 									</Badge>
 								))}
@@ -405,17 +394,17 @@ function PipelineDetailPage() {
 												</Badge>
 											</td>
 											<td className="text-right py-3 px-4 font-semibold">
-												{table.total_synced?.toLocaleString()}
+												{table.totalSynced?.toLocaleString()}
 											</td>
 											<td className="text-right py-3 px-4">
 												{table.rps?.toFixed(1)}
 											</td>
 											<td className="text-right py-3 px-4 font-mono">
-												{table.lag_ms}ms
+												{table.lagMs}ms
 											</td>
 											<td className="text-right py-3 px-4 text-xs text-muted-foreground">
-												{table.updated_at
-													? new Date(table.updated_at).toLocaleTimeString()
+												{table.updatedAt
+													? new Date(table.updatedAt).toLocaleTimeString()
 													: "--"}
 											</td>
 										</tr>
@@ -475,13 +464,13 @@ function PipelineDetailPage() {
 														>
 															<td className="py-2 px-4">{tableName}</td>
 															<td className="text-right py-2 px-4 font-medium">
-																{stats.total_synced?.toLocaleString()}
+																{stats.totalSynced?.toLocaleString()}
 															</td>
 															<td className="text-right py-2 px-4 font-mono">
-																{stats.lag_ms}ms
+																{stats.lagMs}ms
 															</td>
 															<td className="text-right py-2 px-4 text-destructive">
-																{stats.error_count || 0}
+																{stats.errorCount || 0}
 															</td>
 														</tr>
 													),

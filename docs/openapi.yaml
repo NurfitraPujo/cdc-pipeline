@@ -1,0 +1,1262 @@
+openapi: 3.0.3
+info:
+  title: CDC Pipeline Control Plane API
+  version: 1.0.0
+  description: |
+    HTTP control plane for the CDC (Change Data Capture) Pipeline platform.
+
+    The control plane manages the lifecycle of CDC pipelines, source
+    connections, and sink connections, all persisted in NATS KV. The
+    worker process (`cmd/pipeline`) is a separate binary that consumes
+    this configuration and runs the actual CDC pipelines; worker-internal
+    types (messages, checkpoints, table stats, etc.) are intentionally
+    NOT modeled in this spec.
+
+    All routes are mounted under `/api/v1`.
+
+    ## Authentication
+
+    The `/login` endpoint is public and accepts a JSON body with
+    `username` and `password` fields. On success it returns a JWT
+    (HS256, 24h expiry) that must be sent on every subsequent request as:
+
+        Authorization: Bearer <token>
+
+    All other endpoints require a valid Bearer token. Missing or invalid
+    tokens return `401`.
+servers:
+  - url: /api/v1
+    description: Control plane API (same-origin)
+
+tags:
+  - name: Auth
+    description: Login and token issuance
+  - name: Global
+    description: Cluster-wide default configuration
+  - name: Stats
+    description: Aggregated metrics and dashboard data
+  - name: Pipelines
+    description: CDC pipeline lifecycle and live status
+  - name: Sources
+    description: Source database connection configuration
+  - name: Sinks
+    description: Sink destination connection configuration
+  - name: Workers
+    description: Worker process health and heartbeat
+
+security:
+  - BearerAuth: []
+
+paths:
+  /login:
+    post:
+      tags: [Auth]
+      summary: Authenticate and obtain a JWT
+      description: |
+        Exchanges username/password credentials for a signed JWT.
+        This endpoint is the only public route; it does not require
+        an `Authorization` header.
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /global:
+    get:
+      tags: [Global]
+      summary: Get global default configuration
+      description: Returns the cluster-wide default configuration for all pipelines.
+      operationId: getGlobalConfig
+      responses:
+        '200':
+          description: Global configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags: [Global]
+      summary: Update global default configuration
+      description: |
+        Replaces the global default configuration. The body is validated
+        against the same rules as pipeline configuration timeouts.
+
+        A `429` is returned if any pipeline is currently in a transitioning
+        state (e.g. restarting); the server refuses to mutate global
+        configuration while a transition is in flight because the change
+        would be applied inconsistently across pipelines.
+      operationId: updateGlobalConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlobalConfig'
+      responses:
+        '200':
+          description: Updated global configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TransitionInProgress'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /stats/summary:
+    get:
+      tags: [Stats]
+      summary: Get aggregated global stats summary
+      description: |
+        Returns pre-aggregated metrics across all pipelines. The server
+        caches the summary for 30 seconds; on a stale or missing cache
+        it recomputes on demand using a singleflight lock to avoid
+        stampedes.
+      operationId: getStatsSummary
+      responses:
+        '200':
+          description: Aggregated stats summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: |
+                  Free-form summary object. Fields include
+                  `total_pipelines`, `healthy_count`, `error_count`,
+                  `transitioning_count`, `total_rows_synced`,
+                  `avg_lag_ms`. Modeled as `additionalProperties: true`
+                  because the underlying `StatsSummary` type is a
+                  worker-internal type not exposed in this spec.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /stats/history:
+    get:
+      tags: [Stats]
+      summary: Get historical metrics
+      description: |
+        Returns time-series history points. Currently always returns an
+        empty array; the time-series requirement has been removed.
+      operationId: getStatsHistory
+      responses:
+        '200':
+          description: History points (always empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+                description: |
+                  Always an empty array. Item shape mirrors the
+                  worker-internal `HistoryPoint` type but is not modeled
+                  here as a reusable schema.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /pipelines:
+    get:
+      tags: [Pipelines]
+      summary: List all pipelines
+      description: |
+        Returns a paginated, optionally filtered list of pipelines.
+        Query parameters:
+
+        - `search` (optional): case-insensitive substring match against
+          pipeline `id` and `name`.
+        - `status` (optional): exact-match status filter. Computed from
+          the pipeline's transition state and worker heartbeat.
+        - `page` (optional, default `1`): 1-based page index.
+        - `limit` (optional, default `10`): page size.
+      operationId: listPipelines
+      parameters:
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [Healthy, Transitioning, Error]
+        - in: query
+          name: page
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+      responses:
+        '200':
+          description: Paginated pipeline list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [Pipelines]
+      summary: Create a new pipeline
+      description: |
+        Creates a new pipeline configuration. The body is validated;
+        every referenced `source` and `sink` ID must already exist
+        in NATS KV or the request is rejected with `400`.
+
+        A `429` is returned if the pipeline (by `id`) is currently in
+        a transitioning state. The `started_at` field of the error
+        response carries the timestamp at which the transition started.
+      operationId: createPipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PipelineConfig'
+      responses:
+        '201':
+          description: Pipeline created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TransitionInProgress'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pipelines/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Pipelines]
+      summary: Get a single pipeline
+      operationId: getPipeline
+      responses:
+        '200':
+          description: Pipeline configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags: [Pipelines]
+      summary: Update an existing pipeline
+      description: |
+        Replaces the pipeline configuration. The path `id` overrides
+        any `id` in the body. Referenced sources and sinks must exist.
+
+        A `429` is returned if the pipeline is currently transitioning;
+        the `started_at` field carries the transition start time.
+      operationId: updatePipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PipelineConfig'
+      responses:
+        '200':
+          description: Updated pipeline configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TransitionInProgress'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [Pipelines]
+      summary: Delete a pipeline
+      operationId: deletePipeline
+      responses:
+        '204':
+          description: Pipeline deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pipelines/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Pipelines]
+      summary: Get live pipeline status and per-table stats
+      description: |
+        Returns an aggregated view of the pipeline's runtime state:
+
+        - `status`: raw key/value snapshot of all NATS KV entries
+          under the pipeline's status prefix (checkpoints, per-sink
+          stats, transition state). Keys are NATS KV keys; values are
+          their deserialized JSON. Modeled as
+          `additionalProperties: true` because values can be any of
+          several worker-internal types.
+        - `tables`: aggregated per-table stats across all production
+          (non-debug) sinks.
+        - `sinks`: per-sink, per-table raw stats.
+      operationId: getPipelineStatus
+      responses:
+        '200':
+          description: Pipeline status payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pipelines/{id}/restart:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    post:
+      tags: [Pipelines]
+      summary: Trigger a pipeline restart
+      description: |
+        Writes a `PipelineTransitionState` entry to NATS KV to signal
+        the worker to reload the pipeline. The endpoint returns `202`
+        immediately; the actual restart is asynchronous.
+      operationId: restartPipeline
+      responses:
+        '202':
+          description: Restart accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pipelines/{id}/metrics:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Pipelines]
+      summary: Stream pipeline metrics (Server-Sent Events)
+      description: |
+        Opens a `text/event-stream` connection and pushes real-time
+        updates as the pipeline's NATS KV status keys change. The
+        stream is backed by a NATS KV `Watch` on the pipeline's status
+        prefix.
+
+        Each SSE `message` event carries a JSON object with the
+        changed NATS KV key, its deserialized value, the originating
+        `sink_id` (if applicable), and an `is_debug` flag. The exact
+        event payload shape is intentionally NOT part of this OpenAPI
+        contract — clients should treat it as opaque worker-emitted
+        data.
+      operationId: streamPipelineMetrics
+      responses:
+        '200':
+          description: SSE stream of pipeline metric updates
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Server-Sent Events payload. Each event's `data` field
+                  is a JSON object whose shape is not part of this
+                  contract.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /sources:
+    get:
+      tags: [Sources]
+      summary: List all source connections
+      description: |
+        Returns all source configurations. The `pass` field is
+        decrypted before being returned.
+      operationId: listSources
+      responses:
+        '200':
+          description: Source list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [Sources]
+      summary: Create a new source connection
+      description: |
+        Creates a new source configuration. The `pass` field is
+        encrypted at rest by the server before being persisted to
+        NATS KV.
+      operationId: createSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceConfig'
+      responses:
+        '201':
+          description: Source created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /sources/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Sources]
+      summary: Get a single source connection
+      description: Returns the source configuration with `pass` decrypted.
+      operationId: getSource
+      responses:
+        '200':
+          description: Source configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags: [Sources]
+      summary: Update an existing source connection
+      description: |
+        Replaces the source configuration. The path `id` overrides
+        any `id` in the body. The `pass` field is encrypted at rest.
+      operationId: updateSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceConfig'
+      responses:
+        '200':
+          description: Updated source configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [Sources]
+      summary: Delete a source connection
+      operationId: deleteSource
+      responses:
+        '204':
+          description: Source deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /sources/{id}/schema:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Sources]
+      summary: List available schemas for a source
+      description: |
+        Returns the schemas discoverable on the source database. The
+        current implementation returns a static list; in a future
+        release this may trigger live discovery via a worker.
+      operationId: getSourceSchema
+      responses:
+        '200':
+          description: Available schemas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceSchemaResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sources/{id}/tables:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Sources]
+      summary: List discovered tables for a source
+      description: |
+        Returns all tables whose metadata has been discovered and
+        persisted by the worker. Tables are filtered to those whose
+        NATS KV key matches `*.sources.{id}.tables.*.metadata`.
+      operationId: listSourceTables
+      responses:
+        '200':
+          description: Discovered tables
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceTablesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /sinks:
+    get:
+      tags: [Sinks]
+      summary: List all sink connections
+      description: |
+        Returns all sink configurations. The `dsn` field is decrypted
+        before being returned.
+      operationId: listSinks
+      responses:
+        '200':
+          description: Sink list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SinkListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [Sinks]
+      summary: Create a new sink connection
+      description: |
+        Creates a new sink configuration. The `dsn` field is encrypted
+        at rest by the server before being persisted to NATS KV.
+      operationId: createSink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SinkConfig'
+      responses:
+        '201':
+          description: Sink created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SinkConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /sinks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Sinks]
+      summary: Get a single sink connection
+      description: Returns the sink configuration with `dsn` decrypted.
+      operationId: getSink
+      responses:
+        '200':
+          description: Sink configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SinkConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags: [Sinks]
+      summary: Update an existing sink connection
+      description: |
+        Replaces the sink configuration. The path `id` overrides any
+        `id` in the body. The `dsn` field is encrypted at rest.
+      operationId: updateSink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SinkConfig'
+      responses:
+        '200':
+          description: Updated sink configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SinkConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [Sinks]
+      summary: Delete a sink connection
+      operationId: deleteSink
+      responses:
+        '204':
+          description: Sink deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /workers/{id}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [Workers]
+      summary: Get a worker's current heartbeat
+      description: |
+        Returns the most recent heartbeat for the given worker ID.
+        Worker heartbeats are written by the worker process
+        (`cmd/pipeline`) and pruned by the API if older than 60
+        seconds. The `WorkerHeartbeat` type is a worker-internal type
+        and is intentionally not modeled as a reusable schema in this
+        spec; the response is `additionalProperties: true`.
+      operationId: getWorkerHeartbeat
+      responses:
+        '200':
+          description: Worker heartbeat
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: |
+                  Worker heartbeat payload. Fields include `worker_id`,
+                  `status`, `uptime_sec`, `updated_at`. Modeled as
+                  `additionalProperties: true` because `WorkerHeartbeat`
+                  is a worker-internal type.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    BasicAuth:
+      type: http
+      scheme: basic
+      description: |
+        HTTP Basic authentication. Declared for documentation/legacy
+        purposes only; the actual `/login` endpoint accepts credentials
+        in the JSON body, not via the HTTP Basic header.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Custom JWT issued by `/login`. Send as
+        `Authorization: Bearer <token>` on every request to a protected
+        route.
+
+  parameters:
+    PathID:
+      in: path
+      name: id
+      required: true
+      description: Resource identifier (alphanumeric).
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9]+$'
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid authentication token (or bad credentials on /login)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TransitionInProgress:
+      description: |
+        A transition (restart, reload) is currently in progress for
+        this resource. The `started_at` field carries the transition
+        start timestamp when available.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      description: Standard error envelope returned by all endpoints.
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: pipeline not found
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Set only on `429` transition-state errors. Carries the
+            timestamp at which the in-flight transition started. The
+            field is omitted from the response (due to `omitempty` on
+            the Go struct) when no transition is active.
+          example: '2025-01-02T15:04:05Z07:00'
+
+    LoginRequest:
+      type: object
+      description: Credentials for `/login`. Both fields are required.
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: admin
+        password:
+          type: string
+          format: password
+          example: admin
+
+    LoginResponse:
+      type: object
+      description: Successful login response.
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: HS256-signed JWT (24h expiry).
+          example: eyJhbGciOiJIUzI1NiIs...
+
+    UserConfig:
+      type: object
+      description: |
+        User/credential record persisted in NATS KV under
+        `cdc.config.auth`. The `password` field is stored as a
+        bcrypt hash; it is not exposed via the API and is included
+        here only for completeness of the internal contract.
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        password:
+          type: string
+          minLength: 5
+          maxLength: 100
+          description: Bcrypt-hashed password.
+
+    RetryConfig:
+      type: object
+      description: Retry policy used by both global and per-pipeline config.
+      properties:
+        max_retries:
+          type: integer
+          minimum: 0
+          default: 0
+        initial_interval:
+          type: string
+          description: Initial backoff interval, e.g. "1s".
+          example: 1s
+        max_interval:
+          type: string
+          description: Maximum backoff interval, e.g. "30s".
+          example: 30s
+        enable_dlq:
+          type: boolean
+          default: false
+
+    GlobalConfig:
+      type: object
+      description: Cluster-wide default configuration applied to all pipelines.
+      required: [batch_size, batch_wait, retry]
+      properties:
+        batch_size:
+          type: integer
+          minimum: 1
+          description: Default number of messages per batch.
+        batch_wait:
+          type: string
+          description: Default max time to wait before flushing a batch, e.g. "5s".
+          example: 5s
+        retry:
+          $ref: '#/components/schemas/RetryConfig'
+        drain_timeout:
+          type: string
+          description: Time given to in-flight messages to drain on shutdown, e.g. "30s".
+          nullable: true
+          example: 30s
+        shutdown_timeout:
+          type: string
+          description: Hard deadline for graceful shutdown, e.g. "30s".
+          nullable: true
+          example: 30s
+        stabilization_delay:
+          type: string
+          description: Delay after a transition before considering state stable, e.g. "2s".
+          nullable: true
+          example: 2s
+        crash_recovery_delay:
+          type: string
+          description: Delay before restarting after a crash, e.g. "5s".
+          nullable: true
+          example: 5s
+        global_reload_delay:
+          type: string
+          description: Debounce delay for global config reloads, e.g. "2s".
+          nullable: true
+          example: 2s
+
+    ProcessorConfig:
+      type: object
+      description: Inline message processor configuration.
+      required: [name, type]
+      properties:
+        name:
+          type: string
+          description: Unique processor name within the pipeline.
+        type:
+          type: string
+          description: Processor type, e.g. "mask", "filter", "custom".
+        options:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Free-form processor-specific options.
+        operation_types:
+          type: array
+          nullable: true
+          description: |
+            Operation types this processor applies to. The underlying
+            `OperationType` enum is a worker-internal type, so items
+            are modeled as plain strings.
+          items:
+            type: string
+
+    PipelineConfig:
+      type: object
+      description: CDC pipeline configuration.
+      required: [id, name, sources, sinks, tables]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9]+$'
+          description: Unique pipeline identifier (alphanumeric).
+        name:
+          type: string
+          description: Human-readable pipeline name.
+        sources:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: IDs of source connections (must exist in NATS KV).
+        sinks:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: IDs of sink connections (must exist in NATS KV).
+        processors:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/ProcessorConfig'
+        tables:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Tables to replicate (whitelist).
+        batch_size:
+          type: integer
+          nullable: true
+          description: Per-pipeline override for global batch_size.
+        batch_wait:
+          type: string
+          nullable: true
+          description: Per-pipeline override for global batch_wait.
+          example: 10s
+        retry:
+          $ref: '#/components/schemas/RetryConfig'
+          nullable: true
+          description: Per-pipeline retry override; falls back to global.
+
+    SourceConfig:
+      type: object
+      description: Source database connection configuration.
+      required: [id, type, host, port, database]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9]+$'
+          description: Unique source identifier (alphanumeric).
+        type:
+          type: string
+          enum: [postgres]
+          description: Source database type. Only "postgres" is supported.
+        host:
+          type: string
+          description: Database hostname.
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Database port.
+        user:
+          type: string
+          nullable: true
+          description: Database user.
+        pass:
+          type: string
+          nullable: true
+          format: password
+          description: |
+            Database password. On `POST`/`PUT`, the server encrypts this
+            value at rest before persisting to NATS KV. On `GET`, the
+            server decrypts it before returning.
+        database:
+          type: string
+          description: Database name.
+        slot_name:
+          type: string
+          nullable: true
+          description: Postgres replication slot name.
+        publication_name:
+          type: string
+          nullable: true
+          description: Postgres publication name.
+        batch_size:
+          type: integer
+          nullable: true
+        batch_wait:
+          type: string
+          nullable: true
+          example: 5s
+        discovery_interval:
+          type: string
+          nullable: true
+          description: How often to re-discover tables, e.g. "30s".
+          example: 30s
+        snapshot_chunk_size:
+          type: integer
+          nullable: true
+        snapshot_interval:
+          type: string
+          nullable: true
+          example: 1s
+        schemas:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Schema whitelist. Empty/null means all schemas.
+        tables:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Table whitelist within the selected schemas.
+
+    SinkConfig:
+      type: object
+      description: Sink destination connection configuration.
+      required: [id, type, dsn]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9]+$'
+          description: Unique sink identifier (alphanumeric).
+        type:
+          type: string
+          enum: [databend, postgres_debug]
+          description: |
+            Sink type. `postgres_debug` sinks are excluded from
+            production metrics.
+        dsn:
+          type: string
+          description: |
+            Data Source Name. On `POST`/`PUT`, the server encrypts this
+            value at rest before persisting to NATS KV. On `GET`, the
+            server decrypts it before returning.
+        max_ack_pending:
+          type: integer
+          nullable: true
+        options:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Free-form sink-specific options.
+
+    TableStats:
+      type: object
+      description: |
+        Per-table runtime statistics. Used in the `tables` and `sinks`
+        fields of `PipelineStatusResponse`. The Go type lives in
+        `internal/protocol/state.go` (a worker-internal package), but
+        it is part of the control-plane API contract and is therefore
+        modeled here.
+      properties:
+        status:
+          type: string
+          description: Per-table status, e.g. "ACTIVE", "CIRCUIT_OPEN".
+        rps:
+          type: number
+          format: double
+          description: Current rows-per-second throughput.
+        total_synced:
+          type: integer
+          format: int64
+          description: Total rows successfully synchronized.
+        error_count:
+          type: integer
+          format: int64
+        last_source_ts:
+          type: string
+          format: date-time
+        last_processed_ts:
+          type: string
+          format: date-time
+        lag_ms:
+          type: integer
+          format: int64
+          description: Replication lag in milliseconds.
+        updated_at:
+          type: string
+          format: date-time
+
+    TableMetadata:
+      type: object
+      description: |
+        Discovered table metadata, returned by `GET /sources/{id}/tables`.
+        The Go type lives in `internal/protocol/state.go` but is part of
+        the control-plane API contract.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
+        types:
+          type: array
+          items:
+            type: string
+        pk_columns:
+          type: array
+          items:
+            type: string
+
+    PipelineListResponse:
+      type: object
+      description: Paginated pipeline list response.
+      required: [pipelines, total, page, limit]
+      properties:
+        pipelines:
+          type: array
+          items:
+            $ref: '#/components/schemas/PipelineConfig'
+        total:
+          type: integer
+          description: Total number of matching pipelines (before pagination).
+          example: 42
+        page:
+          type: integer
+          description: 1-based page index.
+          example: 1
+        limit:
+          type: integer
+          description: Page size.
+          example: 10
+
+    PipelineStatusResponse:
+      type: object
+      description: Aggregated live status for a single pipeline.
+      required: [pipeline_id, status, tables, sinks]
+      properties:
+        pipeline_id:
+          type: string
+          example: orders-cdc
+        status:
+          type: object
+          additionalProperties: true
+          description: |
+            Raw key/value snapshot of all NATS KV entries under the
+            pipeline's status prefix. Keys are full NATS KV keys
+            (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats`),
+            values are the deserialized worker-internal type
+            (`Checkpoint`, `TableStats`, or `PipelineTransitionState`).
+            Modeled as `additionalProperties: true` (maps to
+            `map[string]interface{}` in oapi-codegen).
+        tables:
+          type: object
+          description: Aggregated per-table stats across production (non-debug) sinks.
+          additionalProperties:
+            $ref: '#/components/schemas/TableStats'
+        sinks:
+          type: object
+          description: Per-sink, per-table raw stats.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/TableStats'
+
+    SourceListResponse:
+      type: object
+      description: Response for `GET /sources`.
+      required: [sources]
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceConfig'
+
+    SinkListResponse:
+      type: object
+      description: Response for `GET /sinks`.
+      required: [sinks]
+      properties:
+        sinks:
+          type: array
+          items:
+            $ref: '#/components/schemas/SinkConfig'
+
+    SourceSchemaResponse:
+      type: object
+      description: Response for `GET /sources/{id}/schema`.
+      required: [source_id, available_schemas, discovery_status]
+      properties:
+        source_id:
+          type: string
+          example: prod-pg
+        available_schemas:
+          type: array
+          items:
+            type: string
+          description: Schema names discoverable on the source database.
+        discovery_status:
+          type: string
+          example: ready
+          description: |
+            Current discovery status. The current implementation always
+            returns "ready"; future versions may report in-flight
+            discovery.
+
+    SourceTablesResponse:
+      type: object
+      description: Response for `GET /sources/{id}/tables`.
+      required: [source_id, tables]
+      properties:
+        source_id:
+          type: string
+          example: prod-pg
+        tables:
+          type: array
+          items:
+            $ref: '#/components/schemas/TableMetadata'
+
+    AcceptedResponse:
+      type: object
+      description: Generic 202 acknowledgement for asynchronous actions.
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: restart triggered

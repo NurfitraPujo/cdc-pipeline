@@ -13,7 +13,9 @@
     "deploy": "npm run build && wrangler deploy",
     "format": "biome format",
     "lint": "biome lint",
-    "check": "biome check"
+    "type-check": "tsc --noEmit",
+    "check": "biome check && tsc --noEmit",
+    "generate:api": "openapi-typescript ../docs/openapi.yaml -o ./src/api/schema.d.ts"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.26.0",
@@ -63,6 +65,8 @@
     "happy-dom": "^20.8.9",
     "jsdom": "^28.1.0",
     "msw": "^2.12.14",
+    "openapi-fetch": "^0.13.0",
+    "openapi-typescript": "^7.4.0",
     "typescript": "^5.7.2",
     "vite": "^7.3.1",
     "vite-tsconfig-paths": "^5.1.4",

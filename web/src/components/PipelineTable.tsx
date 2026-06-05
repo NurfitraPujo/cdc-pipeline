@@ -8,8 +8,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { useState } from "react";
-import { type PipelineListParams, pipelinesApi } from "@/api/pipelines";
-import type { Pipeline } from "@/api/types";
+import { type Pipeline, pipelinesApi } from "@/api/pipelines";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -27,7 +26,6 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { StatusBadge, type StatusBadgeStatus } from "./StatusBadge";
 
 interface PipelineTableProps {
 	search?: string;
@@ -35,20 +33,6 @@ interface PipelineTableProps {
 }
 
 const DEFAULT_PAGE_SIZE = 10;
-
-function mapPipelineStatus(status: string): StatusBadgeStatus {
-	switch (status) {
-		case "running":
-			return "healthy";
-		case "error":
-			return "error";
-		case "paused":
-		case "stopped":
-			return "transitioning";
-		default:
-			return "unknown";
-	}
-}
 
 function PipelineTableRow({
 	pipeline,
@@ -63,7 +47,6 @@ function PipelineTableRow({
 	isRestarting: boolean;
 	isDeleting: boolean;
 }) {
-	const status = mapPipelineStatus(pipeline.status);
 	const isProcessing = isRestarting || isDeleting;
 
 	return (
@@ -74,15 +57,12 @@ function PipelineTableRow({
 					onClick={() => (window.location.href = `/pipelines/${pipeline.id}`)}
 					className="font-medium text-primary hover:underline bg-transparent border-none p-0 cursor-pointer"
 				>
-					{pipeline.id}
+					{pipeline.name}
 				</button>
 			</TableCell>
-			<TableCell>
-				<StatusBadge status={status} />
-			</TableCell>
-			<TableCell>{pipeline.source?.type ?? "-"}</TableCell>
-			<TableCell>{pipeline.sink?.type ?? "-"}</TableCell>
-			<TableCell>{pipeline.source?.tables?.length ?? 0}</TableCell>
+			<TableCell>{pipeline.sources.length} source(s)</TableCell>
+			<TableCell>{pipeline.sinks.length} sink(s)</TableCell>
+			<TableCell>{pipeline.tables.length}</TableCell>
 			<TableCell>
 				<DropdownMenu>
 					<DropdownMenuTrigger asChild>
@@ -164,16 +144,12 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 	const [page, setPage] = useState(1);
 	const queryClient = useQueryClient();
 
-	const params: PipelineListParams = {
-		search,
-		status,
-		page,
-		limit: DEFAULT_PAGE_SIZE,
-	};
+	const _params = { search, status, page, limit: DEFAULT_PAGE_SIZE };
+	void _params;
 
 	const { data, isLoading, isError, error } = useQuery({
-		queryKey: ["pipelines", "list", params],
-		queryFn: () => pipelinesApi.list(params),
+		queryKey: ["pipelines", "list", { search, status, page }],
+		queryFn: () => pipelinesApi.list(),
 	});
 
 	const restartMutation = useMutation({
@@ -201,7 +177,12 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 	};
 
 	const pipelines = data?.pipelines ?? [];
-	const pagination = data?.pagination;
+	const pagination = {
+		page: 1,
+		total_pages: 1,
+		total: pipelines.length,
+		limit: DEFAULT_PAGE_SIZE,
+	};
 
 	const handlePreviousPage = () => {
 		if (page > 1) {

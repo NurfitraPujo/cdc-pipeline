@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlertCircle, CheckCircle, Settings } from "lucide-react";
 import { useState } from "react";
-import { apiClient } from "@/api/client";
+import { type GlobalConfig, globalConfigApi } from "@/api/globalConfig";
 import { ConfigEditor } from "@/components/ConfigEditor";
 import {
 	Card,
@@ -12,35 +12,29 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 
-interface GlobalConfig {
-	maxConcurrentPipelines: number;
-	defaultBatchSize: number;
-	defaultFlushIntervalMs: number;
-	healthCheckIntervalMs: number;
-	metricsRetentionDays: number;
-}
+const defaultConfig: GlobalConfig = {
+	batchSize: 1000,
+	batchWait: "1s",
+	retry: {
+		maxRetries: 3,
+		initialBackoff: "1s",
+		maxBackoff: "30s",
+	},
+};
 
 const fetchGlobalConfig = async (): Promise<GlobalConfig> => {
-	return apiClient.get<GlobalConfig>("/global");
+	return globalConfigApi.get();
 };
 
 const saveGlobalConfig = async (
 	config: GlobalConfig,
 ): Promise<GlobalConfig> => {
-	return apiClient.put<GlobalConfig>("/global", config);
+	return globalConfigApi.update(config);
 };
 
 export const Route = createFileRoute("/config")({
 	component: ConfigPage,
 });
-
-const defaultConfig: GlobalConfig = {
-	maxConcurrentPipelines: 10,
-	defaultBatchSize: 1000,
-	defaultFlushIntervalMs: 5000,
-	healthCheckIntervalMs: 30000,
-	metricsRetentionDays: 30,
-};
 
 function ConfigPage() {
 	const queryClient = useQueryClient();

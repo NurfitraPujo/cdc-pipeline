@@ -1,6 +1,7 @@
 import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { authApi } from "@/api/auth";
+import { setAuthToken } from "@/api/schema-client";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -30,13 +31,14 @@ function LoginPage() {
 	const [error, setError] = useState("");
 	const [isLoading, setIsLoading] = useState(false);
 
-	const handleSubmit = async (e: React.FormEvent) => {
+	const handleSubmit = async (e: React.FormEvent | React.MouseEvent) => {
 		e.preventDefault();
 		setError("");
 		setIsLoading(true);
 
 		try {
 			const response = await authApi.login({ username, password });
+			setAuthToken(response.token);
 			setToken(response.token);
 			navigate({ to: "/dashboard" });
 		} catch (err) {
@@ -96,7 +98,12 @@ function LoginPage() {
 								{error}
 							</div>
 						)}
-						<Button type="submit" className="w-full" disabled={isLoading}>
+						<Button
+							type="button"
+							className="w-full"
+							disabled={isLoading}
+							onClick={handleSubmit}
+						>
 							{isLoading ? "Signing in..." : "Sign in"}
 						</Button>
 					</form>

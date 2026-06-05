@@ -128,23 +128,11 @@ function CreatePipelinePage() {
 		if (!source || !sink) return;
 
 		createMutation.mutate({
+			id: pipelineId,
 			name: pipelineId,
-			source: {
-				type: source.type,
-				name: source.name,
-				connection: source.connection,
-				tables: Array.from(selectedTables),
-			},
-			sink: {
-				type: sink.type as
-					| "postgres"
-					| "mysql"
-					| "elasticsearch"
-					| "kafka"
-					| "webhook",
-				name: sink.name,
-				connection: sink.connection,
-			},
+			sources: [source.id],
+			sinks: [sink.id],
+			tables: Array.from(selectedTables),
 		});
 	};
 
@@ -237,10 +225,10 @@ function CreatePipelinePage() {
 											className="mt-1 h-4 w-4"
 										/>
 										<div className="flex-1">
-											<p className="font-medium">{source.name}</p>
+											<p className="font-medium">{source.id}</p>
 											<p className="text-sm text-muted-foreground">
-												{source.type.toUpperCase()} - {source.connection.host}:
-												{source.connection.port}
+												{source.type.toUpperCase()} - {source.host}:
+												{source.port}
 											</p>
 										</div>
 									</label>
@@ -291,10 +279,9 @@ function CreatePipelinePage() {
 											className="mt-1 h-4 w-4"
 										/>
 										<div className="flex-1">
-											<p className="font-medium">{sink.name}</p>
+											<p className="font-medium">{sink.id}</p>
 											<p className="text-sm text-muted-foreground">
-												{sink.type.toUpperCase()} - {sink.connection.host}
-												{sink.connection.port && `:${sink.connection.port}`}
+												{sink.type.toUpperCase()} - {sink.dsn ?? ""}
 											</p>
 										</div>
 									</label>

@@ -1,16 +1,16 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { StatusBadge } from "@/components/StatusBadge";
+import { StatusBadge, type StatusBadgeStatus } from "@/components/StatusBadge";
 import { renderWithProviders } from "../utils";
 
 describe("StatusBadge Component", () => {
-	it.each([
+	it.each<[StatusBadgeStatus, string]>([
 		["healthy", "Healthy"],
 		["error", "Error"],
 		["transitioning", "Transitioning"],
 		["unknown", "Unknown"],
 	])("should render %s status correctly", (status, expectedLabel) => {
-		renderWithProviders(<StatusBadge status={status as any} />);
+		renderWithProviders(<StatusBadge status={status} />);
 
 		expect(screen.getByText(expectedLabel)).toBeInTheDocument();
 	});
@@ -25,7 +25,9 @@ describe("StatusBadge Component", () => {
 	});
 
 	it("should fallback to unknown for invalid status", () => {
-		renderWithProviders(<StatusBadge status={"invalid" as any} />);
+		renderWithProviders(
+			<StatusBadge status={"invalid" as unknown as StatusBadgeStatus} />,
+		);
 
 		expect(screen.getByText("Unknown")).toBeInTheDocument();
 	});

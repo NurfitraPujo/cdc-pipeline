@@ -1,115 +1,95 @@
-import { apiClient } from "./client";
-import type { Pipeline } from "./types";
+import { camelToSnake, snakeToCamel } from "./mappers";
+import type { components } from "./schema";
+import { apiClient, unwrap } from "./schema-client";
 
-export interface PipelineListParams {
-	search?: string;
-	status?: string;
-	page?: number;
-	limit?: number;
+type WirePipeline = components["schemas"]["PipelineConfig"];
+type WirePipelineList = components["schemas"]["PipelineListResponse"];
+type WirePipelineStatus = components["schemas"]["PipelineStatusResponse"];
+
+export interface Pipeline {
+	id: string;
+	name: string;
+	description?: string;
+	sources: string[];
+	sinks: string[];
+	processors?: components["schemas"]["ProcessorConfig"][];
+	tables: string[];
+	batchSize?: number;
+	batchWait?: string;
+	retry?: components["schemas"]["RetryConfig"];
 }
 
 export interface PipelineListResponse {
 	pipelines: Pipeline[];
-	pagination: {
-		page: number;
-		limit: number;
-		total: number;
-		total_pages: number;
-	};
+}
+
+export interface PipelineStatus {
+	pipelineId: string;
+	status: Record<string, unknown>;
+	tables: Record<string, unknown>;
+	sinks: Record<string, Record<string, unknown>>;
 }
 
 export interface CreatePipelineRequest {
+	id?: string;
 	name: string;
-	description?: string;
-	source: {
-		type: "postgres" | "mysql" | "mongodb";
-		name: string;
-		connection: {
-			host: string;
-			port: number;
-			database: string;
-			username: string;
-			password?: string;
-			ssl?: boolean;
-		};
-		tables: string[];
-	};
-	sink: {
-		type: "postgres" | "mysql" | "elasticsearch" | "kafka" | "webhook";
-		name: string;
-		connection: {
-			host: string;
-			port?: number;
-			index?: string;
-			topic?: string;
-			url?: string;
-			headers?: Record<string, string>;
-		};
-	};
-	processorConfig?: {
-		batchSize?: number;
-		flushIntervalMs?: number;
-		maxRetries?: number;
-		retryDelayMs?: number;
-		deadLetterQueueEnabled?: boolean;
-	};
+	sources: string[];
+	sinks: string[];
+	processors?: components["schemas"]["ProcessorConfig"][];
+	tables: string[];
+	batchSize?: number;
+	batchWait?: string;
+	retry?: components["schemas"]["RetryConfig"];
 }
 
-export interface UpdatePipelineRequest {
-	name?: string;
-	description?: string;
-	source?: Partial<CreatePipelineRequest["source"]>;
-	sink?: Partial<CreatePipelineRequest["sink"]>;
-	processorConfig?: Partial<CreatePipelineRequest["processorConfig"]>;
-}
-
-function buildQueryString(params: PipelineListParams): string {
-	const searchParams = new URLSearchParams();
-
-	if (params.search) {
-		searchParams.set("search", params.search);
-	}
-	if (params.status) {
-		searchParams.set("status", params.status);
-	}
-	if (params.page !== undefined) {
-		searchParams.set("page", params.page.toString());
-	}
-	if (params.limit !== undefined) {
-		searchParams.set("limit", params.limit.toString());
-	}
-
-	const queryString = searchParams.toString();
-	return queryString ? `?${queryString}` : "";
-}
+export type UpdatePipelineRequest = Partial<CreatePipelineRequest>;
 
 export const pipelinesApi = {
-	async list(params: PipelineListParams = {}): Promise<PipelineListResponse> {
-		const queryString = buildQueryString(params);
-		return apiClient.get<PipelineListResponse>(`/pipelines${queryString}`);
+	async list(): Promise<PipelineListResponse> {
+		const result = await apiClient.GET("/pipelines");
+		return snakeToCamel<PipelineListResponse>(unwrap<WirePipelineList>(result));
 	},
 
 	async get(id: string): Promise<Pipeline> {
-		return apiClient.get<Pipeline>(`/pipelines/${id}`);
+		const result = await apiClient.GET("/pipelines/{id}", {
+			params: { path: { id } },
+		});
+		return snakeToCamel<Pipeline>(unwrap<WirePipeline>(result));
 	},
 
-	async getStatus(id: string): Promise<any> {
-		return apiClient.get<any>(`/pipelines/${id}/status`);
+	async getStatus(id: string): Promise<PipelineStatus> {
+		const result = await apiClient.GET("/pipelines/{id}/status", {
+			params: { path: { id } },
+		});
+		return snakeToCamel<PipelineStatus>(unwrap<WirePipelineStatus>(result));
 	},
 
 	async create(data: CreatePipelineRequest): Promise<Pipeline> {
-		return apiClient.post<Pipeline>("/pipelines", data);
+		const body = camelToSnake<WirePipeline>(data);
+		const result = await apiClient.POST("/pipelines", { body });
+		return snakeToCamel<Pipeline>(unwrap<WirePipeline>(result));
 	},
 
 	async update(id: string, data: UpdatePipelineRequest): Promise<Pipeline> {
-		return apiClient.put<Pipeline>(`/pipelines/${id}`, data);
+		const body = camelToSnake<WirePipeline>(data);
+		const result = await apiClient.PUT("/pipelines/{id}", {
+			params: { path: { id } },
+			body,
+		});
+		return snakeToCamel<Pipeline>(unwrap<WirePipeline>(result));
 	},
 
 	async delete(id: string): Promise<void> {
-		return apiClient.delete<void>(`/pipelines/${id}`);
+		const result = await apiClient.DELETE("/pipelines/{id}", {
+			params: { path: { id } },
+		});
+		unwrap<undefined>(result);
 	},
 
 	async restart(id: string): Promise<void> {
-		return apiClient.post<void>(`/pipelines/${id}/restart`);
+		const result = await apiClient.POST("/pipelines/{id}/restart", {
+			params: { path: { id } },
+		});
+		unwrap<undefined>(result);
 	},
 };
