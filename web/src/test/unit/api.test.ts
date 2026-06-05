@@ -1,10 +1,10 @@
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiClient } from "@/api/client";
+import { authApi } from "@/api/auth";
+import { pipelinesApi } from "@/api/pipelines";
 import { API_BASE_URL, TOKEN_KEY } from "@/lib/constants";
 import { server } from "../mocks/server";
 
-// Mock localStorage
 const localStorageMock = {
 	getItem: vi.fn(),
 	setItem: vi.fn(),
@@ -14,125 +14,82 @@ Object.defineProperty(window, "localStorage", {
 	value: localStorageMock,
 });
 
-// Mock window.location
 const mockLocation = { href: "" };
 Object.defineProperty(window, "location", {
 	value: mockLocation,
 	writable: true,
 });
 
-describe("API Client", () => {
+describe("API Client (schema-driven)", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mockLocation.href = "";
+		localStorageMock.getItem.mockReturnValue(null);
 	});
 
-	describe("HTTP Methods", () => {
-		it("should make GET request", async () => {
+	describe("authApi.login", () => {
+		it("returns token on success", async () => {
 			server.use(
-				http.get(`${API_BASE_URL}/test`, () => {
-					return HttpResponse.json({ data: "test" });
+				http.post(`${API_BASE_URL}/login`, async ({ request }) => {
+					const body = (await request.json()) as {
+						username: string;
+						password: string;
+					};
+					if (body.username === "admin" && body.password === "admin") {
+						return HttpResponse.json({ token: "abc" });
+					}
+					return HttpResponse.json({ error: "bad" }, { status: 401 });
 				}),
 			);
 
-			const result = await apiClient.get("/test");
-			expect(result).toEqual({ data: "test" });
+			const result = await authApi.login({
+				username: "admin",
+				password: "admin",
+			});
+			expect(result).toEqual({ token: "abc" });
 		});
 
-		it("should make POST request with body", async () => {
+		it("throws on bad credentials", async () => {
 			server.use(
-				http.post(`${API_BASE_URL}/test`, async ({ request }) => {
-					const body = await request.json();
-					return HttpResponse.json({ received: body });
-				}),
+				http.post(`${API_BASE_URL}/login`, () =>
+					HttpResponse.json({ error: "bad" }, { status: 401 }),
+				),
 			);
-
-			const body = { name: "test" };
-			const result = await apiClient.post("/test", body);
-			expect(result).toEqual({ received: body });
-		});
-
-		it("should make PUT request", async () => {
-			server.use(
-				http.put(`${API_BASE_URL}/test`, async ({ request }) => {
-					const body = await request.json();
-					return HttpResponse.json({ updated: body });
-				}),
-			);
-
-			const body = { id: 1, name: "updated" };
-			const result = await apiClient.put("/test", body);
-			expect(result).toEqual({ updated: body });
-		});
-
-		it("should make DELETE request", async () => {
-			server.use(
-				http.delete(`${API_BASE_URL}/test`, () => {
-					return HttpResponse.json({ deleted: true });
-				}),
-			);
-
-			const result = await apiClient.delete("/test");
-			expect(result).toEqual({ deleted: true });
+			await expect(
+				authApi.login({ username: "x", password: "y" }),
+			).rejects.toThrow();
 		});
 	});
 
-	describe("Authentication", () => {
-		it("should include auth token when available", async () => {
-			const token = "test-token";
-			localStorageMock.getItem.mockReturnValue(token);
+	describe("auth header", () => {
+		it("sends Bearer token from localStorage", async () => {
+			localStorageMock.getItem.mockReturnValue("jwt-123");
 
-			let requestHeaders: Headers | undefined;
+			let observedAuth: string | null = null;
 			server.use(
-				http.get(`${API_BASE_URL}/protected`, ({ request }) => {
-					requestHeaders = request.headers;
-					return HttpResponse.json({ data: "protected" });
+				http.get(`${API_BASE_URL}/pipelines`, ({ request }) => {
+					observedAuth = request.headers.get("Authorization");
+					return HttpResponse.json({ pipelines: [] });
 				}),
 			);
 
-			await apiClient.get("/protected");
-
-			expect(requestHeaders?.get("Authorization")).toBe(`Bearer ${token}`);
+			await pipelinesApi.list();
+			expect(observedAuth).toBe("Bearer jwt-123");
 		});
+	});
 
-		it("should redirect to login on 401", async () => {
-			localStorageMock.getItem.mockReturnValue("expired-token");
-
+	describe("401 handling", () => {
+		it("clears token and redirects on 401", async () => {
+			localStorageMock.getItem.mockReturnValue("old-token");
 			server.use(
-				http.get(`${API_BASE_URL}/protected`, () => {
-					return HttpResponse.json({ error: "Unauthorized" }, { status: 401 });
-				}),
+				http.get(`${API_BASE_URL}/pipelines`, () =>
+					HttpResponse.json({ error: "unauthorized" }, { status: 401 }),
+				),
 			);
 
-			await expect(apiClient.get("/protected")).rejects.toThrow();
-
+			await expect(pipelinesApi.list()).rejects.toThrow();
 			expect(localStorageMock.removeItem).toHaveBeenCalledWith(TOKEN_KEY);
 			expect(mockLocation.href).toBe("/login");
-		});
-	});
-
-	describe("Error Handling", () => {
-		it("should throw error with status code for API errors", async () => {
-			server.use(
-				http.get(`${API_BASE_URL}/error`, () => {
-					return HttpResponse.json(
-						{ error: "Something went wrong" },
-						{ status: 500 },
-					);
-				}),
-			);
-
-			await expect(apiClient.get("/error")).rejects.toThrow("HTTP 500");
-		});
-
-		it("should throw generic error for network failures", async () => {
-			server.use(
-				http.get(`${API_BASE_URL}/network-error`, () => {
-					return HttpResponse.error();
-				}),
-			);
-
-			await expect(apiClient.get("/network-error")).rejects.toThrow();
 		});
 	});
 });

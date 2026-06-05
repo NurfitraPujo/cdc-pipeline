@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+export PYTHONUNBUFFERED=1
+
+# --- Working Directory Isolation ---
+# Stash everything NOT being pushed so tests run on exactly what will ship.
+git stash push -k -q -m "pre-push stash"
+STASHED=$?
+
+finish() {
+    if [ $STASHED -eq 0 ]; then
+        git stash pop -q 2>/dev/null || true
+    fi
+}
+trap finish EXIT
+
+# --- Escape Hatch ---
+# If the commit being pushed contains [E2E NOT CHECKED] in its subject line,
+# skip the slow container rebuild + E2E run (but still enforce fast unit tests).
+ESCAPE=false
+while read -r ref oid; do
+    if [ "$ref" = "refs/heads/$(git symbolic-ref --short HEAD 2>/dev/null)" ]; then
+        SUBJECT=$(git log -1 --format=%s "$oid")
+        if echo "$SUBJECT" | grep -qi "\[E2E NOT CHECKED\]"; then
+            ESCAPE=true
+        fi
+    fi
+done
+
+echo "========================================="
+echo "   Pre-Push Local CI Gate"
+echo "========================================="
+
+# --- Fast Unit Tests (always run) ---
+echo ""
+echo "Running Go unit tests..."
+go test -v ./internal/... ./protocol/... 2>&1 | head -50
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo ""
+    echo "FAILED: Go unit tests. Push blocked."
+    exit 1
+fi
+
+if [ -d "web" ] && [ -f "web/package.json" ]; then
+    echo ""
+    echo "Running frontend unit tests..."
+    (cd web && pnpm run test 2>&1 | head -50)
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo ""
+        echo "FAILED: Frontend unit tests. Push blocked."
+        exit 1
+    fi
+fi
+
+if [ "$ESCAPE" = "true" ]; then
+    echo ""
+    echo "WARNING: [E2E NOT CHECKED] in commit subject - skipping container build + E2E."
+    echo "Fast tests passed. Push allowed (E2E bypassed)."
+    exit 0
+fi
+
+# --- Container Rebuild ---
+echo ""
+echo "Checking for container runtime..."
+CONTAINER_RUNTIME=""
+if command -v podman &> /dev/null; then
+    CONTAINER_RUNTIME="podman"
+elif command -v docker &> /dev/null; then
+    CONTAINER_RUNTIME="docker"
+else
+    echo "Neither podman nor docker found. Skipping image build."
+    CONTAINER_RUNTIME=""
+fi
+
+if [ -n "$CONTAINER_RUNTIME" ]; then
+    echo "Building cdc-pipeline-api..."
+    $CONTAINER_RUNTIME build -t cdc-pipeline-api:latest -f cmd/api/Dockerfile .
+    echo "Building cdc-pipeline-web-dashboard..."
+    $CONTAINER_RUNTIME build -t cdc-pipeline-web-dashboard:latest -f web/Dockerfile web/
+fi
+
+# --- E2E Tests ---
+echo ""
+echo "Starting infrastructure (NATS + Postgres)..."
+make e2e-up 2>&1
+sleep 3
+
+echo ""
+echo "Running E2E tests..."
+make e2e 2>&1
+TEST_STATUS=${PIPESTATUS[0]}
+
+echo ""
+echo "Tearing down E2E infrastructure..."
+make e2e-down 2>&1
+
+if [ $TEST_STATUS -ne 0 ]; then
+    echo ""
+    echo "FAILED: E2E tests. Push blocked."
+    exit 1
+fi
+
+echo ""
+echo "All checks passed. Push allowed."
+echo "========================================="

@@ -63,6 +63,12 @@ func main() {
 
 	h := api.NewHandler(kv)
 
+	// Seed default admin credentials for local dev / E2E (no-op in production
+	// and when an auth config already exists in NATS KV).
+	if err := api.EnsureDevAuth(kv); err != nil {
+		log.Fatal().Err(err).Msg("Failed to seed dev auth")
+	}
+
 	// Use custom recovery to log errors with zerolog
 	r := gin.New()
 	r.Use(gin.LoggerWithWriter(os.Stderr), gin.Recovery())

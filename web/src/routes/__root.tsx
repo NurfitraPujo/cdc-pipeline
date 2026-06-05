@@ -24,6 +24,20 @@ interface MyRouterContext {
 
 const THEME_INIT_SCRIPT = `(function(){try{var stored=window.localStorage.getItem('theme');var mode=(stored==='light'||stored==='dark'||stored==='auto')?stored:'auto';var prefersDark=window.matchMedia('(prefers-color-scheme: dark)').matches;var resolved=mode==='auto'?(prefersDark?'dark':'light'):mode;var root=document.documentElement;root.classList.remove('light','dark');root.classList.add(resolved);if(mode==='auto'){root.removeAttribute('data-theme')}else{root.setAttribute('data-theme',mode)}root.style.colorScheme=resolved;}catch(e){}})();`;
 
+function readAuthFromStorage(): boolean {
+	if (typeof window === "undefined") return false;
+	const raw = window.localStorage.getItem("cdc-auth-storage");
+	if (!raw) return false;
+	try {
+		const parsed = JSON.parse(raw) as {
+			state?: { isAuthenticated?: boolean };
+		};
+		return parsed?.state?.isAuthenticated === true;
+	} catch {
+		return false;
+	}
+}
+
 export const Route = createRootRouteWithContext<MyRouterContext>()({
 	head: () => ({
 		meta: [
@@ -46,7 +60,14 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 		],
 	}),
 	beforeLoad: ({ location }) => {
-		const { isAuthenticated } = useAuthStore.getState();
+		// Auth check runs only on the client. During SSR, localStorage is
+		// unavailable, so we let the route render and the client-side hydration
+		// will re-evaluate and redirect if needed.
+		if (typeof window === "undefined") {
+			return;
+		}
+
+		const isAuthenticated = readAuthFromStorage();
 		const isLoginPage = location.pathname === "/login";
 
 		if (!isAuthenticated && !isLoginPage) {

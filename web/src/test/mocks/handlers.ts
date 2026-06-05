@@ -1,5 +1,6 @@
 import { HttpResponse, http } from "msw";
-import type { LoginRequest, Pipeline } from "@/api/types";
+import type { Pipeline } from "@/api/pipelines";
+import type { LoginRequest } from "@/api/types";
 import {
 	createMockPipeline,
 	mockLoginResponse,
@@ -51,7 +52,9 @@ export const handlers = [
 		}
 
 		if (status) {
-			filtered = filtered.filter((p) => p.status === status);
+			filtered = filtered.filter(
+				(p) => (p as { status?: string }).status === status,
+			);
 		}
 
 		const total = filtered.length;
@@ -134,8 +137,7 @@ export const handlers = [
 				);
 			}
 
-			pipeline.status = "running";
-			pipeline.lastRunAt = new Date().toISOString();
+			(pipeline as { status?: string }).status = "running";
 			return HttpResponse.json({ success: true });
 		},
 	),

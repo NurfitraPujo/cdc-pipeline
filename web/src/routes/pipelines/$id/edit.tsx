@@ -1,8 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { AlertCircle, ArrowLeft, Loader2 } from "lucide-react";
-import { pipelinesApi } from "@/api/pipelines";
-import type { Pipeline } from "@/api/types";
+import { type Pipeline, pipelinesApi } from "@/api/pipelines";
 import { ConfigEditor } from "@/components/ConfigEditor";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,41 +21,13 @@ function pipelineToJson(pipeline: Pipeline): string {
 	const config = {
 		id: pipeline.id,
 		name: pipeline.name,
-		description: pipeline.description || "",
-		status: pipeline.status,
-		source: {
-			id: pipeline.source.id,
-			type: pipeline.source.type,
-			name: pipeline.source.name,
-			connection: {
-				host: pipeline.source.connection.host,
-				port: pipeline.source.connection.port,
-				database: pipeline.source.connection.database,
-				username: pipeline.source.connection.username,
-				ssl: pipeline.source.connection.ssl || false,
-			},
-			tables: pipeline.source.tables,
-		},
-		sink: {
-			id: pipeline.sink.id,
-			type: pipeline.sink.type,
-			name: pipeline.sink.name,
-			connection: {
-				host: pipeline.sink.connection.host,
-				port: pipeline.sink.connection.port,
-				index: pipeline.sink.connection.index,
-				topic: pipeline.sink.connection.topic,
-				url: pipeline.sink.connection.url,
-				headers: pipeline.sink.connection.headers,
-			},
-		},
-		processorConfig: {
-			batchSize: pipeline.processorConfig.batchSize,
-			flushIntervalMs: pipeline.processorConfig.flushIntervalMs,
-			maxRetries: pipeline.processorConfig.maxRetries,
-			retryDelayMs: pipeline.processorConfig.retryDelayMs,
-			deadLetterQueueEnabled: pipeline.processorConfig.deadLetterQueueEnabled,
-		},
+		sources: pipeline.sources,
+		sinks: pipeline.sinks,
+		processors: pipeline.processors,
+		tables: pipeline.tables,
+		batch_size: pipeline.batchSize,
+		batch_wait: pipeline.batchWait,
+		retry: pipeline.retry,
 	};
 
 	return `// Pipeline Configuration

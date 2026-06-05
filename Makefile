@@ -2,7 +2,7 @@ APP_NAME = cdc-pipeline
 CCE_NAMESPACE_STAGING = cdc-pipeline-staging
 CCE_NAMESPACE_PRODUCTION = cdc-pipeline-production
 
-.PHONY: build-all build-api build-worker build-cdc-pipeline clean release lint-helm cce-seal-string
+.PHONY: build-all build-api build-worker build-cdc-pipeline clean release lint-helm cce-seal-string generate install-tools run-api e2e e2e-install e2e-up e2e-down e2e-list setup-hooks
 
 build-all: build-api build-worker
 
@@ -16,6 +16,45 @@ build-worker:
 
 clean:
 	rm -rf bin/
+
+run-api:
+	go run ./cmd/api/main.go
+
+# Install the OpenAPI 3 code-generation toolchain (Go side).
+install-tools:
+	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
+
+# Regenerate internal/api/generated.go from docs/openapi.yaml.
+generate:
+	oapi-codegen --config=oapi-codegen.yaml docs/openapi.yaml
+
+# =============================================================================
+# E2E (Playwright) targets
+# =============================================================================
+# E2E tests live in e2e/ at the repo root. They assume the control plane API
+# is reachable on http://localhost:8080 and the Vite dev server is reachable
+# on http://localhost:3000. Playwright's webServer auto-boots Vite if it is
+# not already running; the API + NATS + Postgres must be started separately
+# (see e2e-up, or run your existing dev stack).
+
+e2e-install:
+	cd e2e && pnpm install && pnpm exec playwright install chromium
+
+e2e-up:
+	@echo "Starting NATS + Postgres via podman for E2E..."
+	podman run -d --name cdc-e2e-nats --rm -p 4222:4222 docker.io/library/nats:2.10-alpine -js || true
+	podman run -d --name cdc-e2e-pg --rm -p 5432:5432 \
+		-e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cdc_e2e \
+		docker.io/library/postgres:16-alpine || true
+
+e2e-down:
+	podman stop cdc-e2e-nats cdc-e2e-pg 2>/dev/null || true
+
+e2e-list:
+	cd e2e && pnpm exec playwright test --list
+
+e2e:
+	cd e2e && pnpm exec playwright test
 
 # =============================================================================
 # Deployment & Release Targets
@@ -79,6 +118,17 @@ cce-seal-string:
 	RESPONSE=$$(curl -s -X POST https://kubeseal-encryptor-daya-cce-production.daya.ai/encrypt \
 		-H "Content-Type: application/json" \
 		-d "{ \"key\": \"$$KEY\", \"value\": \"$$VALUE\", \"namespace\": \"$(CCE_NAMESPACE_$(shell echo $(env) | tr '[:lower:]' '[:upper:]'))\", \"secretName\": \"$$SECRET_NAME\" }"); \
-	echo "Encryption successful"; \
-	echo ""; \
-	echo "$$RESPONSE" | jq -r .encryptedValue
+		echo "Encryption successful"; \
+		echo ""; \
+		echo "$$RESPONSE" | jq -r .encryptedValue
+
+# =============================================================================
+# Git Hooks
+# =============================================================================
+# Wires up the local CI safety nets under .git-hooks/. After running this,
+# pre-commit and pre-push will fire automatically before every commit/push.
+setup-hooks:
+	@echo "Configuring git to use .git-hooks directory..."
+	git config core.hooksPath .git-hooks
+	chmod +x .git-hooks/pre-commit .git-hooks/pre-push
+	@echo "Hooks installed successfully!"
