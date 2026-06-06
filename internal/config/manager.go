@@ -481,9 +481,19 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 		case <-m.ctx.Done(): // Extra safety: stop if manager itself stops
 			return
 		case <-worker.Finished():
-			// When worker finishes, check if it was intentional (Transitioning)
+			// When worker finishes, check if it was intentional (Transitioning/Stopping)
+			m.workersMu.RLock()
+			currentWorker, exists := m.workers[pid]
+			m.workersMu.RUnlock()
+
+			if !exists || currentWorker != worker {
+				// Stopped or replaced by another worker instance
+				return
+			}
+
 			_, err := m.kv.Get(protocol.TransitionStateKey(pid))
-			if err == nats.ErrKeyNotFound {
+			// If key not found (no transition active) OR if we can't contact NATS, we treat as crash
+			if err == nats.ErrKeyNotFound || err != nil {
 				// CRASH DETECTED: It finished but we aren't transitioning.
 				select {
 				case <-ctx.Done():
@@ -491,22 +501,33 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 				case <-time.After(crashRecoveryDelay):
 					log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
 					// Re-fetch latest config and restart.
+					var latestCfg protocol.PipelineConfig
+					var revision uint64
 					entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
 					if err != nil {
-						log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config")
-						return
-					}
-					var latestCfg protocol.PipelineConfig
-					if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
-						log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
-						return
+						log.Warn().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config from KV, falling back to cached config")
+						m.workersMu.RLock()
+						cachedCfg, cachedExists := m.configs[pid]
+						revision = m.revisions[pid]
+						m.workersMu.RUnlock()
+						if cachedExists {
+							latestCfg = cachedCfg
+						} else {
+							latestCfg = cfg
+						}
+					} else {
+						if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
+							log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
+							return
+						}
+						revision = entry.Revision()
 					}
 					m.applyHierarchy(&latestCfg)
 
 					// Synchronize cache so Watch events don't re-trigger
 					m.workersMu.Lock()
 					m.configs[pid] = latestCfg
-					m.revisions[pid] = entry.Revision()
+					m.revisions[pid] = revision
 					m.workersMu.Unlock()
 
 					m.startNewWorker(ctx, pid, latestCfg)
