@@ -15,3 +15,6 @@ vendor/
 logs
 .antigravitycli/
 .kilo/
+
+.env*
+!.env.example

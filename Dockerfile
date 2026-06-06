@@ -1,10 +1,14 @@
 # Stage 1: Build
-FROM golang:1.26.1-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache git gcc musl-dev
+RUN apk add --no-cache git gcc musl-dev openssh-client
+
+RUN --mount=type=ssh git config --global url."git@bitbucket.org:".insteadOf "https://bitbucket.org/" && \
+    mkdir -p -m 0600 ~/.ssh && \
+    ssh-keyscan bitbucket.org >> ~/.ssh/known_hosts
 
 # Copy go mod and sum
 COPY go.mod go.sum ./
@@ -12,8 +16,12 @@ COPY go.mod go.sum ./
 # Copy internal/vendor directory due to replace directive in go.mod
 COPY internal/vendor ./internal/vendor
 
-# Download dependencies
-RUN go mod download
+# Download dependencies using SSH agent forwarding and configure git for private bitbucket modules
+RUN --mount=type=ssh \
+    git config --global url."git@bitbucket.org:".insteadOf "https://bitbucket.org/" && \
+    mkdir -p -m 0600 ~/.ssh && \
+    ssh-keyscan bitbucket.org >> ~/.ssh/known_hosts && \
+    go mod download
 
 # Copy source code
 COPY . .

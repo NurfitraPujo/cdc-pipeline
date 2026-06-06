@@ -72,6 +72,7 @@ func main() {
 	// Use custom recovery to log errors with zerolog
 	r := gin.New()
 	r.Use(gin.LoggerWithWriter(os.Stderr), gin.Recovery())
+	r.Use(api.CORSMiddleware())
 
 	// Public Health Checks & Metrics (for Kubernetes)
 	r.GET("/healthz", func(c *gin.Context) {
