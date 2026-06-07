@@ -210,7 +210,7 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.Name, validation.Required),
 		validation.Field(&p.Sources, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
-		validation.Field(&p.Tables, validation.Required, validation.Length(1, 0)),
+		validation.Field(&p.Tables),
 		validation.Field(&p.Retry),
 	)
 }

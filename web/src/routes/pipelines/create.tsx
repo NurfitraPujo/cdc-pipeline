@@ -116,9 +116,6 @@ function CreatePipelinePage() {
 		if (!selectedSink) {
 			errors.sink = "Please select a sink";
 		}
-		if (selectedTables.size === 0) {
-			errors.tables = "Please select at least one table";
-		}
 
 		if (Object.keys(errors).length > 0) {
 			setValidationErrors(errors);
@@ -142,8 +139,7 @@ function CreatePipelinePage() {
 	const canCreate =
 		pipelineId.trim() !== "" &&
 		selectedSource !== null &&
-		selectedSink !== null &&
-		selectedTables.size > 0;
+		selectedSink !== null;
 
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
