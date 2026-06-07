@@ -56,6 +56,16 @@ export function unwrap<T = unknown>(result: {
 			errObj?.error ?? `Request failed (${result.response.status})`,
 		);
 	}
+	if (result.response.status === 204) {
+		return undefined as T;
+	}
+	if (
+		result.response.status >= 200 &&
+		result.response.status < 300 &&
+		!result.data
+	) {
+		return undefined as T;
+	}
 	if (!result.data) {
 		throw new Error(`Request failed (${result.response.status})`);
 	}

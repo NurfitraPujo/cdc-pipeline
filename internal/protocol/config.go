@@ -2,12 +2,14 @@ package protocol
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/go-ozzo/ozzo-validation/v4/is"
 )
+
+var reID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 //go:generate msgp
 
@@ -204,7 +206,7 @@ type PipelineConfig struct {
 
 func (p PipelineConfig) Validate() error {
 	return validation.ValidateStruct(&p,
-		validation.Field(&p.ID, validation.Required, is.Alphanumeric),
+		validation.Field(&p.ID, validation.Required, validation.Match(reID)),
 		validation.Field(&p.Name, validation.Required),
 		validation.Field(&p.Sources, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
@@ -234,7 +236,7 @@ type SourceConfig struct {
 
 func (s SourceConfig) Validate() error {
 	return validation.ValidateStruct(&s,
-		validation.Field(&s.ID, validation.Required, is.Alphanumeric),
+		validation.Field(&s.ID, validation.Required, validation.Match(reID)),
 		validation.Field(&s.Type, validation.Required, validation.In("postgres")),
 		validation.Field(&s.Host, validation.Required),
 		validation.Field(&s.Port, validation.Required, validation.Min(1), validation.Max(65535)),
@@ -252,7 +254,7 @@ type SinkConfig struct {
 
 func (s SinkConfig) Validate() error {
 	return validation.ValidateStruct(&s,
-		validation.Field(&s.ID, validation.Required, is.Alphanumeric),
+		validation.Field(&s.ID, validation.Required, validation.Match(reID)),
 		validation.Field(&s.Type, validation.Required, validation.In("databend", "postgres_debug")),
 		validation.Field(&s.DSN, validation.Required),
 	)

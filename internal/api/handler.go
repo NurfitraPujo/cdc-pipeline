@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +16,11 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/singleflight"
+
+	// Database drivers for test connections
+	_ "github.com/datafuselabs/databend-go"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/lib/pq"
 )
 
 type Handler struct {
@@ -672,8 +680,6 @@ func (h *Handler) ListSources(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	encryptionKey := crypto.GetEncryptionKey()
 	var sources []protocol.SourceConfig
 	for _, key := range keys {
 		if strings.HasPrefix(key, protocol.PrefixSourceConfig) {
@@ -683,15 +689,7 @@ func (h *Handler) ListSources(c *gin.Context) {
 			}
 			var cfg protocol.SourceConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
-				// Decrypt sensitive fields
-				if cfg.PassEncrypted != "" {
-					decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
-					if err != nil {
-						log.Warn().Err(err).Str("source_id", cfg.ID).Msg("Failed to decrypt password, returning encrypted value")
-					} else {
-						cfg.PassEncrypted = decrypted
-					}
-				}
+				cfg.PassEncrypted = ""
 				sources = append(sources, cfg)
 			}
 		}
@@ -772,9 +770,19 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 		return
 	}
 
-	// Encrypt sensitive fields
-	key := crypto.GetEncryptionKey()
-	if cfg.PassEncrypted != "" {
+	// Encrypt sensitive fields or preserve existing
+	var oldCfg protocol.SourceConfig
+	oldKey := protocol.SourceConfigKey(id)
+	if entry, err := h.kv.Get(oldKey); err == nil {
+		_ = json.Unmarshal(entry.Value(), &oldCfg)
+	}
+
+	if cfg.PassEncrypted == "" {
+		cfg.PassEncrypted = oldCfg.PassEncrypted
+	} else if cfg.PassEncrypted == "__CLEAR__" {
+		cfg.PassEncrypted = ""
+	} else {
+		key := crypto.GetEncryptionKey()
 		encrypted, err := crypto.Encrypt(cfg.PassEncrypted, key)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt password"})
@@ -840,18 +848,11 @@ func (h *Handler) GetSource(c *gin.Context) {
 		return
 	}
 
-	// Decrypt sensitive fields
-	encryptionKey := crypto.GetEncryptionKey()
-	if cfg.PassEncrypted != "" {
-		decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encryptionKey)
-		if err != nil {
-			log.Warn().Err(err).Str("source_id", cfg.ID).Msg("Failed to decrypt password, returning encrypted value")
-		} else {
-			cfg.PassEncrypted = decrypted
-		}
-	}
+	// Scrub sensitive fields to avoid shoulder-surfing and leakages.
+	// The frontend will preserve existing passwords by omitting them from PUT payloads.
+	cfg.PassEncrypted = ""
 
-	c.JSON(http.StatusOK, cfg)
+	c.JSON(http.StatusOK, SourceConfigFromProtocol(cfg))
 }
 
 // GetSourceSchema triggers or retrieves table schema discovery for a source.
@@ -942,7 +943,7 @@ func (h *Handler) ListSinks(c *gin.Context) {
 					if err != nil {
 						log.Warn().Err(err).Str("sink_id", cfg.ID).Msg("Failed to decrypt DSN, returning encrypted value")
 					} else {
-						cfg.DSN = decrypted
+						cfg.DSN = maskDSN(decrypted)
 					}
 				}
 				sinks = append(sinks, cfg)
@@ -985,7 +986,7 @@ func (h *Handler) GetSink(c *gin.Context) {
 		if err != nil {
 			log.Warn().Err(err).Str("sink_id", cfg.ID).Msg("Failed to decrypt DSN, returning encrypted value")
 		} else {
-			cfg.DSN = decrypted
+			cfg.DSN = maskDSN(decrypted)
 		}
 	}
 
@@ -1064,8 +1065,25 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 		return
 	}
 
-	// Encrypt sensitive fields
+	// Encrypt sensitive fields or reconstruct if masked
 	key := crypto.GetEncryptionKey()
+	var oldCfg protocol.SinkConfig
+	oldKey := protocol.SinkConfigKey(id)
+	if entry, err := h.kv.Get(oldKey); err == nil {
+		_ = json.Unmarshal(entry.Value(), &oldCfg)
+	}
+
+	var decryptedOldDSN string
+	if oldCfg.DSN != "" {
+		decrypted, err := crypto.Decrypt(oldCfg.DSN, key)
+		if err == nil {
+			decryptedOldDSN = decrypted
+		}
+	}
+
+	reconstructed := reconstructDSN(cfg.DSN, decryptedOldDSN)
+	cfg.DSN = reconstructed
+
 	if cfg.DSN != "" {
 		encrypted, err := crypto.Encrypt(cfg.DSN, key)
 		if err != nil {
@@ -1248,4 +1266,167 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+}
+
+func maskDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	if u.User != nil {
+		_, hasPassword := u.User.Password()
+		if hasPassword {
+			u.User = url.UserPassword(u.User.Username(), "***")
+			return u.String()
+		}
+	}
+	return dsn
+}
+
+func reconstructDSN(newDSN, oldDSN string) string {
+	uNew, err := url.Parse(newDSN)
+	if err != nil {
+		return newDSN
+	}
+	if uNew.User != nil {
+		pass, hasPassword := uNew.User.Password()
+		if hasPassword && pass == "***" {
+			uOld, err := url.Parse(oldDSN)
+			if err == nil && uOld.User != nil {
+				oldPass, hasOldPassword := uOld.User.Password()
+				if hasOldPassword {
+					uNew.User = url.UserPassword(uNew.User.Username(), oldPass)
+					return uNew.String()
+				}
+			}
+		}
+	}
+	return newDSN
+}
+
+// TestSourceConnection tests connection to the source database.
+func (h *Handler) TestSourceConnection(c *gin.Context) {
+	var cfg protocol.SourceConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	// If id is provided and pass is empty, inject old password from KV
+	if cfg.PassEncrypted == "" {
+		if cfg.ID != "" {
+			key := protocol.SourceConfigKey(cfg.ID)
+			if entry, err := h.kv.Get(key); err == nil {
+				var oldCfg protocol.SourceConfig
+				if err := json.Unmarshal(entry.Value(), &oldCfg); err == nil {
+					encKey := crypto.GetEncryptionKey()
+					if oldCfg.PassEncrypted != "" {
+						decrypted, err := crypto.Decrypt(oldCfg.PassEncrypted, encKey)
+						if err == nil {
+							cfg.PassEncrypted = decrypted
+						}
+					}
+				}
+			}
+		}
+	} else if cfg.PassEncrypted == "__CLEAR__" {
+		cfg.PassEncrypted = ""
+	}
+
+	u := &url.URL{
+		Scheme: "postgres", Host: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		User: url.UserPassword(cfg.User, cfg.PassEncrypted), Path: cfg.Database,
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	q.Set("connect_timeout", "3")
+	u.RawQuery = q.Encode()
+	dsn := u.String()
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to open connection: %v", err)})
+		return
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Database connection failed: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Connection successful"})
+}
+
+// TestSinkConnection tests connection to the sink database.
+func (h *Handler) TestSinkConnection(c *gin.Context) {
+	var cfg protocol.SinkConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	// Parse DSN to check if password is masked. If ID is provided, reconstruct it.
+	if cfg.ID != "" && cfg.DSN != "" {
+		u, err := url.Parse(cfg.DSN)
+		if err == nil && u.User != nil {
+			pass, hasPass := u.User.Password()
+			if hasPass && pass == "***" {
+				key := protocol.SinkConfigKey(cfg.ID)
+				if entry, err := h.kv.Get(key); err == nil {
+					var oldCfg protocol.SinkConfig
+					if err := json.Unmarshal(entry.Value(), &oldCfg); err == nil {
+						encKey := crypto.GetEncryptionKey()
+						decrypted, err := crypto.Decrypt(oldCfg.DSN, encKey)
+						if err == nil {
+							cfg.DSN = reconstructDSN(cfg.DSN, decrypted)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if cfg.Type == "postgres_debug" {
+		db, err := sql.Open("postgres", cfg.DSN)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to open connection: %v", err)})
+			return
+		}
+		defer db.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := db.PingContext(ctx); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Connection failed: %v", err)})
+			return
+		}
+	} else if cfg.Type == "databend" {
+		db, err := sql.Open("databend", cfg.DSN)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to open connection: %v", err)})
+			return
+		}
+		defer db.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := db.PingContext(ctx); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Connection failed: %v", err)})
+			return
+		}
+	} else {
+		_, err := url.Parse(cfg.DSN)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid DSN: %v", err)})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Connection successful"})
 }

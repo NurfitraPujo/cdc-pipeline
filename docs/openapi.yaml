@@ -576,6 +576,36 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /sources/test:
+    post:
+      tags: [Sources]
+      summary: Test source connection
+      description: |
+        Tests connection to the source database using the provided configuration.
+        If the password is blank and the ID matches an existing source, the
+        existing password is used.
+      operationId: testSourceConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceConfig'
+      responses:
+        '200':
+          description: Connection test succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestConnectionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
   /sinks:
     get:
       tags: [Sinks]
@@ -681,6 +711,36 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /sinks/test:
+    post:
+      tags: [Sinks]
+      summary: Test sink connection
+      description: |
+        Tests connection to the sink destination using the provided configuration.
+        If the DSN is masked and the ID matches an existing sink, the password
+        from the existing DSN is reconstructed.
+      operationId: testSinkConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SinkConfig'
+      responses:
+        '200':
+          description: Connection test succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestConnectionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
   /workers/{id}/heartbeat:
     parameters:
       - $ref: '#/components/parameters/PathID'
@@ -738,10 +798,10 @@ components:
       in: path
       name: id
       required: true
-      description: Resource identifier (alphanumeric).
+      description: Resource identifier (alphanumeric, dashes, underscores).
       schema:
         type: string
-        pattern: '^[A-Za-z0-9]+$'
+        pattern: '^[A-Za-z0-9_-]+$'
 
   responses:
     BadRequest:
@@ -935,8 +995,8 @@ components:
       properties:
         id:
           type: string
-          pattern: '^[A-Za-z0-9]+$'
-          description: Unique pipeline identifier (alphanumeric).
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Unique pipeline identifier (alphanumeric, dashes, underscores).
         name:
           type: string
           description: Human-readable pipeline name.
@@ -984,8 +1044,8 @@ components:
       properties:
         id:
           type: string
-          pattern: '^[A-Za-z0-9]+$'
-          description: Unique source identifier (alphanumeric).
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Unique source identifier (alphanumeric, dashes, underscores).
         type:
           type: string
           enum: [postgres]
@@ -1060,8 +1120,8 @@ components:
       properties:
         id:
           type: string
-          pattern: '^[A-Za-z0-9]+$'
-          description: Unique sink identifier (alphanumeric).
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Unique sink identifier (alphanumeric, dashes, underscores).
         type:
           type: string
           enum: [databend, postgres_debug]
@@ -1260,3 +1320,16 @@ components:
         status:
           type: string
           example: restart triggered
+
+    TestConnectionResponse:
+      type: object
+      description: Response returned when a connection test succeeds.
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          example: ok
+        message:
+          type: string
+          example: Connection successful
+

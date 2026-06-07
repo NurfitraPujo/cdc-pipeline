@@ -86,8 +86,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      ssh:
-        - default
     container_name: cdc-api
     restart: unless-stopped
     entrypoint: ["/app/api"]
@@ -98,7 +96,7 @@ services:
       - PORT=8080
       - ENV=development
       - LOG_LEVEL=debug
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-long!}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-lon}
       - JWT_SECRET=${JWT_SECRET:-my-super-secret-jwt-key!}
     depends_on:
       nats:
@@ -111,8 +109,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      ssh:
-        - default
     container_name: cdc-pipeline
     restart: unless-stopped
     entrypoint: ["/app/worker"]
@@ -124,7 +120,7 @@ services:
       - ENV=development
       - LOG_LEVEL=debug
       - WORKER_GROUP=local
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-long!}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-lon}
       # Runtime overrides for bootstrapping
       - POSTGRES_SOURCE_HOST=postgres-source
       - POSTGRES_USER=${POSTGRES_USER:-postgres}

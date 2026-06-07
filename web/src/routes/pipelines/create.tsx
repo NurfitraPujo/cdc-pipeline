@@ -106,6 +106,9 @@ function CreatePipelinePage() {
 
 		if (!pipelineId.trim()) {
 			errors.pipelineId = "Pipeline ID is required";
+		} else if (!/^[a-zA-Z0-9_-]+$/.test(pipelineId)) {
+			errors.pipelineId =
+				"Pipeline ID must be alphanumeric (dashes/underscores allowed)";
 		}
 		if (!selectedSource) {
 			errors.source = "Please select a source";

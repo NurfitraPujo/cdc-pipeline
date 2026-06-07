@@ -143,7 +143,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -172,7 +172,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -205,7 +205,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -230,7 +230,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -290,7 +290,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -319,7 +319,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -344,7 +344,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -358,6 +358,28 @@ export interface paths {
 		get: operations["listSourceTables"];
 		put?: never;
 		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/sources/test": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Test source connection
+		 * @description Tests connection to the source database using the provided configuration.
+		 *     If the password is blank and the ID matches an existing source, the
+		 *     existing password is used.
+		 */
+		post: operations["testSourceConnection"];
 		delete?: never;
 		options?: never;
 		head?: never;
@@ -395,7 +417,7 @@ export interface paths {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -419,12 +441,34 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/sinks/test": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Test sink connection
+		 * @description Tests connection to the sink destination using the provided configuration.
+		 *     If the DSN is masked and the ID matches an existing sink, the password
+		 *     from the existing DSN is reconstructed.
+		 */
+		post: operations["testSinkConnection"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/workers/{id}/heartbeat": {
 		parameters: {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -569,7 +613,7 @@ export interface components {
 		};
 		/** @description CDC pipeline configuration. */
 		PipelineConfig: {
-			/** @description Unique pipeline identifier (alphanumeric). */
+			/** @description Unique pipeline identifier (alphanumeric, dashes, underscores). */
 			id: string;
 			/** @description Human-readable pipeline name. */
 			name: string;
@@ -592,7 +636,7 @@ export interface components {
 		};
 		/** @description Source database connection configuration. */
 		SourceConfig: {
-			/** @description Unique source identifier (alphanumeric). */
+			/** @description Unique source identifier (alphanumeric, dashes, underscores). */
 			id: string;
 			/**
 			 * @description Source database type. Only "postgres" is supported.
@@ -636,7 +680,7 @@ export interface components {
 		};
 		/** @description Sink destination connection configuration. */
 		SinkConfig: {
-			/** @description Unique sink identifier (alphanumeric). */
+			/** @description Unique sink identifier (alphanumeric, dashes, underscores). */
 			id: string;
 			/**
 			 * @description Sink type. `postgres_debug` sinks are excluded from
@@ -781,6 +825,13 @@ export interface components {
 			/** @example restart triggered */
 			status: string;
 		};
+		/** @description Response returned when a connection test succeeds. */
+		TestConnectionResponse: {
+			/** @example ok */
+			status: string;
+			/** @example Connection successful */
+			message: string;
+		};
 	};
 	responses: {
 		/** @description Invalid request body or parameters */
@@ -834,7 +885,7 @@ export interface components {
 		};
 	};
 	parameters: {
-		/** @description Resource identifier (alphanumeric). */
+		/** @description Resource identifier (alphanumeric, dashes, underscores). */
 		PathID: string;
 	};
 	requestBodies: never;
@@ -1028,7 +1079,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1054,7 +1105,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1085,7 +1136,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1108,7 +1159,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1133,7 +1184,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1159,7 +1210,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1233,7 +1284,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1259,7 +1310,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1289,7 +1340,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1312,7 +1363,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1336,7 +1387,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1352,6 +1403,33 @@ export interface operations {
 					"application/json": components["schemas"]["SourceTablesResponse"];
 				};
 			};
+			401: components["responses"]["Unauthorized"];
+			500: components["responses"]["InternalServerError"];
+		};
+	};
+	testSourceConnection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["SourceConfig"];
+			};
+		};
+		responses: {
+			/** @description Connection test succeeded */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["TestConnectionResponse"];
+				};
+			};
+			400: components["responses"]["BadRequest"];
 			401: components["responses"]["Unauthorized"];
 			500: components["responses"]["InternalServerError"];
 		};
@@ -1410,7 +1488,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1436,7 +1514,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1466,7 +1544,7 @@ export interface operations {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;
@@ -1484,12 +1562,39 @@ export interface operations {
 			500: components["responses"]["InternalServerError"];
 		};
 	};
+	testSinkConnection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["SinkConfig"];
+			};
+		};
+		responses: {
+			/** @description Connection test succeeded */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["TestConnectionResponse"];
+				};
+			};
+			400: components["responses"]["BadRequest"];
+			401: components["responses"]["Unauthorized"];
+			500: components["responses"]["InternalServerError"];
+		};
+	};
 	getWorkerHeartbeat: {
 		parameters: {
 			query?: never;
 			header?: never;
 			path: {
-				/** @description Resource identifier (alphanumeric). */
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
 				id: components["parameters"]["PathID"];
 			};
 			cookie?: never;

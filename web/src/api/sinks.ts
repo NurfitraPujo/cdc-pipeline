@@ -4,6 +4,8 @@ import { apiClient, unwrap } from "./schema-client";
 
 type WireSink = components["schemas"]["SinkConfig"];
 type WireSinkList = components["schemas"]["SinkListResponse"];
+type WireTestConnectionResponse =
+	components["schemas"]["TestConnectionResponse"];
 
 export type SinkType =
 	| "postgres"
@@ -29,6 +31,8 @@ export interface Sink {
 	topic?: string;
 	url?: string;
 	headers?: Record<string, string>;
+	maxAckPending?: number;
+	options?: Record<string, unknown>;
 }
 
 export type CreateSinkRequest = Omit<Sink, "id"> & { id?: string };
@@ -68,5 +72,15 @@ export const sinksApi = {
 			params: { path: { id } },
 		});
 		unwrap<undefined>(result);
+	},
+
+	async testConnection(
+		data: CreateSinkRequest,
+	): Promise<WireTestConnectionResponse> {
+		const body = camelToSnake<WireSink>(data);
+		const result = await apiClient.POST("/sinks/test", { body });
+		return snakeToCamel<WireTestConnectionResponse>(
+			unwrap<WireTestConnectionResponse>(result),
+		);
 	},
 };

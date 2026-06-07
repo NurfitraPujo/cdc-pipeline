@@ -126,6 +126,7 @@ func main() {
 				sources.DELETE("/:id", h.DeleteSource)
 				sources.GET("/:id/schema", h.GetSourceSchema)
 				sources.GET("/:id/tables", h.ListSourceTables)
+				sources.POST("/test", h.TestSourceConnection)
 			}
 
 			sinks := authorized.Group("/sinks")
@@ -135,6 +136,7 @@ func main() {
 				sinks.GET("/:id", h.GetSink)
 				sinks.PUT("/:id", h.UpdateSink)
 				sinks.DELETE("/:id", h.DeleteSink)
+				sinks.POST("/test", h.TestSinkConnection)
 			}
 
 			workers := authorized.Group("/workers")

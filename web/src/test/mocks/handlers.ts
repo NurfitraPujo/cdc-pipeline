@@ -144,16 +144,130 @@ export const handlers = [
 
 	// Sources
 	http.get(`${API_BASE}/sources`, () => {
-		return HttpResponse.json(mockSources);
+		return HttpResponse.json({ sources: mockSources });
+	}),
+
+	http.get<{ id: string }>(`${API_BASE}/sources/:id`, ({ params }) => {
+		const source = mockSources.find((s) => s.id === params.id);
+		if (!source) {
+			return HttpResponse.json({ error: "Source not found" }, { status: 404 });
+		}
+		return HttpResponse.json(source);
+	}),
+
+	http.post<never, any>(`${API_BASE}/sources`, async ({ request }) => {
+		const body = await request.json();
+		if (mockSources.some((s) => s.id === body.id)) {
+			return HttpResponse.json(
+				{ error: "Source already exists" },
+				{ status: 400 },
+			);
+		}
+		const newSource = { ...body };
+		mockSources.push(newSource);
+		return HttpResponse.json(newSource, { status: 201 });
+	}),
+
+	http.put<{ id: string }, any>(
+		`${API_BASE}/sources/:id`,
+		async ({ params, request }) => {
+			const body = await request.json();
+			const index = mockSources.findIndex((s) => s.id === params.id);
+			if (index === -1) {
+				return HttpResponse.json(
+					{ error: "Source not found" },
+					{ status: 404 },
+				);
+			}
+			mockSources[index] = { ...mockSources[index], ...body };
+			return HttpResponse.json(mockSources[index]);
+		},
+	),
+
+	http.delete<{ id: string }>(`${API_BASE}/sources/:id`, ({ params }) => {
+		const index = mockSources.findIndex((s) => s.id === params.id);
+		if (index === -1) {
+			return HttpResponse.json({ error: "Source not found" }, { status: 404 });
+		}
+		mockSources.splice(index, 1);
+		return new HttpResponse(null, { status: 204 });
 	}),
 
 	http.get<{ id: string }>(`${API_BASE}/sources/:id/tables`, () => {
 		return HttpResponse.json(["users", "orders", "products", "categories"]);
 	}),
 
+	http.post<never, any>(`${API_BASE}/sources/test`, async ({ request }) => {
+		const body = await request.json();
+		if (body.host === "invalid") {
+			return HttpResponse.json({ error: "Host not found" }, { status: 400 });
+		}
+		return HttpResponse.json({
+			status: "ok",
+			message: "Connection successful",
+		});
+	}),
+
 	// Sinks
 	http.get(`${API_BASE}/sinks`, () => {
-		return HttpResponse.json(mockSinks);
+		return HttpResponse.json({ sinks: mockSinks });
+	}),
+
+	http.get<{ id: string }>(`${API_BASE}/sinks/:id`, ({ params }) => {
+		const sink = mockSinks.find((s) => s.id === params.id);
+		if (!sink) {
+			return HttpResponse.json({ error: "Sink not found" }, { status: 404 });
+		}
+		return HttpResponse.json(sink);
+	}),
+
+	http.post<never, any>(`${API_BASE}/sinks`, async ({ request }) => {
+		const body = await request.json();
+		if (mockSinks.some((s) => s.id === body.id)) {
+			return HttpResponse.json(
+				{ error: "Sink already exists" },
+				{ status: 400 },
+			);
+		}
+		const newSink = { ...body };
+		mockSinks.push(newSink);
+		return HttpResponse.json(newSink, { status: 201 });
+	}),
+
+	http.put<{ id: string }, any>(
+		`${API_BASE}/sinks/:id`,
+		async ({ params, request }) => {
+			const body = await request.json();
+			const index = mockSinks.findIndex((s) => s.id === params.id);
+			if (index === -1) {
+				return HttpResponse.json({ error: "Sink not found" }, { status: 404 });
+			}
+			mockSinks[index] = { ...mockSinks[index], ...body };
+			return HttpResponse.json(mockSinks[index]);
+		},
+	),
+
+	http.delete<{ id: string }>(`${API_BASE}/sinks/:id`, ({ params }) => {
+		const index = mockSinks.findIndex((s) => s.id === params.id);
+		if (index === -1) {
+			return HttpResponse.json({ error: "Sink not found" }, { status: 404 });
+		}
+		mockSinks.splice(index, 1);
+		return new HttpResponse(null, { status: 204 });
+	}),
+
+	http.post<never, any>(`${API_BASE}/sinks/test`, async ({ request }) => {
+		const body = await request.json();
+		if (body.dsn === "invalid") {
+			return HttpResponse.json(
+				{ error: "Failed to connect to sink" },
+				{ status: 400 },
+			);
+		}
+		return HttpResponse.json({
+			status: "ok",
+			message: "Connection successful",
+		});
 	}),
 
 	// Global Config

@@ -6,6 +6,8 @@ type WireSource = components["schemas"]["SourceConfig"];
 type WireSourceList = components["schemas"]["SourceListResponse"];
 type WireSourceSchema = components["schemas"]["SourceSchemaResponse"];
 type WireSourceTables = components["schemas"]["SourceTablesResponse"];
+type WireTestConnectionResponse =
+	components["schemas"]["TestConnectionResponse"];
 
 export interface Source {
 	id: string;
@@ -17,6 +19,14 @@ export interface Source {
 	user: string;
 	pass?: string;
 	tables: string[];
+	slotName?: string;
+	publicationName?: string;
+	batchSize?: number;
+	batchWait?: string;
+	discoveryInterval?: string;
+	snapshotChunkSize?: number;
+	snapshotInterval?: string;
+	schemas?: string[];
 }
 
 export interface SourceSchema {
@@ -82,5 +92,15 @@ export const sourcesApi = {
 		});
 		const data = unwrap<WireSourceTables>(result);
 		return (data.tables ?? []).map((t) => t.name ?? "");
+	},
+
+	async testConnection(
+		data: CreateSourceRequest,
+	): Promise<WireTestConnectionResponse> {
+		const body = camelToSnake<WireSource>(data);
+		const result = await apiClient.POST("/sources/test", { body });
+		return snakeToCamel<WireTestConnectionResponse>(
+			unwrap<WireTestConnectionResponse>(result),
+		);
 	},
 };

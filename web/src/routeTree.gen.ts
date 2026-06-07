@@ -17,11 +17,15 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SourcesIndexRouteImport } from './routes/sources/index'
 import { Route as SinksIndexRouteImport } from './routes/sinks/index'
 import { Route as PipelinesIndexRouteImport } from './routes/pipelines/index'
+import { Route as SourcesCreateRouteImport } from './routes/sources/create'
+import { Route as SinksCreateRouteImport } from './routes/sinks/create'
 import { Route as PipelinesCreateRouteImport } from './routes/pipelines/create'
 import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
 import { Route as DemoTableRouteImport } from './routes/demo/table'
 import { Route as DemoStoreRouteImport } from './routes/demo/store'
 import { Route as PipelinesIdIndexRouteImport } from './routes/pipelines/$id/index'
+import { Route as SourcesIdEditRouteImport } from './routes/sources/$id/edit'
+import { Route as SinksIdEditRouteImport } from './routes/sinks/$id/edit'
 import { Route as PipelinesIdEditRouteImport } from './routes/pipelines/$id/edit'
 
 const LoginRoute = LoginRouteImport.update({
@@ -64,6 +68,16 @@ const PipelinesIndexRoute = PipelinesIndexRouteImport.update({
   path: '/pipelines/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SourcesCreateRoute = SourcesCreateRouteImport.update({
+  id: '/sources/create',
+  path: '/sources/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SinksCreateRoute = SinksCreateRouteImport.update({
+  id: '/sinks/create',
+  path: '/sinks/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PipelinesCreateRoute = PipelinesCreateRouteImport.update({
   id: '/pipelines/create',
   path: '/pipelines/create',
@@ -89,6 +103,16 @@ const PipelinesIdIndexRoute = PipelinesIdIndexRouteImport.update({
   path: '/pipelines/$id/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SourcesIdEditRoute = SourcesIdEditRouteImport.update({
+  id: '/sources/$id/edit',
+  path: '/sources/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SinksIdEditRoute = SinksIdEditRouteImport.update({
+  id: '/sinks/$id/edit',
+  path: '/sinks/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PipelinesIdEditRoute = PipelinesIdEditRouteImport.update({
   id: '/pipelines/$id/edit',
   path: '/pipelines/$id/edit',
@@ -105,10 +129,14 @@ export interface FileRoutesByFullPath {
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/pipelines/create': typeof PipelinesCreateRoute
+  '/sinks/create': typeof SinksCreateRoute
+  '/sources/create': typeof SourcesCreateRoute
   '/pipelines/': typeof PipelinesIndexRoute
   '/sinks/': typeof SinksIndexRoute
   '/sources/': typeof SourcesIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
+  '/sinks/$id/edit': typeof SinksIdEditRoute
+  '/sources/$id/edit': typeof SourcesIdEditRoute
   '/pipelines/$id/': typeof PipelinesIdIndexRoute
 }
 export interface FileRoutesByTo {
@@ -121,10 +149,14 @@ export interface FileRoutesByTo {
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/pipelines/create': typeof PipelinesCreateRoute
+  '/sinks/create': typeof SinksCreateRoute
+  '/sources/create': typeof SourcesCreateRoute
   '/pipelines': typeof PipelinesIndexRoute
   '/sinks': typeof SinksIndexRoute
   '/sources': typeof SourcesIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
+  '/sinks/$id/edit': typeof SinksIdEditRoute
+  '/sources/$id/edit': typeof SourcesIdEditRoute
   '/pipelines/$id': typeof PipelinesIdIndexRoute
 }
 export interface FileRoutesById {
@@ -138,10 +170,14 @@ export interface FileRoutesById {
   '/demo/table': typeof DemoTableRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/pipelines/create': typeof PipelinesCreateRoute
+  '/sinks/create': typeof SinksCreateRoute
+  '/sources/create': typeof SourcesCreateRoute
   '/pipelines/': typeof PipelinesIndexRoute
   '/sinks/': typeof SinksIndexRoute
   '/sources/': typeof SourcesIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
+  '/sinks/$id/edit': typeof SinksIdEditRoute
+  '/sources/$id/edit': typeof SourcesIdEditRoute
   '/pipelines/$id/': typeof PipelinesIdIndexRoute
 }
 export interface FileRouteTypes {
@@ -156,10 +192,14 @@ export interface FileRouteTypes {
     | '/demo/table'
     | '/demo/tanstack-query'
     | '/pipelines/create'
+    | '/sinks/create'
+    | '/sources/create'
     | '/pipelines/'
     | '/sinks/'
     | '/sources/'
     | '/pipelines/$id/edit'
+    | '/sinks/$id/edit'
+    | '/sources/$id/edit'
     | '/pipelines/$id/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -172,10 +212,14 @@ export interface FileRouteTypes {
     | '/demo/table'
     | '/demo/tanstack-query'
     | '/pipelines/create'
+    | '/sinks/create'
+    | '/sources/create'
     | '/pipelines'
     | '/sinks'
     | '/sources'
     | '/pipelines/$id/edit'
+    | '/sinks/$id/edit'
+    | '/sources/$id/edit'
     | '/pipelines/$id'
   id:
     | '__root__'
@@ -188,10 +232,14 @@ export interface FileRouteTypes {
     | '/demo/table'
     | '/demo/tanstack-query'
     | '/pipelines/create'
+    | '/sinks/create'
+    | '/sources/create'
     | '/pipelines/'
     | '/sinks/'
     | '/sources/'
     | '/pipelines/$id/edit'
+    | '/sinks/$id/edit'
+    | '/sources/$id/edit'
     | '/pipelines/$id/'
   fileRoutesById: FileRoutesById
 }
@@ -205,10 +253,14 @@ export interface RootRouteChildren {
   DemoTableRoute: typeof DemoTableRoute
   DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
   PipelinesCreateRoute: typeof PipelinesCreateRoute
+  SinksCreateRoute: typeof SinksCreateRoute
+  SourcesCreateRoute: typeof SourcesCreateRoute
   PipelinesIndexRoute: typeof PipelinesIndexRoute
   SinksIndexRoute: typeof SinksIndexRoute
   SourcesIndexRoute: typeof SourcesIndexRoute
   PipelinesIdEditRoute: typeof PipelinesIdEditRoute
+  SinksIdEditRoute: typeof SinksIdEditRoute
+  SourcesIdEditRoute: typeof SourcesIdEditRoute
   PipelinesIdIndexRoute: typeof PipelinesIdIndexRoute
 }
 
@@ -270,6 +322,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PipelinesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sources/create': {
+      id: '/sources/create'
+      path: '/sources/create'
+      fullPath: '/sources/create'
+      preLoaderRoute: typeof SourcesCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sinks/create': {
+      id: '/sinks/create'
+      path: '/sinks/create'
+      fullPath: '/sinks/create'
+      preLoaderRoute: typeof SinksCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pipelines/create': {
       id: '/pipelines/create'
       path: '/pipelines/create'
@@ -305,6 +371,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PipelinesIdIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sources/$id/edit': {
+      id: '/sources/$id/edit'
+      path: '/sources/$id/edit'
+      fullPath: '/sources/$id/edit'
+      preLoaderRoute: typeof SourcesIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sinks/$id/edit': {
+      id: '/sinks/$id/edit'
+      path: '/sinks/$id/edit'
+      fullPath: '/sinks/$id/edit'
+      preLoaderRoute: typeof SinksIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pipelines/$id/edit': {
       id: '/pipelines/$id/edit'
       path: '/pipelines/$id/edit'
@@ -325,10 +405,14 @@ const rootRouteChildren: RootRouteChildren = {
   DemoTableRoute: DemoTableRoute,
   DemoTanstackQueryRoute: DemoTanstackQueryRoute,
   PipelinesCreateRoute: PipelinesCreateRoute,
+  SinksCreateRoute: SinksCreateRoute,
+  SourcesCreateRoute: SourcesCreateRoute,
   PipelinesIndexRoute: PipelinesIndexRoute,
   SinksIndexRoute: SinksIndexRoute,
   SourcesIndexRoute: SourcesIndexRoute,
   PipelinesIdEditRoute: PipelinesIdEditRoute,
+  SinksIdEditRoute: SinksIdEditRoute,
+  SourcesIdEditRoute: SourcesIdEditRoute,
   PipelinesIdIndexRoute: PipelinesIdIndexRoute,
 }
 export const routeTree = rootRouteImport
