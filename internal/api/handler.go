@@ -908,6 +908,58 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 		}
 	}
 
+	if len(tables) == 0 {
+		// Attempt dynamic discovery from the source database
+		key := protocol.SourceConfigKey(sourceID)
+		if entry, err := h.kv.Get(key); err == nil {
+			var cfg protocol.SourceConfig
+			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+				// Decrypt password
+				encKey := crypto.GetEncryptionKey()
+				if cfg.PassEncrypted != "" {
+					decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encKey)
+					if err == nil {
+						cfg.PassEncrypted = decrypted
+					}
+				}
+				// Connect to database
+				u := &url.URL{
+					Scheme: "postgres", Host: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+					User: url.UserPassword(cfg.User, cfg.PassEncrypted), Path: cfg.Database,
+				}
+				q := u.Query()
+				q.Set("sslmode", "disable")
+				q.Set("connect_timeout", "3")
+				u.RawQuery = q.Encode()
+
+				db, err := sql.Open("pgx", u.String())
+				if err == nil {
+					defer db.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+
+					rows, err := db.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var tableName string
+							if err := rows.Scan(&tableName); err == nil {
+								// Filter out snapshot tables
+								if strings.Contains(tableName, "cdc_snapshot") {
+									continue
+								}
+								tables = append(tables, protocol.TableMetadata{
+									ID:   tableName,
+									Name: tableName,
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
 }
 
