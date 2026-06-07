@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/infra"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
@@ -55,7 +56,7 @@ func main() {
 	defer nc.Close()
 
 	if err := bootstrapKV(kv); err != nil {
-		log.Warn().Err(err).Msg("Failed to bootstrap KV")
+		log.Fatal().Err(err).Msg("Failed to bootstrap KV")
 	}
 
 	// 3. Shared Resources
@@ -254,6 +255,35 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 		seed.Auth.Password = string(hashed)
 	} else {
 		log.Error().Err(err).Msg("Failed to hash bootstrap password")
+	}
+
+	// Encrypt sensitive credentials for Sources and Sinks using internal/crypto
+	key := crypto.GetEncryptionKey()
+	if len(key) == 0 {
+		return fmt.Errorf("failed to bootstrap: ENCRYPTION_KEY environment variable is empty or missing")
+	}
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		return fmt.Errorf("failed to bootstrap: ENCRYPTION_KEY must be 16, 24, or 32 bytes (got %d)", len(key))
+	}
+
+	for i := range seed.Sources {
+		if seed.Sources[i].PassEncrypted != "" {
+			enc, err := crypto.Encrypt(seed.Sources[i].PassEncrypted, key)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt source password for %s: %w", seed.Sources[i].ID, err)
+			}
+			seed.Sources[i].PassEncrypted = enc
+		}
+	}
+
+	for i := range seed.Sinks {
+		if seed.Sinks[i].DSN != "" {
+			enc, err := crypto.Encrypt(seed.Sinks[i].DSN, key)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt sink DSN for %s: %w", seed.Sinks[i].ID, err)
+			}
+			seed.Sinks[i].DSN = enc
+		}
 	}
 
 	authData, _ := json.Marshal(seed.Auth)

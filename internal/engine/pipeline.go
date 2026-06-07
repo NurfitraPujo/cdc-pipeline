@@ -79,6 +79,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
 			return
 		}
+		srcCfg.Decrypt()
 
 		// Apply pipeline overrides
 		if p.config.BatchSize > 0 {

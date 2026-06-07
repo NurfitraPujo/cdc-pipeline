@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
@@ -813,25 +812,9 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 	cfg := p.sourceConfig
 	p.mu.RUnlock()
 
-	// 1. Decrypt Password
-	pass := ""
-	if cfg.PassEncrypted != "" {
-		key := crypto.GetEncryptionKey()
-		if key != nil {
-			var err error
-			pass, err = crypto.Decrypt(cfg.PassEncrypted, key)
-			if err != nil {
-				log.Warn().Err(err).Msg("Failed to decrypt source password, using as-is")
-				pass = cfg.PassEncrypted
-			}
-		} else {
-			pass = cfg.PassEncrypted
-		}
-	}
-
-	// 2. Construct DSN
+	// Construct DSN
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		cfg.User, pass, cfg.Host, cfg.Port, cfg.Database)
+		cfg.User, cfg.PassEncrypted, cfg.Host, cfg.Port, cfg.Database)
 
 	// 3. Open DB
 	db, err := sql.Open("postgres", dsn)

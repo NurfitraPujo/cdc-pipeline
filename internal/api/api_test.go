@@ -179,6 +179,8 @@ func TestAPI_Full(t *testing.T) {
 		// LIST
 		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineConfigKey("p1")}, nil).AnyTimes()
 		mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
+		mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
+		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		
 		req, _ = http.NewRequest("GET", "/api/v1/pipelines", nil)
 		req.Header.Set("Authorization", authHeader)
