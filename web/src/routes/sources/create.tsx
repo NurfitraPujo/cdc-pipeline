@@ -261,11 +261,11 @@ export function CreateSourcePage() {
 			{createMutation.isError && (
 				<Card className="mb-6 border-destructive bg-destructive/10">
 					<CardContent className="pt-6">
-						<div className="flex items-center gap-2 text-destructive">
+						<div className="flex items-center gap-2 text-destructive-foreground">
 							<AlertCircle className="h-5 w-5" />
 							<p className="font-semibold">Creation Failed</p>
 						</div>
-						<p className="mt-2 text-sm text-destructive">
+						<p className="mt-2 text-sm text-destructive-foreground">
 							{createMutation.error instanceof Error
 								? createMutation.error.message
 								: "An unexpected error occurred. Please try again."}
@@ -280,7 +280,7 @@ export function CreateSourcePage() {
 				>
 					<CardContent className="pt-6">
 						<div
-							className={`flex items-center gap-2 ${testResult.success ? "text-emerald-500" : "text-destructive"}`}
+							className={`flex items-center gap-2 ${testResult.success ? "text-emerald-500" : "text-destructive-foreground"}`}
 						>
 							<AlertCircle className="h-5 w-5" />
 							<p className="font-semibold">
@@ -290,7 +290,7 @@ export function CreateSourcePage() {
 							</p>
 						</div>
 						<p
-							className={`mt-2 text-sm ${testResult.success ? "text-emerald-600" : "text-destructive"}`}
+							className={`mt-2 text-sm ${testResult.success ? "text-emerald-600" : "text-destructive-foreground"}`}
 						>
 							{testResult.message}
 						</p>

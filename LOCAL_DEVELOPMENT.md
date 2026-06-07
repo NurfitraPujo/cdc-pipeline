@@ -153,6 +153,35 @@ To verify that Change Data Capture (CDC) replication is executing end-to-end:
    "SELECT * FROM cdc_debug_messages;"
    ```
 
+### Troubleshooting: SSH/Git Private Modules Build Failures
+
+When building the container images (`api` and `pipeline`), the build requires access to private dependencies (e.g., `bitbucket.org/daya-engineering/daya-contracts`). If you encounter `Permission denied (publickey)` or `classic builder doesn't support SSH keys` errors, resolve them using the steps below:
+
+#### 1. Ensure SSH Agent is Running and Keys are Loaded
+Before running the build, ensure your private SSH keys are loaded into your host machine's active SSH agent session:
+```bash
+# Start the ssh-agent (Bash/Zsh)
+eval $(ssh-agent -s)
+
+# Or start the ssh-agent (Fish)
+eval (ssh-agent -c)
+
+# Add your private SSH key
+ssh-add ~/.ssh/id_ed25519
+```
+
+#### 2. Building with Podman (via `podman-compose` wrapper)
+`podman-compose` does not automatically forward the `ssh` keys defined in `docker-compose.yaml` to the build engine. You must supply the build argument manually:
+```bash
+podman-compose --podman-build-args="--ssh=default" up -d --build
+```
+
+#### 3. Building with Docker (via `docker compose`)
+Docker requires BuildKit to support SSH agent forwarding during image compilation:
+```bash
+DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 docker compose up -d --build
+```
+
 ---
 
 ### Shutting Down
