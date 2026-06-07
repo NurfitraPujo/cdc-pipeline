@@ -17,6 +17,7 @@ export interface Pipeline {
 	batchSize?: number;
 	batchWait?: string;
 	retry?: components["schemas"]["RetryConfig"];
+	status?: string;
 }
 
 export interface PipelineListResponse {

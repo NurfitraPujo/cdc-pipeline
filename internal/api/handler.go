@@ -318,34 +318,9 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 				}
 
 				// Status filter (expensive but necessary if requested)
-				if statusFilter != "" {
-					actualStatus := "Healthy" // Default guess
-
-					tsKey := protocol.TransitionStateKey(cfg.ID)
-					if tsEntry, err := h.kv.Get(tsKey); err == nil {
-						var ts protocol.PipelineTransitionState
-						if err := json.Unmarshal(tsEntry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
-							actualStatus = "Transitioning"
-						}
-					}
-
-					if actualStatus == "Healthy" {
-						hbKey := protocol.WorkerHeartbeatKey(cfg.ID)
-						if hbEntry, err := h.kv.Get(hbKey); err == nil {
-							var hb protocol.WorkerHeartbeat
-							if err := json.Unmarshal(hbEntry.Value(), &hb); err == nil {
-								if time.Since(hb.UpdatedAt) > 60*time.Second {
-									actualStatus = "Error"
-								}
-							}
-						} else {
-							actualStatus = "Error"
-						}
-					}
-
-					if !strings.EqualFold(actualStatus, statusFilter) {
-						continue
-					}
+				actualStatus := h.getPipelineStatusString(cfg.ID)
+				if statusFilter != "" && !strings.EqualFold(actualStatus, statusFilter) {
+					continue
 				}
 
 				pipelines = append(pipelines, cfg)
@@ -365,12 +340,51 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 		pipelines = pipelines[start:end]
 	}
 
+	type PipelineListItem struct {
+		protocol.PipelineConfig
+		Status string `json:"status"`
+	}
+
+	var items []PipelineListItem
+	for _, pipe := range pipelines {
+		items = append(items, PipelineListItem{
+			PipelineConfig: pipe,
+			Status:         h.getPipelineStatusString(pipe.ID),
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"pipelines": pipelines,
+		"pipelines": items,
 		"total":     total,
 		"page":      page,
 		"limit":     limit,
 	})
+}
+
+func (h *Handler) getPipelineStatusString(id string) string {
+	actualStatus := "healthy"
+
+	tsKey := protocol.TransitionStateKey(id)
+	if tsEntry, err := h.kv.Get(tsKey); err == nil {
+		var ts protocol.PipelineTransitionState
+		if err := json.Unmarshal(tsEntry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
+			return "transitioning"
+		}
+	}
+
+	hbKey := protocol.WorkerHeartbeatKey(id)
+	if hbEntry, err := h.kv.Get(hbKey); err == nil {
+		var hb protocol.WorkerHeartbeat
+		if err := json.Unmarshal(hbEntry.Value(), &hb); err == nil {
+			if time.Since(hb.UpdatedAt) > 60*time.Second {
+				actualStatus = "error"
+			}
+		}
+	} else {
+		actualStatus = "error"
+	}
+
+	return actualStatus
 }
 
 // RestartPipeline triggers a reload for a specific pipeline.

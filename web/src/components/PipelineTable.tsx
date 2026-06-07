@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { type Pipeline, pipelinesApi } from "@/api/pipelines";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -59,6 +60,9 @@ function PipelineTableRow({
 				>
 					{pipeline.name}
 				</button>
+			</TableCell>
+			<TableCell>
+				<StatusBadge status={(pipeline.status as any) || "unknown"} />
 			</TableCell>
 			<TableCell>{pipeline.sources.length} source(s)</TableCell>
 			<TableCell>{pipeline.sinks.length} sink(s)</TableCell>
