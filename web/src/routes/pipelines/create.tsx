@@ -34,7 +34,7 @@ function CreatePipelinePage() {
 
 	const [pipelineId, setPipelineId] = useState("");
 	const [selectedSource, setSelectedSource] = useState<string | null>(null);
-	const [selectedSink, setSelectedSink] = useState<string | null>(null);
+	const [selectedSinks, setSelectedSinks] = useState<Set<string>>(new Set());
 	const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
 	const [validationErrors, setValidationErrors] = useState<
 		Record<string, string>
@@ -82,8 +82,16 @@ function CreatePipelinePage() {
 		}
 	};
 
-	const handleSelectSink = (sinkId: string) => {
-		setSelectedSink(sinkId);
+	const handleToggleSink = (sinkId: string) => {
+		setSelectedSinks((prev) => {
+			const next = new Set(prev);
+			if (next.has(sinkId)) {
+				next.delete(sinkId);
+			} else {
+				next.add(sinkId);
+			}
+			return next;
+		});
 		if (validationErrors.sink) {
 			setValidationErrors((prev) => ({ ...prev, sink: "" }));
 		}
@@ -113,8 +121,8 @@ function CreatePipelinePage() {
 		if (!selectedSource) {
 			errors.source = "Please select a source";
 		}
-		if (!selectedSink) {
-			errors.sink = "Please select a sink";
+		if (selectedSinks.size === 0) {
+			errors.sink = "Please select at least one sink";
 		}
 
 		if (Object.keys(errors).length > 0) {
@@ -123,15 +131,17 @@ function CreatePipelinePage() {
 		}
 
 		const source = sources.find((s) => s.id === selectedSource);
-		const sink = sinks.find((s) => s.id === selectedSink);
+		const selectedSinksList = sinks
+			.filter((s) => selectedSinks.has(s.id))
+			.map((s) => s.id);
 
-		if (!source || !sink) return;
+		if (!source || selectedSinksList.length === 0) return;
 
 		createMutation.mutate({
 			id: pipelineId,
 			name: pipelineId,
 			sources: [source.id],
-			sinks: [sink.id],
+			sinks: selectedSinksList,
 			tables: Array.from(selectedTables),
 		});
 	};
@@ -139,7 +149,7 @@ function CreatePipelinePage() {
 	const canCreate =
 		pipelineId.trim() !== "" &&
 		selectedSource !== null &&
-		selectedSink !== null;
+		selectedSinks.size > 0;
 
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
@@ -251,7 +261,7 @@ function CreatePipelinePage() {
 							<CardTitle>Select Sink</CardTitle>
 						</div>
 						<CardDescription>
-							Choose a destination for this pipeline.
+							Choose one or more destinations for this pipeline.
 						</CardDescription>
 					</CardHeader>
 					<CardContent>
@@ -271,11 +281,11 @@ function CreatePipelinePage() {
 										className="flex items-start gap-3 rounded-lg border p-4 cursor-pointer hover:bg-muted/50 transition-colors"
 									>
 										<input
-											type="radio"
+											type="checkbox"
 											name="sink"
-											checked={selectedSink === sink.id}
-											onChange={() => handleSelectSink(sink.id)}
-											className="mt-1 h-4 w-4"
+											checked={selectedSinks.has(sink.id)}
+											onChange={() => handleToggleSink(sink.id)}
+											className="mt-1 h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
 										/>
 										<div className="flex-1">
 											<p className="font-medium">{sink.id}</p>
