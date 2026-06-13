@@ -32,5 +32,9 @@ export default defineConfig({
 		reuseExistingServer: true,
 		stdout: "pipe",
 		stderr: "pipe",
+		env: {
+			VITE_API_BASE_URL: "http://localhost:8080/api/v1",
+			VITE_INTERNAL_API_BASE_URL: "http://localhost:8080/api/v1",
+		},
 	},
 });

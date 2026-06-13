@@ -10,10 +10,17 @@ import {
 	X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { camelToSnake } from "@/api/mappers";
 import { pipelinesApi } from "@/api/pipelines";
 import { sinksApi } from "@/api/sinks";
 import { sourcesApi } from "@/api/sources";
 
+import { AdvancedConfigPanel } from "@/components/pipelines/AdvancedConfigPanel";
+import {
+	type AdvancedConfig,
+	advancedConfigToPayload,
+	defaultAdvancedConfig,
+} from "@/components/pipelines/advancedConfig";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -23,6 +30,7 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { isValidDuration, parseDuration } from "@/lib/duration";
 
 export const Route = createFileRoute("/pipelines/create")({
 	component: CreatePipelinePage,
@@ -39,6 +47,9 @@ function CreatePipelinePage() {
 	const [validationErrors, setValidationErrors] = useState<
 		Record<string, string>
 	>({});
+	const [advanced, setAdvanced] = useState<AdvancedConfig>(
+		defaultAdvancedConfig(),
+	);
 
 	const { data: sources = [], isLoading: isLoadingSources } = useQuery({
 		queryKey: ["sources"],
@@ -125,6 +136,31 @@ function CreatePipelinePage() {
 			errors.sink = "Please select at least one sink";
 		}
 
+		if (advanced.batchWait !== undefined && advanced.batchWait !== "") {
+			if (!isValidDuration(advanced.batchWait)) {
+				errors.batchWait = "Invalid duration format (e.g. 5s, 100ms, 1m)";
+			}
+		}
+		if (advanced.retry?.initialInterval && advanced.retry.maxInterval) {
+			const init = parseDuration(advanced.retry.initialInterval);
+			const max = parseDuration(advanced.retry.maxInterval);
+			if (max < init) {
+				errors.maxInterval = "Max backoff must be ≥ initial backoff";
+			}
+		}
+		if (
+			advanced.retry?.initialInterval &&
+			!isValidDuration(advanced.retry.initialInterval)
+		) {
+			errors.initialInterval = "Invalid duration format (e.g. 1s)";
+		}
+		if (
+			advanced.retry?.maxInterval &&
+			!isValidDuration(advanced.retry.maxInterval)
+		) {
+			errors.maxInterval = "Invalid duration format (e.g. 30s)";
+		}
+
 		if (Object.keys(errors).length > 0) {
 			setValidationErrors(errors);
 			return;
@@ -137,13 +173,17 @@ function CreatePipelinePage() {
 
 		if (!source || selectedSinksList.length === 0) return;
 
+		const advancedPayload = camelToSnake<Record<string, unknown>>(
+			advancedConfigToPayload(advanced),
+		);
 		createMutation.mutate({
 			id: pipelineId,
 			name: pipelineId,
 			sources: [source.id],
 			sinks: selectedSinksList,
 			tables: Array.from(selectedTables),
-		});
+			...advancedPayload,
+		} as Parameters<typeof pipelinesApi.create>[0]);
 	};
 
 	const canCreate =
@@ -368,6 +408,30 @@ function CreatePipelinePage() {
 								)}
 							</div>
 						)}
+					</CardContent>
+				</Card>
+
+				{/* Advanced Configuration */}
+				<Card className="lg:col-span-2">
+					<CardHeader>
+						<CardTitle>Advanced Configuration</CardTitle>
+						<CardDescription>
+							Optional overrides for batch, retry, and processors.
+						</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<AdvancedConfigPanel
+							value={advanced}
+							onChange={setAdvanced}
+							errors={validationErrors}
+							defaultOpen={
+								validationErrors.batchWait ||
+								validationErrors.initialInterval ||
+								validationErrors.maxInterval
+									? ["batch", "retry"]
+									: undefined
+							}
+						/>
 					</CardContent>
 				</Card>
 			</div>

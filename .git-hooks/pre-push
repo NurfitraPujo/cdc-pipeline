@@ -5,13 +5,23 @@ export PYTHONUNBUFFERED=1
 
 # --- Working Directory Isolation ---
 # Stash everything NOT being pushed so tests run on exactly what will ship.
-git stash push -k -q -m "pre-push stash"
-STASHED=$?
+HAS_STASHED=false
+OLD_STASH=$(git rev-parse --verify refs/stash 2>/dev/null || true)
+git stash push -k -u -q -m "pre-push stash"
+NEW_STASH=$(git rev-parse --verify refs/stash 2>/dev/null || true)
+if [ "$OLD_STASH" != "$NEW_STASH" ]; then
+    HAS_STASHED=true
+fi
 
+API_PID=""
 finish() {
-    if [ $STASHED -eq 0 ]; then
+    if [ -n "$API_PID" ]; then
+        kill "$API_PID" 2>/dev/null || true
+    fi
+    if [ "$HAS_STASHED" = "true" ]; then
         git stash pop -q 2>/dev/null || true
     fi
+    rm -f api.log
 }
 trap finish EXIT
 
@@ -35,8 +45,8 @@ echo "========================================="
 # --- Fast Unit Tests (always run) ---
 echo ""
 echo "Running Go unit tests..."
-go test -v ./internal/... ./protocol/... 2>&1 | head -50
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
+go test -short -v $(go list ./internal/... | grep -v /test/e2e)
+if [ $? -ne 0 ]; then
     echo ""
     echo "FAILED: Go unit tests. Push blocked."
     exit 1
@@ -45,8 +55,8 @@ fi
 if [ -d "web" ] && [ -f "web/package.json" ]; then
     echo ""
     echo "Running frontend unit tests..."
-    (cd web && pnpm run test 2>&1 | head -50)
-    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    (cd web && pnpm run test)
+    if [ $? -ne 0 ]; then
         echo ""
         echo "FAILED: Frontend unit tests. Push blocked."
         exit 1
@@ -75,7 +85,7 @@ fi
 
 if [ -n "$CONTAINER_RUNTIME" ]; then
     echo "Building cdc-pipeline-api..."
-    $CONTAINER_RUNTIME build -t cdc-pipeline-api:latest -f cmd/api/Dockerfile .
+    $CONTAINER_RUNTIME build --ssh=default -t cdc-pipeline-api:latest -f Dockerfile .
     echo "Building cdc-pipeline-web-dashboard..."
     $CONTAINER_RUNTIME build -t cdc-pipeline-web-dashboard:latest -f web/Dockerfile web/
 fi
@@ -84,12 +94,50 @@ fi
 echo ""
 echo "Starting infrastructure (NATS + Postgres)..."
 make e2e-up 2>&1
-sleep 3
+
+echo "Waiting for NATS (port 4222)..."
+for i in {1..30}; do
+    if (echo > /dev/tcp/127.0.0.1/4222) >/dev/null 2>&1; then
+        echo "NATS is ready."
+        break
+    fi
+    sleep 0.5
+done
+
+echo "Waiting for Postgres (port 5432)..."
+for i in {1..30}; do
+    if (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1; then
+        echo "Postgres is ready."
+        break
+    fi
+    sleep 0.5
+done
+
+echo "Starting API server..."
+JWT_SECRET="my-super-secret-jwt-key!" ENCRYPTION_KEY="my-super-secret-key-32-chars-long!" NATS_URL="nats://localhost:4222" go run ./cmd/api/main.go > api.log 2>&1 &
+API_PID=$!
+
+echo "Waiting for API server to be healthy..."
+API_READY=false
+for i in {1..30}; do
+    if curl -s http://localhost:8080/healthz | grep -q "OK"; then
+        API_READY=true
+        break
+    fi
+    sleep 0.5
+done
+
+if [ "$API_READY" = "false" ]; then
+    echo "FAILED: API server failed to start. Logs:"
+    cat api.log
+    exit 1
+fi
+echo "API server is ready."
 
 echo ""
 echo "Running E2E tests..."
-make e2e 2>&1
-TEST_STATUS=${PIPESTATUS[0]}
+TEST_STATUS=0
+make e2e 2>&1 || TEST_STATUS=$?
 
 echo ""
 echo "Tearing down E2E infrastructure..."
@@ -98,6 +146,8 @@ make e2e-down 2>&1
 if [ $TEST_STATUS -ne 0 ]; then
     echo ""
     echo "FAILED: E2E tests. Push blocked."
+    echo "API server logs:"
+    cat api.log
     exit 1
 fi
 

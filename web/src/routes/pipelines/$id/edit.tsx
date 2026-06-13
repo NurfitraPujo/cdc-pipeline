@@ -1,8 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, ArrowLeft, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, Loader2, Save } from "lucide-react";
+import { useEffect, useState } from "react";
+import { camelToSnake } from "@/api/mappers";
 import { type Pipeline, pipelinesApi } from "@/api/pipelines";
 import { ConfigEditor } from "@/components/ConfigEditor";
+import { AdvancedConfigPanel } from "@/components/pipelines/AdvancedConfigPanel";
+import {
+	type AdvancedConfig,
+	advancedConfigToPayload,
+	defaultAdvancedConfig,
+} from "@/components/pipelines/advancedConfig";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -11,6 +19,10 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { jsonToUpdateRequest } from "@/lib/jsonToUpdateRequest";
+import { mergeWithCurrent } from "@/lib/pipelineMerge";
 
 export const Route = createFileRoute("/pipelines/$id/edit")({
 	component: EditPipelinePage,
@@ -37,29 +49,39 @@ ${JSON.stringify(config, null, 2)}
 `;
 }
 
-// Parse JSON content back to update request
-function jsonToUpdateRequest(jsonContent: string): Record<string, unknown> {
+function pipelineToAdvancedConfig(p: Pipeline): AdvancedConfig {
+	return {
+		batchSize: p.batchSize,
+		batchWait: p.batchWait,
+		retry: p.retry
+			? {
+					maxRetries: p.retry.max_retries,
+					initialInterval: p.retry.initial_interval,
+					maxInterval: p.retry.max_interval,
+					enableDlq: p.retry.enable_dlq,
+				}
+			: undefined,
+		processors: (p.processors ?? []).map((pp) => ({
+			name: pp.name,
+			type: pp.type,
+			options: pp.options ?? undefined,
+			operationTypes: pp.operation_types ?? undefined,
+		})),
+	};
+}
+
+const REQUIRED_FIELDS = ["id", "name", "sources", "sinks", "tables"] as const;
+
+function missingRequiredFields(jsonContent: string): string[] {
 	try {
-		// Remove comments and parse JSON
-		const cleanedContent = jsonContent
-			.split("\n")
-			.filter((line) => !line.trim().startsWith("#"))
-			.join("\n");
-
-		const parsed = JSON.parse(cleanedContent);
-
-		// Extract only the updatable fields
-		return {
-			name: parsed.name,
-			description: parsed.description,
-			source: parsed.source,
-			sink: parsed.sink,
-			processorConfig: parsed.processorConfig,
-		};
+		const parsed = jsonToUpdateRequest(jsonContent);
+		return REQUIRED_FIELDS.filter((f) => {
+			const v = parsed[f];
+			if (Array.isArray(v)) return v.length === 0;
+			return v === undefined || v === null || v === "";
+		});
 	} catch {
-		throw new Error(
-			"Invalid configuration format. Please ensure valid JSON syntax.",
-		);
+		return REQUIRED_FIELDS.slice();
 	}
 }
 
@@ -77,11 +99,22 @@ function EditPipelinePage() {
 		queryFn: () => pipelinesApi.get(id),
 	});
 
+	const [useFormView, setUseFormView] = useState(false);
+	const [formConfig, setFormConfig] = useState<AdvancedConfig>(
+		defaultAdvancedConfig,
+	);
+	const [jsonWarning, setJsonWarning] = useState<string | null>(null);
+	const [validationError, setValidationError] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (pipeline) {
+			setFormConfig(pipelineToAdvancedConfig(pipeline));
+		}
+	}, [pipeline]);
+
 	const updateMutation = useMutation({
-		mutationFn: (config: string) => {
-			const updateData = jsonToUpdateRequest(config);
-			return pipelinesApi.update(id, updateData);
-		},
+		mutationFn: (data: Parameters<typeof pipelinesApi.update>[1]) =>
+			pipelinesApi.update(id, data),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["pipeline", id] });
 			queryClient.invalidateQueries({ queryKey: ["pipelines"] });
@@ -89,8 +122,43 @@ function EditPipelinePage() {
 		},
 	});
 
-	const handleSave = (value: string) => {
-		updateMutation.mutate(value);
+	const handleSaveFromForm = () => {
+		if (!pipeline) return;
+		setValidationError(null);
+		const required = {
+			id: pipeline.id,
+			name: pipeline.name,
+			sources: pipeline.sources,
+			sinks: pipeline.sinks,
+			tables: pipeline.tables,
+		};
+		const advanced = camelToSnake<Record<string, unknown>>(
+			advancedConfigToPayload(formConfig),
+		);
+		updateMutation.mutate({
+			...required,
+			...advanced,
+		} as Parameters<typeof pipelinesApi.update>[1]);
+	};
+
+	const handleSaveFromJson = (jsonValue: string) => {
+		if (!pipeline) return;
+		setValidationError(null);
+		const missing = missingRequiredFields(jsonValue);
+		if (missing.length > 0) {
+			setJsonWarning(
+				`Missing required field(s): ${missing.join(", ")}. The pipeline will fall back to current values where possible.`,
+			);
+		} else {
+			setJsonWarning(null);
+		}
+		try {
+			const parsed = jsonToUpdateRequest(jsonValue);
+			const merged = mergeWithCurrent(parsed, pipeline);
+			updateMutation.mutate(merged);
+		} catch (err) {
+			setValidationError(err instanceof Error ? err.message : String(err));
+		}
 	};
 
 	if (isLoading) {
@@ -144,7 +212,7 @@ function EditPipelinePage() {
 			</div>
 
 			{/* Error display */}
-			{updateMutation.error && (
+			{(updateMutation.error || validationError) && (
 				<Card className="mb-6 border-destructive">
 					<CardHeader>
 						<CardTitle className="text-destructive flex items-center gap-2">
@@ -154,20 +222,81 @@ function EditPipelinePage() {
 					</CardHeader>
 					<CardContent>
 						<p className="text-sm text-destructive">
-							{updateMutation.error instanceof Error
-								? updateMutation.error.message
-								: "Failed to save configuration"}
+							{validationError ||
+								(updateMutation.error instanceof Error
+									? updateMutation.error.message
+									: "Failed to save configuration")}
 						</p>
 					</CardContent>
 				</Card>
 			)}
 
-			{/* Config Editor */}
-			<ConfigEditor
-				initialValue={initialValue}
-				onSave={handleSave}
-				isLoading={updateMutation.isPending}
-			/>
+			{/* View toggle */}
+			<div className="mb-4 flex items-center justify-end gap-2">
+				<Switch
+					id="use-form-view"
+					checked={useFormView}
+					onCheckedChange={setUseFormView}
+				/>
+				<Label htmlFor="use-form-view">Use form view</Label>
+			</div>
+
+			{/* Non-blocking warning for JSON view */}
+			{!useFormView && jsonWarning && (
+				<Card className="mb-6 border-yellow-500">
+					<CardHeader>
+						<CardTitle className="text-yellow-700 flex items-center gap-2">
+							<AlertCircle className="h-5 w-5" />
+							Heads up
+						</CardTitle>
+					</CardHeader>
+					<CardContent>
+						<p className="text-sm text-yellow-700">{jsonWarning}</p>
+					</CardContent>
+				</Card>
+			)}
+
+			{useFormView ? (
+				<Card>
+					<CardHeader>
+						<CardTitle>Configuration</CardTitle>
+						<CardDescription>
+							Edit batch, retry, and processors for this pipeline.
+						</CardDescription>
+					</CardHeader>
+					<CardContent className="space-y-4">
+						<AdvancedConfigPanel
+							value={formConfig}
+							onChange={setFormConfig}
+							defaultOpen={["batch", "retry", "processors"]}
+						/>
+						<div className="flex justify-end">
+							<Button
+								onClick={handleSaveFromForm}
+								disabled={updateMutation.isPending}
+							>
+								{updateMutation.isPending ? (
+									<>
+										<Loader2 className="mr-2 h-4 w-4 animate-spin" />
+										Saving...
+									</>
+								) : (
+									<>
+										<Save className="mr-2 h-4 w-4" />
+										Save
+									</>
+								)}
+							</Button>
+						</div>
+					</CardContent>
+				</Card>
+			) : (
+				<ConfigEditor
+					initialValue={initialValue}
+					onSave={handleSaveFromJson}
+					isLoading={updateMutation.isPending}
+				/>
+			)}
 
 			{/* Info card */}
 			<Card className="mt-6">
@@ -183,6 +312,7 @@ function EditPipelinePage() {
 						<li>Connection passwords are not shown for security reasons</li>
 						<li>Changes to the pipeline ID are not allowed</li>
 						<li>Use the Reset button to discard changes</li>
+						<li>Toggle "Use form view" for a guided editor</li>
 					</ul>
 				</CardContent>
 			</Card>

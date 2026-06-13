@@ -25,30 +25,39 @@ export const SINK_TYPE_LABELS: Record<SinkType, string> = {
 	postgres_debug: "Postgres (Debug)",
 };
 
-export const PROCESSOR_TYPE = [
-	"filter",
-	"map",
-	"enrich",
-	"mask",
-	"custom",
-] as const;
+export const PROCESSOR_TYPE = ["mask", "uppercase", "custom"] as const;
 export type ProcessorType = (typeof PROCESSOR_TYPE)[number];
 export const PROCESSOR_TYPE_LABELS: Record<ProcessorType, string> = {
-	filter: "Filter",
-	map: "Map",
-	enrich: "Enrich",
 	mask: "Mask",
+	uppercase: "Uppercase",
 	custom: "Custom",
 };
+export const PROCESSOR_TYPE_BUILTIN: ReadonlySet<ProcessorType> = new Set([
+	"mask",
+	"uppercase",
+] as const);
 
-export const OPERATION_TYPE = ["insert", "update", "delete", "ddl"] as const;
+export const OPERATION_TYPE = [
+	"insert",
+	"update",
+	"delete",
+	"snapshot",
+	"schema_change",
+	"schema_change_ack",
+] as const;
 export type OperationType = (typeof OPERATION_TYPE)[number];
 export const OPERATION_TYPE_LABELS: Record<OperationType, string> = {
 	insert: "Insert",
 	update: "Update",
 	delete: "Delete",
-	ddl: "DDL",
+	snapshot: "Snapshot",
+	schema_change: "Schema Change",
+	schema_change_ack: "Schema Change Ack",
 };
+export const OPERATION_TYPE_GROUPS = {
+	data: ["insert", "update", "delete", "snapshot"],
+	schema: ["schema_change", "schema_change_ack"],
+} as const satisfies Record<string, readonly OperationType[]>;
 
 export const WORKER_STATUS = ["healthy", "unhealthy", "busy"] as const;
 export type WorkerStatus = (typeof WORKER_STATUS)[number];
