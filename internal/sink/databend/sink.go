@@ -251,10 +251,24 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 	for _, m := range messages {
 		data := m.Data
 		if data == nil {
-			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
-				// Fallback to JSON if msgpack fails
+			if len(m.Payload) == 0 {
+				continue
+			}
+			if m.Payload[0] == '{' {
+				// Likely JSON
 				if err := json.Unmarshal(m.Payload, &data); err != nil {
-					continue
+					// Fallback to msgpack if JSON fails
+					if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+						continue
+					}
+				}
+			} else {
+				// Likely msgpack
+				if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+					// Fallback to JSON if msgpack fails
+					if err := json.Unmarshal(m.Payload, &data); err != nil {
+						continue
+					}
 				}
 			}
 		}
@@ -367,10 +381,24 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 	for _, m := range messages {
 		data := m.Data
 		if data == nil {
-			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
-				// Fallback to JSON if msgpack fails
+			if len(m.Payload) == 0 {
+				continue
+			}
+			if m.Payload[0] == '{' {
+				// Likely JSON
 				if err := json.Unmarshal(m.Payload, &data); err != nil {
-					continue
+					// Fallback to msgpack if JSON fails
+					if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+						continue
+					}
+				}
+			} else {
+				// Likely msgpack
+				if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
+					// Fallback to JSON if msgpack fails
+					if err := json.Unmarshal(m.Payload, &data); err != nil {
+						continue
+					}
 				}
 			}
 		}
