@@ -486,8 +486,7 @@ finished:
 }
 
 func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff, bool) {
-	// HACK: Ignore tables created by the snapshot engine
-	if strings.HasPrefix(m.Table, "cdc_snapshot_") {
+	if protocol.IsInternalTable(m.Table) {
 		return nil, false
 	}
 
@@ -608,8 +607,7 @@ func (p *Producer) persistEvoState(table string, state *tableEvolution) {
 }
 
 func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
-	// HACK: Ignore tables created by the snapshot engine to prevent discovery feedback loop
-	if strings.HasPrefix(m.Schema.Table, "cdc_snapshot_") {
+	if protocol.IsInternalTable(m.Schema.Table) {
 		return
 	}
 
