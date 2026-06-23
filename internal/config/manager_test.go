@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,4 +175,237 @@ func TestConfigManager_Transitions(t *testing.T) {
 		t.Errorf("Expected 0 workers after Stop, got %d", len(mgr.workers))
 	}
 	mgr.workersMu.RUnlock()
+}
+
+func TestConfigManager_RetrySupervisor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := context.Background()
+
+	// 1. Start NATS Container
+	natsC, err := tc_nats.Run(ctx,
+		"nats:2.10-alpine",
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Cmd: []string{"-js"},
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to start NATS container: %v", err)
+	}
+	defer natsC.Terminate(ctx)
+
+	natsURL, err := natsC.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get connection string: %v", err)
+	}
+
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("Failed to connect to NATS: %v", err)
+	}
+	defer nc.Close()
+
+	js, _ := nc.JetStream()
+	bucket := protocol.KVBucketName
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket})
+	if err != nil {
+		t.Fatalf("Failed to create KV bucket: %v", err)
+	}
+
+	// Set Global Config with short recovery delay for fast test
+	globalCfg := protocol.GlobalConfig{
+		BatchSize:          500,
+		BatchWait:          2 * time.Second,
+		CrashRecoveryDelay: 100 * time.Millisecond,
+	}
+	gData, _ := json.Marshal(globalCfg)
+	kv.Put(protocol.KeyGlobalConfig, gData)
+	time.Sleep(100 * time.Millisecond)
+
+	// We want to simulate factory failures:
+	// - First 2 times it returns error.
+	// - 3rd time it succeeds.
+	var factoryCalls int32
+	var createdWorkers int32
+
+	factory := func(ctx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
+		calls := atomic.AddInt32(&factoryCalls, 1)
+		if calls <= 2 {
+			return nil, fmt.Errorf("simulated temporary factory error %d", calls)
+		}
+		atomic.AddInt32(&createdWorkers, 1)
+		return &MockWorker{id: id, finished: make(chan struct{}), cfg: cfg}, nil
+	}
+
+	mgr := NewConfigManager(kv, factory)
+	mgrCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := mgr.Watch(mgrCtx); err != nil {
+		t.Fatalf("Failed to start watcher: %v", err)
+	}
+
+	cfg := protocol.PipelineConfig{ID: "p-retry", Name: "Test Pipeline Retry"}
+	data, _ := json.Marshal(cfg)
+	kv.Put(protocol.PipelineConfigKey("p-retry"), data)
+
+	// Wait and check that supervisor retried and eventually succeeded
+	time.Sleep(1500 * time.Millisecond)
+
+	calls := atomic.LoadInt32(&factoryCalls)
+	workers := atomic.LoadInt32(&createdWorkers)
+	if calls < 3 {
+		t.Errorf("Expected at least 3 factory calls, got %d", calls)
+	}
+	if workers != 1 {
+		t.Errorf("Expected exactly 1 successfully created worker, got %d", workers)
+	}
+
+	// Verify that the running worker is registered
+	mgr.workersMu.RLock()
+	w, ok := mgr.workers["p-retry"].(*MockWorker)
+	mgr.workersMu.RUnlock()
+	if !ok || w == nil {
+		t.Fatalf("Worker not found or nil")
+	}
+
+	// Verify that the heartbeat was updated to "Running" eventually
+	entry, err := kv.Get(protocol.WorkerHeartbeatKey("p-retry"))
+	if err != nil {
+		t.Fatalf("Failed to get heartbeat: %v", err)
+	}
+	var hb protocol.WorkerHeartbeat
+	if err := json.Unmarshal(entry.Value(), &hb); err != nil {
+		t.Fatalf("Failed to unmarshal heartbeat: %v", err)
+	}
+	if hb.Status != "Running" {
+		t.Errorf("Expected heartbeat status 'Running', got %q", hb.Status)
+	}
+}
+
+func TestConfigManager_CrashAndRetryFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := context.Background()
+
+	// Start NATS Container
+	natsC, err := tc_nats.Run(ctx,
+		"nats:2.10-alpine",
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Cmd: []string{"-js"},
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to start NATS container: %v", err)
+	}
+	defer natsC.Terminate(ctx)
+
+	natsURL, err := natsC.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get connection string: %v", err)
+	}
+
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("Failed to connect to NATS: %v", err)
+	}
+	defer nc.Close()
+
+	js, _ := nc.JetStream()
+	bucket := protocol.KVBucketName
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket})
+	if err != nil {
+		t.Fatalf("Failed to create KV bucket: %v", err)
+	}
+
+	globalCfg := protocol.GlobalConfig{
+		BatchSize:          500,
+		BatchWait:          2 * time.Second,
+		CrashRecoveryDelay: 100 * time.Millisecond,
+	}
+	gData, _ := json.Marshal(globalCfg)
+	kv.Put(protocol.KeyGlobalConfig, gData)
+	time.Sleep(100 * time.Millisecond)
+
+	var factoryCalls int32
+	var workersCreated int32
+	var failRestart int32 = 1 // Flag to fail the next restart
+	var activeMockWorker *MockWorker
+
+	factory := func(ctx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
+		calls := atomic.AddInt32(&factoryCalls, 1)
+		if calls == 1 {
+			// First start succeeds
+			activeMockWorker = &MockWorker{id: id, finished: make(chan struct{}), cfg: cfg}
+			atomic.AddInt32(&workersCreated, 1)
+			return activeMockWorker, nil
+		}
+		// Second start fails
+		if atomic.LoadInt32(&failRestart) == 1 {
+			return nil, fmt.Errorf("simulated restart failure")
+		}
+		// Third start succeeds
+		activeMockWorker = &MockWorker{id: id, finished: make(chan struct{}), cfg: cfg}
+		atomic.AddInt32(&workersCreated, 1)
+		return activeMockWorker, nil
+	}
+
+	mgr := NewConfigManager(kv, factory)
+	mgrCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := mgr.Watch(mgrCtx); err != nil {
+		t.Fatalf("Failed to start watcher: %v", err)
+	}
+
+	cfg := protocol.PipelineConfig{ID: "p-crash", Name: "Test Pipeline Crash"}
+	data, _ := json.Marshal(cfg)
+	kv.Put(protocol.PipelineConfigKey("p-crash"), data)
+
+	// Wait for start
+	time.Sleep(300 * time.Millisecond)
+
+	// Simulate crash of the first worker
+	activeMockWorker.Drain() // This closes finished channel in mock
+
+	// Wait for retry attempt (which fails)
+	time.Sleep(500 * time.Millisecond)
+
+	// Check that we retried but failed to start (so no active worker in mgr.workers)
+	mgr.workersMu.RLock()
+	_, running := mgr.workers["p-crash"]
+	mgr.workersMu.RUnlock()
+	if running {
+		t.Errorf("Expected worker not to be running after failed restart")
+	}
+
+	// Verify KV heartbeat status is "Retrying"
+	entry, err := kv.Get(protocol.WorkerHeartbeatKey("p-crash"))
+	if err == nil {
+		var hb protocol.WorkerHeartbeat
+		if err := json.Unmarshal(entry.Value(), &hb); err == nil {
+			if hb.Status != "Retrying" {
+				t.Errorf("Expected heartbeat status 'Retrying' during retry loop, got %q", hb.Status)
+			}
+		}
+	}
+
+	// Now allow restart to succeed
+	atomic.StoreInt32(&failRestart, 0)
+
+	// Wait for next retry attempt to succeed
+	time.Sleep(1000 * time.Millisecond)
+
+	mgr.workersMu.RLock()
+	_, running = mgr.workers["p-crash"]
+	mgr.workersMu.RUnlock()
+	if !running {
+		t.Errorf("Expected worker to be running after successful restart")
+	}
 }

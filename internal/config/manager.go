@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type ConfigManager struct {
 	workers        map[string]engine.PipelineWorker
 	configs        map[string]protocol.PipelineConfig // Track current configs for comparison
 	revisions      map[string]uint64                  // Track last seen revision
+	supervisors    map[string]context.CancelFunc      // Track supervisor cancel functions
 	workersMu      sync.RWMutex
 	globalConfig   protocol.GlobalConfig
 	globalConfigMu sync.RWMutex
@@ -48,6 +50,7 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 		workers:      make(map[string]engine.PipelineWorker),
 		configs:      make(map[string]protocol.PipelineConfig),
 		revisions:    make(map[string]uint64),
+		supervisors:  make(map[string]context.CancelFunc),
 		globalConfig: cfg,
 	}
 }
@@ -450,29 +453,178 @@ func (m *ConfigManager) transitionWorker(ctx context.Context, id string, cfg pro
 }
 
 func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg protocol.PipelineConfig) {
-	newWorker, err := m.factory(ctx, id, cfg)
+	parentCtx := m.ctx
+	if parentCtx == nil {
+		parentCtx = ctx
+	}
+
+	m.workersMu.Lock()
+	if cancel, exists := m.supervisors[id]; exists {
+		cancel()
+	}
+	supCtx, supCancel := context.WithCancel(parentCtx)
+	m.supervisors[id] = supCancel
+	m.workersMu.Unlock()
+
+	newWorker, err := m.factory(supCtx, id, cfg)
 	if err != nil {
 		log.Error().Err(err).Str("pipeline_id", id).Msg("Error creating worker")
+		// Spawn supervisor with nil worker to trigger start retry loop (attempt = 1)
+		go m.monitorWorker(supCtx, nil, id, cfg, 1)
 		return
 	}
+
 	m.workersMu.Lock()
 	m.workers[id] = newWorker
 	m.workersMu.Unlock()
 	log.Info().Str("pipeline_id", id).Msg("Successfully started new worker")
 
 	// --- HEARTBEAT & SUPERVISOR GOROUTINE ---
-	go m.monitorWorker(ctx, newWorker, id, cfg)
+	go m.monitorWorker(supCtx, newWorker, id, cfg, 0)
 }
 
-func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.PipelineWorker, pid string, cfg protocol.PipelineConfig) {
+func (m *ConfigManager) getBackoffDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	baseDelay := m.getGlobalConfig().CrashRecoveryDelay
+	if baseDelay <= 0 {
+		baseDelay = 5 * time.Second
+	}
+
+	// Exponential backoff: baseDelay * 2^(attempt-1)
+	multiplier := 1 << (attempt - 1)
+	delay := baseDelay * time.Duration(multiplier)
+
+	maxDelay := 1 * time.Minute
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	// Add 10% random jitter
+	jitter := time.Duration(float64(delay) * 0.1 * (2*rand.Float64() - 1))
+	return delay + jitter
+}
+
+func (m *ConfigManager) attemptRestart(ctx context.Context, pid string, cfg protocol.PipelineConfig, attempt int) {
+	// Re-fetch latest config and restart.
+	var latestCfg protocol.PipelineConfig
+	var revision uint64
+	entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
+	if err != nil {
+		log.Warn().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config from KV, falling back to cached config")
+		m.workersMu.RLock()
+		cachedCfg, cachedExists := m.configs[pid]
+		revision = m.revisions[pid]
+		m.workersMu.RUnlock()
+		if cachedExists {
+			latestCfg = cachedCfg
+		} else {
+			latestCfg = cfg
+		}
+	} else {
+		if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
+			log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
+			m.workersMu.RLock()
+			cachedCfg, cachedExists := m.configs[pid]
+			revision = m.revisions[pid]
+			m.workersMu.RUnlock()
+			if cachedExists {
+				latestCfg = cachedCfg
+			} else {
+				latestCfg = cfg
+			}
+		} else {
+			revision = entry.Revision()
+		}
+	}
+	m.applyHierarchy(&latestCfg)
+
+	// Synchronize cache so Watch events don't re-trigger
+	m.workersMu.Lock()
+	m.configs[pid] = latestCfg
+	m.revisions[pid] = revision
+	m.workersMu.Unlock()
+
+	m.startNewWorker(ctx, pid, latestCfg)
+}
+
+func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.PipelineWorker, pid string, cfg protocol.PipelineConfig, attempt int) {
+	if worker == nil {
+		delay := m.getBackoffDelay(attempt)
+		log.Warn().Str("pipeline_id", pid).Int("attempt", attempt).Dur("delay", delay).Msg("SUPERVISOR: Pipeline failed to start initially. Retrying with backoff...")
+
+		// Write retry heartbeat immediately
+		now := time.Now()
+		hb := protocol.WorkerHeartbeat{
+			WorkerID:  fmt.Sprintf("%s-retry", pid),
+			Status:    "Retrying",
+			UptimeSec: 0,
+			UpdatedAt: now,
+		}
+		data, _ := json.Marshal(hb)
+		if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+			log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+		}
+		metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(now.Unix()))
+
+		delayTimer := time.NewTimer(delay)
+		defer delayTimer.Stop()
+
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.ctx.Done():
+				return
+			case <-delayTimer.C:
+				m.workersMu.RLock()
+				_, configExists := m.configs[pid]
+				m.workersMu.RUnlock()
+				if !configExists {
+					log.Info().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline config no longer exists, stopping retry loop")
+					return
+				}
+
+				m.attemptRestart(ctx, pid, cfg, attempt)
+				return
+			case t := <-ticker.C:
+				hb := protocol.WorkerHeartbeat{
+					WorkerID:  fmt.Sprintf("%s-retry", pid),
+					Status:    "Retrying",
+					UptimeSec: 0,
+					UpdatedAt: t,
+				}
+				data, _ := json.Marshal(hb)
+				if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+					log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+				}
+				metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(t.Unix()))
+			}
+		}
+	}
+
 	// Heartbeat setup
 	ticker := time.NewTicker(2 * time.Second) // More frequent for testing
 	defer ticker.Stop()
 	startTime := time.Now()
 	workerID := fmt.Sprintf("%s-%s", pid, startTime.Format("05.000")) // Unique ID per instance
 
-	// Supervisor setup
-	crashRecoveryDelay := m.getGlobalConfig().CrashRecoveryDelay
+	// Write initial heartbeat immediately
+	hb := protocol.WorkerHeartbeat{
+		WorkerID:  workerID,
+		Status:    "Running",
+		UptimeSec: 0,
+		UpdatedAt: startTime,
+	}
+	data, _ := json.Marshal(hb)
+	if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+		log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update worker heartbeat")
+	}
+	metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(startTime.Unix()))
 
 	for {
 		select {
@@ -495,42 +647,75 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 			// If key not found (no transition active) OR if we can't contact NATS, we treat as crash
 			if err == nats.ErrKeyNotFound || err != nil {
 				// CRASH DETECTED: It finished but we aren't transitioning.
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(crashRecoveryDelay):
-					log.Error().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting now...")
-					// Re-fetch latest config and restart.
-					var latestCfg protocol.PipelineConfig
-					var revision uint64
-					entry, err := m.kv.Get(protocol.PipelineConfigKey(pid))
-					if err != nil {
-						log.Warn().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to re-fetch config from KV, falling back to cached config")
+				// Clear it from the workers map immediately since it's dead
+				m.workersMu.Lock()
+				if m.workers[pid] == worker {
+					delete(m.workers, pid)
+				}
+				m.workersMu.Unlock()
+
+				uptime := time.Since(startTime)
+				var nextAttempt int
+				if uptime >= 10*time.Second {
+					log.Info().Str("pipeline_id", pid).Msg("SUPERVISOR: Worker crashed after stabilization period. Resetting backoff counter.")
+					nextAttempt = 1
+				} else {
+					nextAttempt = attempt + 1
+				}
+
+				delay := m.getBackoffDelay(nextAttempt)
+				log.Error().Str("pipeline_id", pid).Int("next_attempt", nextAttempt).Dur("delay", delay).Msg("SUPERVISOR: Pipeline crashed unexpectedly! Restarting with backoff...")
+
+				// Write retry heartbeat immediately
+				now := time.Now()
+				hb := protocol.WorkerHeartbeat{
+					WorkerID:  fmt.Sprintf("%s-retry", pid),
+					Status:    "Retrying",
+					UptimeSec: 0,
+					UpdatedAt: now,
+				}
+				data, _ := json.Marshal(hb)
+				if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+					log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+				}
+				metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(now.Unix()))
+
+				delayTimer := time.NewTimer(delay)
+				defer delayTimer.Stop()
+
+				restartTicker := time.NewTicker(2 * time.Second)
+				defer restartTicker.Stop()
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-m.ctx.Done():
+						return
+					case <-delayTimer.C:
 						m.workersMu.RLock()
-						cachedCfg, cachedExists := m.configs[pid]
-						revision = m.revisions[pid]
+						_, configExists := m.configs[pid]
 						m.workersMu.RUnlock()
-						if cachedExists {
-							latestCfg = cachedCfg
-						} else {
-							latestCfg = cfg
-						}
-					} else {
-						if err := json.Unmarshal(entry.Value(), &latestCfg); err != nil {
-							log.Error().Err(err).Str("pipeline_id", pid).Msg("SUPERVISOR: Failed to unmarshal config")
+						if !configExists {
+							log.Info().Str("pipeline_id", pid).Msg("SUPERVISOR: Pipeline config no longer exists, stopping retry loop")
 							return
 						}
-						revision = entry.Revision()
+
+						m.attemptRestart(ctx, pid, cfg, nextAttempt)
+						return
+					case t := <-restartTicker.C:
+						hb := protocol.WorkerHeartbeat{
+							WorkerID:  fmt.Sprintf("%s-retry", pid),
+							Status:    "Retrying",
+							UptimeSec: 0,
+							UpdatedAt: t,
+						}
+						data, _ := json.Marshal(hb)
+						if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+							log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+						}
+						metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(t.Unix()))
 					}
-					m.applyHierarchy(&latestCfg)
-
-					// Synchronize cache so Watch events don't re-trigger
-					m.workersMu.Lock()
-					m.configs[pid] = latestCfg
-					m.revisions[pid] = revision
-					m.workersMu.Unlock()
-
-					m.startNewWorker(ctx, pid, latestCfg)
 				}
 			}
 			return // End this monitoring goroutine
@@ -550,7 +735,6 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 		}
 	}
 }
-
 
 func (m *ConfigManager) InternalCrashWorker(ctx context.Context, id string) {
 	m.workersMu.RLock()
@@ -574,10 +758,12 @@ func (m *ConfigManager) InternalCrashWorker(ctx context.Context, id string) {
 func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 	m.workersMu.Lock()
 	w, ok := m.workers[id]
-	if ok {
-		delete(m.workers, id)
-		delete(m.configs, id)
-		delete(m.revisions, id)
+	delete(m.workers, id)
+	delete(m.configs, id)
+	delete(m.revisions, id)
+	if cancel, exists := m.supervisors[id]; exists {
+		cancel()
+		delete(m.supervisors, id)
 	}
 	m.workersMu.Unlock()
 
@@ -617,8 +803,14 @@ func (m *ConfigManager) Stop(ctx context.Context) {
 		m.cancel()
 	}
 
-	m.workersMu.RLock()
+	m.workersMu.Lock()
+	for _, cancel := range m.supervisors {
+		cancel()
+	}
+	m.supervisors = make(map[string]context.CancelFunc)
+	m.workersMu.Unlock()
 
+	m.workersMu.RLock()
 	ids := make([]string, 0, len(m.workers))
 	for id := range m.workers {
 		ids = append(ids, id)
