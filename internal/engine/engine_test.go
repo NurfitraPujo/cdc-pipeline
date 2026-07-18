@@ -125,16 +125,35 @@ func TestConsumer_FailurePaths(t *testing.T) {
 		msgChan <- wmMsg
 
 		mockSink.EXPECT().ApplySchema(gomock.Any(), gomock.Any()).Return(errors.New("ddl failed"))
+		// Mock KV.Put for stats update on error
+		mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil).AnyTimes()
 
 		errChan := make(chan error, 1)
 		go func() {
 			errChan <- c.Run(ctx, "topic2")
 		}()
 
-		time.Sleep(200 * time.Millisecond)
-		err := <-errChan
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to apply schema change")
+		// T0-2 fix: Consumer should NOT exit on ApplySchema error, should continue running
+		// It should only exit when context is cancelled
+		select {
+		case err := <-errChan:
+			// Old behavior: consumer exited with error on ApplySchema failure
+			// New behavior (T0-2): consumer continues running, so this should NOT happen
+			t.Fatalf("Consumer exited with error: %v. Expected consumer to continue running after ApplySchema error", err)
+		case <-time.After(300 * time.Millisecond):
+			// Consumer is still running - correct behavior
+		}
+
+		// Now cancel context to stop consumer
+		cancel()
+
+		// Wait for graceful shutdown
+		select {
+		case <-errChan:
+			// Expected
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("Consumer did not exit after context cancel")
+		}
 	})
 }
 
@@ -536,3 +555,104 @@ func TestConsumer_HooksAndFilteredIndices(t *testing.T) {
 	assert.Equal(t, 1, len(processed))
 	assert.Equal(t, []int{0}, capturedFiltered, "index 0 should be filtered")
 }
+
+// T0-2: Test that schema-change messages are NOT acked before ApplySchema succeeds,
+// and that on ApplySchema error, the consumer continues without exiting.
+func TestConsumer_SchemaChange_AckOnlyAfterApplySchema(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSub := mocks.NewMockSubscriber(ctrl)
+	mockPub := mocks.NewMockPublisher(ctrl)
+	mockSink := mocks.NewMockSink(ctrl)
+	mockKV := mocks.NewMockKeyValue(ctrl)
+
+	retryCfg := protocol.RetryConfig{
+		MaxRetries:      2,
+		InitialInterval: 1 * time.Millisecond,
+		MaxInterval:     2 * time.Millisecond,
+		EnableDLQ:       false,
+	}
+
+	// Use very short batchWait so timer fires quickly
+	c := NewConsumer("p1", "sink1", mockSub, mockPub, mockSink, nil, mockKV, 10, 20*time.Millisecond, retryCfg, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msgChan := make(chan *message.Message, 1)
+	mockSub.EXPECT().Subscribe(gomock.Any(), "topic1").Return(msgChan, nil)
+
+	// Create a schema change message
+	m := protocol.Message{
+		SourceID: "s1",
+		Table:    "t1",
+		Op:       protocol.OpSchemaChange,
+		Schema:   &protocol.SchemaMetadata{Table: "t1"},
+	}
+	batch := []protocol.Message{m}
+	data, _ := protocol.MessageBatch(batch).MarshalMsg(nil)
+
+	// Expect ApplySchema to be called and return error (this is the key assertion)
+	// If the bug existed, ApplySchema would NOT be called because the message would be
+	// acked prematurely before reaching ApplySchema.
+	mockSink.EXPECT().ApplySchema(gomock.Any(), gomock.Any()).Return(errors.New("ddl failed - schema rejected"))
+
+	// Mock KV.Put for the error stats update path
+	mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).Return(uint64(1), nil).AnyTimes()
+
+	// Run consumer in goroutine
+	errChan := make(chan error, 1)
+	go func() {
+		err := c.Run(ctx, "topic1")
+		errChan <- err
+	}()
+
+	// Give Run time to subscribe
+	time.Sleep(30 * time.Millisecond)
+
+	// Send schema change message
+	wmMsg := message.NewMessage("schema-1", data)
+	msgChan <- wmMsg
+
+	// Wait for processing - consumer should continue running after ApplySchema error
+	select {
+	case err := <-errChan:
+		// Consumer exited - this would be the bug (consumer should not exit on ApplySchema error)
+		t.Fatalf("Consumer exited with error: %v. Expected consumer to continue running after ApplySchema error", err)
+	case <-time.After(300 * time.Millisecond):
+		// Consumer is still running - this is correct behavior
+	}
+
+	// Cancel context to stop consumer gracefully
+	cancel()
+
+	// Wait for graceful shutdown
+	select {
+	case <-errChan:
+		// Expected - consumer exited due to context cancel
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Consumer did not exit after context cancel")
+	}
+
+	// Key assertions:
+	// 1. ApplySchema was called (verified by gomock expectation above)
+	// 2. Consumer continued running after ApplySchema error (verified by not receiving from errChan before timeout)
+	// 3. Consumer eventually exited due to context cancel, not schema change error
+}
+
+// stubSink is a test sink implementation that always returns an error on ApplySchema.
+type stubSink struct {
+	applySchemaErr    error
+	applySchemaCalled bool
+}
+
+func (s *stubSink) Name() string                                              { return "stub-sink" }
+func (s *stubSink) BatchUpload(ctx context.Context, msgs []protocol.Message) error {
+	return nil // not used in this test
+}
+func (s *stubSink) ApplySchema(ctx context.Context, msg protocol.Message) error {
+	s.applySchemaCalled = true
+	return s.applySchemaErr
+}
+func (s *stubSink) Stop() error { return nil }

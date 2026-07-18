@@ -18,7 +18,9 @@ type Config[T any] struct {
 }
 
 func (rc Config[T]) Do(f retry.RetryableFuncWithData[T]) (T, error) {
-	return retry.DoWithData(f, rc.Options...)
+	// vendored-patch: T2-6 - Register the If callback as RetryIf so custom filters are honored
+	opts := append(rc.Options, retry.RetryIf(rc.If))
+	return retry.DoWithData(f, opts...)
 }
 
 func OnErrorConfig[T any](attemptCount uint, check func(error) bool) Config[T] {

@@ -409,3 +409,69 @@ func TestConfigManager_CrashAndRetryFailure(t *testing.T) {
 		t.Errorf("Expected worker to be running after successful restart")
 	}
 }
+
+func TestGetBackoffDelayOverflow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	ctx := context.Background()
+
+	natsC, err := tc_nats.Run(ctx, "nats:2.10-alpine",
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{Cmd: []string{"-js"}},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to start NATS container: %v", err)
+	}
+	defer natsC.Terminate(ctx)
+
+	natsURL, err := natsC.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get connection string: %v", err)
+	}
+
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("Failed to connect to NATS: %v", err)
+	}
+	defer nc.Close()
+
+	js, _ := nc.JetStream()
+	bucket := protocol.KVBucketName
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket})
+	if err != nil {
+		t.Fatalf("Failed to create KV bucket: %v", err)
+	}
+
+	factory := func(ctx context.Context, id string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error) {
+		return &MockWorker{id: id, finished: make(chan struct{}), cfg: cfg}, nil
+	}
+	mgr := NewConfigManager(kv, factory)
+
+	// Verify that extremely large attempt values do not cause overflow.
+	for _, attempt := range []int{63, 64, 100, 1000} {
+		delay := mgr.getBackoffDelay(attempt)
+		if delay < 0 {
+			t.Errorf("getBackoffDelay(%d) returned negative duration: %v", attempt, delay)
+		}
+		if delay > 60*time.Second {
+			t.Errorf("getBackoffDelay(%d) exceeded 60s cap: %v", attempt, delay)
+		}
+	}
+
+	// Sanity-check boundary: attempt=1 should be roughly baseDelay (5s) without capping.
+	delay1 := mgr.getBackoffDelay(1)
+	if delay1 <= 0 {
+		t.Errorf("getBackoffDelay(1) should be positive, got %v", delay1)
+	}
+
+	// attempt=15 (maxBackoffAttempt) must not overflow.
+	delay15 := mgr.getBackoffDelay(15)
+	if delay15 <= 0 {
+		t.Errorf("getBackoffDelay(15) should be positive, got %v", delay15)
+	}
+	if delay15 > 60*time.Second {
+		t.Errorf("getBackoffDelay(15) exceeded 60s cap: %v", delay15)
+	}
+}

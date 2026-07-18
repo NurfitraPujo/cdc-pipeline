@@ -62,6 +62,11 @@ export function advancedConfigToPayload(cfg: AdvancedConfig): Partial<{
 		if (cfg.retry.enableDlq !== undefined) r.enableDlq = cfg.retry.enableDlq;
 		if (Object.keys(r).length > 0) out.retry = r;
 	}
-	if (cfg.processors.length > 0) out.processors = cfg.processors;
+	if (cfg.processors.length > 0) {
+		// T3-4: the local UI-only `id` is a React-key stabilizer and must NOT
+		// be sent to the backend, otherwise the openapi-typescript schema
+		// rejects the payload (or the server silently ignores the field).
+		out.processors = cfg.processors.map(({ id: _id, ...rest }) => rest);
+	}
 	return out;
 }

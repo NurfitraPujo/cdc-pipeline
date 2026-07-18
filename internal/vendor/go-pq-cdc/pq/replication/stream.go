@@ -62,6 +62,7 @@ type stream struct {
 	messageCH           chan *Message
 	listenerFunc        ListenerFunc
 	sinkEnd             chan struct{}
+	closeSinkEndOnce    sync.Once // vendored-patch: T1-5 - Prevent double-close of sinkEnd channel
 	mu                  *sync.RWMutex
 	config              config.Config
 	lastXLogPos         pq.LSN
@@ -420,9 +421,10 @@ func (s *stream) Close(ctx context.Context) {
 	s.closed.Store(true)
 
 	<-s.sinkEnd
-	if !isClosed(s.sinkEnd) {
+	// vendored-patch: T1-5 - Use sync.Once to safely close sinkEnd without draining signals
+	s.closeSinkEndOnce.Do(func() {
 		close(s.sinkEnd)
-	}
+	})
 	logger.Info("postgres message sink stopped")
 
 	if !s.conn.IsClosed() {
@@ -575,14 +577,4 @@ func AppendUint64(buf []byte, n uint64) []byte {
 
 func timeToPgTime(t time.Time) uint64 {
 	return uint64(t.Unix()*1000000 + int64(t.Nanosecond())/1000 - microSecFromUnixEpochToY2K)
-}
-
-func isClosed[T any](ch <-chan T) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-	}
-
-	return false
 }

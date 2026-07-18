@@ -68,6 +68,7 @@ const (
 	TableStateDraining     = "Draining"
 	TableStateCDC          = "CDC"
 	TableStateFailed       = "Failed"
+	TableStateError        = "Error"
 
 	SchemaStatusStable       = "stable"
 	SchemaStatusFrozen       = "frozen"

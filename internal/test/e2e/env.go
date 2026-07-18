@@ -8,12 +8,14 @@ import (
 	"log"
 	"math"
 	"math/rand"
-
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
@@ -26,6 +28,26 @@ import (
 	tc_nats "github.com/testcontainers/testcontainers-go/modules/nats"
 	tc_postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
+
+// testEncryptionKey is the AES-256 key used by every e2e test process to
+// encrypt / decrypt the credentials stored in NATS KV. Set once on package
+// init so both the Setup() helper and the worker factory running in-process
+// see the same value.
+const testEncryptionKey = "cdc_pipeline_e2e_key_padded_32AA" // exactly 32 bytes raw
+
+func init() {
+	os.Setenv("ENCRYPTION_KEY", testEncryptionKey)
+}
+
+// encryptForKV wraps crypto.Encrypt and fails the test on error. E2E configs
+// stored in NATS KV must be encrypted under the test key above so the
+// engine's fail-fast Decrypt (T2-3) does not reject them.
+func encryptForKV(t *testing.T, plaintext string) string {
+	t.Helper()
+	out, err := crypto.Encrypt(plaintext, []byte(testEncryptionKey))
+	require.NoError(t, err)
+	return out
+}
 
 type Environment struct {
 	Ctx context.Context
@@ -101,7 +123,7 @@ func Setup(t *testing.T) *Environment {
 		Host:              pgHost,
 		Port:              pgPort.Int(),
 		User:              "postgres",
-		PassEncrypted:     "postgres",
+		PassEncrypted:     encryptForKV(t, "postgres"),
 		Database:          "cdc_src",
 		SlotName:          slotName,
 		PublicationName:   "cdc_pub",
@@ -120,7 +142,7 @@ func Setup(t *testing.T) *Environment {
 	dbConfig := protocol.SinkConfig{
 		ID:   "db1",
 		Type: "databend",
-		DSN:  dbDSN,
+		DSN:  encryptForKV(t, dbDSN),
 	}
 
 	data, _ = json.Marshal(dbConfig)
@@ -335,12 +357,12 @@ func (e *Environment) checkMatch(table string, filterCol string, filterVal any, 
 		expectStr := fmt.Sprintf("%v", v)
 
 		if actualStr != expectStr {
-			// Try numeric comparison for floats
-			if af, ok1 := actualVal.(float64); ok1 {
-				if ef, ok2 := v.(float64); ok2 {
-					if math.Abs(af-ef) < 0.001 {
-						continue
-					}
+			// Try numeric comparison for floats. Databend returns DECIMAL
+			// columns as strings (e.g. "12345.670000000"), so accept both
+			// the native float64 case and the decimal-string case here.
+			if af, ef, comparable := compareNumeric(actualVal, v); comparable {
+				if math.Abs(af-ef) < 0.001 {
+					continue
 				}
 			}
 			log.Printf("Key %s: mismatch! actual %q (%T), expect %q (%T)", k, actualStr, actualVal, expectStr, v)
@@ -348,6 +370,43 @@ func (e *Environment) checkMatch(table string, filterCol string, filterVal any, 
 		}
 	}
 	return true
+}
+
+// compareNumeric returns the numeric values of two interface{} columns if
+// either side is numeric and the other side is either a Go float or a string
+// parseable as a float. The boolean is true when a meaningful comparison was
+// performed. DECIMAL / NUMERIC columns from Databend come back as strings
+// (e.g. "12345.670000000"), and comparing those directly to a float64 in the
+// expected map would fail without this helper.
+func compareNumeric(actualVal, expectedVal any) (float64, float64, bool) {
+	af, aOK := numericToFloat(actualVal)
+	ef, eOK := numericToFloat(expectedVal)
+	if !aOK || !eOK {
+		return 0, 0, false
+	}
+	return af, ef, true
+}
+
+func numericToFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	}
+	return 0, false
 }
 
 func (e *Environment) GetDatabendRowCount(table string) (uint64, error) {

@@ -1,34 +1,58 @@
 import createClient from "openapi-fetch";
-import { API_BASE_URL, TOKEN_KEY } from "@/lib/constants";
+import { API_BASE_URL } from "@/lib/constants";
+import { useAuthStore } from "@/stores/authStore";
 import type { paths } from "./schema";
 
 export const apiClient = createClient<paths>({
 	baseUrl: API_BASE_URL,
 });
 
+/**
+ * In-flight 401 redirect guard.
+ *
+ * The `onResponse` interceptor may fire concurrently for several in-flight
+ * requests after the access token is revoked. Without coordination, each one
+ * would invoke `logout()` and schedule `window.location.assign("/login")`,
+ * racing against the navigation and corrupting the Zustand store. We use a
+ * module-scoped flag so only the first 401 performs the redirect; later ones
+ * see the flag and no-op until the page reload completes.
+ */
+let isRedirectingForAuth = false;
+
 export function getAuthToken(): string | null {
 	if (typeof window === "undefined") return null;
-	return localStorage.getItem(TOKEN_KEY);
+	return useAuthStore.getState().token;
 }
 
 export function setAuthToken(token: string | null): void {
 	if (typeof window === "undefined") return;
-	if (token) {
-		localStorage.setItem(TOKEN_KEY, token);
+	if (token !== null && token !== "") {
+		useAuthStore.getState().setToken(token);
 	} else {
-		localStorage.removeItem(TOKEN_KEY);
+		useAuthStore.getState().setToken(null);
 	}
 }
 
 export function handleUnauthorized(): void {
 	if (typeof window === "undefined") return;
-	localStorage.removeItem(TOKEN_KEY);
-	window.location.href = "/login";
+	if (isRedirectingForAuth) return;
+	isRedirectingForAuth = true;
+	useAuthStore.getState().logout();
+	window.location.assign("/login");
+}
+
+/**
+ * Test-only helper. Resets the in-flight 401 redirect guard so unit tests
+ * can exercise the 401 handling logic more than once per module instance.
+ * Not intended for production use.
+ */
+export function __resetAuthRedirectFlag(): void {
+	isRedirectingForAuth = false;
 }
 
 apiClient.use({
 	async onRequest({ request }) {
-		const token = getAuthToken();
+		const token = useAuthStore.getState().token;
 		if (token) {
 			request.headers.set("Authorization", `Bearer ${token}`);
 		}

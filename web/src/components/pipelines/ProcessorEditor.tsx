@@ -1,6 +1,6 @@
 import Editor from "@monaco-editor/react";
 import { Loader2, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
 	OPERATION_TYPE,
 	OPERATION_TYPE_GROUPS,
@@ -67,18 +67,34 @@ export function ProcessorEditor({
 
 	const valueOptionsKey = JSON.stringify(value.options ?? {});
 
-	useEffect(() => {
-		const current = valueOptionsKey;
-		if (optionsText === current) return;
-		try {
-			const parsed = JSON.parse(optionsText);
-			if (JSON.stringify(parsed ?? {}) === current) return;
-		} catch {
-			// invalid: fall through to resync
-		}
-		setOptionsText(current);
+	// T2-10: track the last options we propagated upward via `onChange`. When
+	// the parent echoes that value back as a prop, the change is our own doing
+	// (template loaded, reset clicked, valid typing) and we must NOT reset the
+	// editor text — otherwise the user's in-flight invalid JSON is clobbered.
+	const lastSentOptionsRef = useRef<string>(valueOptionsKey);
+
+	const propagateOptions = (
+		nextOptions: ProcessorConfig["options"],
+		text: string,
+	) => {
+		lastSentOptionsRef.current = JSON.stringify(nextOptions ?? {});
+		setOptionsText(text);
 		setOptionsError(null);
-	}, [valueOptionsKey, optionsText]);
+		onChange({ ...value, options: nextOptions });
+	};
+
+	useEffect(() => {
+		// Echo of our own onChange — keep the editor text exactly as-is so
+		// partial/invalid JSON the user is typing survives.
+		if (valueOptionsKey === lastSentOptionsRef.current) {
+			return;
+		}
+		// External prop change (parent re-fetch, undo, template pre-fill, etc.):
+		// resync the editor.
+		setOptionsText(valueOptionsKey);
+		setOptionsError(null);
+		lastSentOptionsRef.current = valueOptionsKey;
+	}, [valueOptionsKey]);
 
 	const selectedOps = useMemo(
 		() => new Set<string>(value.operationTypes ?? []),
@@ -109,9 +125,13 @@ export function ProcessorEditor({
 		try {
 			const parsed = text.trim() === "" ? {} : JSON.parse(text);
 			setOptionsError(null);
+			lastSentOptionsRef.current = JSON.stringify(parsed ?? {});
 			onChange({ ...value, options: parsed });
 		} catch (e) {
 			setOptionsError(e instanceof Error ? e.message : "Invalid JSON");
+			// Do NOT touch lastSentOptionsRef here: the user is mid-typing and
+			// the prop hasn't been updated. The next valid keystroke (or
+			// template/reset) will advance it.
 		}
 	};
 
@@ -120,9 +140,10 @@ export function ProcessorEditor({
 			value.options ?? {},
 			tplOptions ?? {},
 		) as ProcessorConfig["options"];
-		onChange({ ...value, options: merged });
-		setOptionsText(JSON.stringify(merged ?? {}, null, 2));
-		setOptionsError(null);
+		propagateOptions(
+			merged,
+			JSON.stringify(merged ?? {}, null, 2),
+		);
 	};
 
 	const loadTemplate = (tplOptions: ProcessorConfig["options"]) => {
@@ -136,16 +157,12 @@ export function ProcessorEditor({
 	const confirmTemplateOverwrite = () => {
 		if (pendingTemplate === null) return;
 		const next = (pendingTemplate ?? {}) as ProcessorConfig["options"];
-		onChange({ ...value, options: next });
-		setOptionsText(JSON.stringify(next, null, 2));
-		setOptionsError(null);
+		propagateOptions(next, JSON.stringify(next, null, 2));
 		setPendingTemplate(null);
 	};
 
 	const resetOptions = () => {
-		onChange({ ...value, options: {} });
-		setOptionsText("{}");
-		setOptionsError(null);
+		propagateOptions({}, "{}");
 	};
 
 	return (

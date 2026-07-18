@@ -55,7 +55,8 @@ func (c *connection) IsClosed() bool {
 }
 
 func connect(ctx context.Context, dsn string) (*pgconn.PgConn, error) {
-	retryConfig := retry.OnErrorConfig[*pgconn.PgConn](5, func(err error) bool { return err == nil })
+	// vendored-patch: T2-6 - Retry on errors (err != nil), not on success (err == nil)
+	retryConfig := retry.OnErrorConfig[*pgconn.PgConn](5, func(err error) bool { return err != nil })
 	conn, err := retryConfig.Do(func() (*pgconn.PgConn, error) {
 		conn, err := pgconn.Connect(ctx, dsn)
 		if err != nil {

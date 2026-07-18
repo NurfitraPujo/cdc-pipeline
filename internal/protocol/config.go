@@ -8,7 +8,6 @@ import (
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/rs/zerolog/log"
 )
 
 var reID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -262,36 +261,34 @@ func (s SinkConfig) Validate() error {
 	)
 }
 
-func (s *SourceConfig) Decrypt() {
+func (s *SourceConfig) Decrypt() error {
 	if s.PassEncrypted == "" {
-		return
+		return nil
 	}
-	key := crypto.GetEncryptionKey()
-	if len(key) == 0 {
-		log.Warn().Msg("Failed to decrypt source password: encryption key is empty, using as-is")
-		return
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("source %s: %w", s.ID, err)
 	}
 	decrypted, err := crypto.Decrypt(s.PassEncrypted, key)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to decrypt source password, using as-is")
-		return
+		return fmt.Errorf("source %s: %w", s.ID, err)
 	}
 	s.PassEncrypted = decrypted
+	return nil
 }
 
-func (s *SinkConfig) Decrypt() {
+func (s *SinkConfig) Decrypt() error {
 	if s.DSN == "" {
-		return
+		return nil
 	}
-	key := crypto.GetEncryptionKey()
-	if len(key) == 0 {
-		log.Warn().Msg("Failed to decrypt sink DSN: encryption key is empty, using as-is")
-		return
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("sink %s: %w", s.ID, err)
 	}
 	decrypted, err := crypto.Decrypt(s.DSN, key)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to decrypt sink DSN, using as-is")
-		return
+		return fmt.Errorf("sink %s: %w", s.ID, err)
 	}
 	s.DSN = decrypted
+	return nil
 }

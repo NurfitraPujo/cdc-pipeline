@@ -3,11 +3,13 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	"github.com/rs/zerolog/log"
 )
 
@@ -79,7 +81,10 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
 			return
 		}
-		srcCfg.Decrypt()
+		if err := srcCfg.Decrypt(); err != nil {
+			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to decrypt source config")
+			return
+		}
 
 		// Apply pipeline overrides
 		if p.config.BatchSize > 0 {
@@ -124,10 +129,17 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.producer.SetDynamicTablesChan(p.dynamicTablesChan)
 
 		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
-		if err != nil && err != context.Canceled {
-			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed. Shutting down pipeline (fail-fast).")
-			p.cancel() // Stop all consumers
-			return
+		if err != nil && !errors.Is(err, context.Canceled) {
+			if errors.Is(err, errPublishRetriesExhausted) && p.ctx.Err() == nil {
+				log.Warn().Err(err).Str("pipeline_id", p.id).Msg("Producer exhausted publisher retries; attempting one recovery run")
+				lsn, err = p.recoverProducer(srcCfg, initialCP)
+			}
+
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed after recovery policy. Shutting down pipeline.")
+				p.cancel() // Stop all consumers only after the single recovery attempt fails.
+				return
+			}
 		}
 
 		// In a drain scenario, the producer finishes normally.
@@ -145,6 +157,14 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (p *Pipeline) recoverProducer(srcCfg protocol.SourceConfig, checkpoint protocol.Checkpoint) (uint64, error) {
+	lsn, err := p.producer.Run(p.ctx, srcCfg, checkpoint)
+	if err != nil {
+		return lsn, fmt.Errorf("recovering producer after publisher retry exhaustion: %w", err)
+	}
+	return lsn, nil
 }
 
 func (p *Pipeline) Drain() error {
@@ -165,7 +185,21 @@ func (p *Pipeline) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.finished:
+		// Close all transformers after pipeline goroutines have finished
+		p.closeTransformers()
 		return nil
+	}
+}
+
+func (p *Pipeline) closeTransformers() {
+	for _, cons := range p.consumers {
+		for _, ct := range cons.transformers {
+			if closeable, ok := ct.Transformer.(transformer.CloseableTransformer); ok {
+				if err := closeable.Close(); err != nil {
+					log.Warn().Err(err).Str("pipeline_id", p.id).Str("transformer", ct.Transformer.Name()).Msg("Failed to close transformer")
+				}
+			}
+		}
 	}
 }
 

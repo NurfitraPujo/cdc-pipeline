@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"reflect"
 	"time"
 
@@ -19,12 +20,12 @@ import (
 )
 
 type NatsProtoTransformer struct {
-	natsURL  string
-	subject  string
-	timeout  time.Duration
-	schemas  []string
-	tables   []string
-	conn     *nats.Conn
+	natsURL string
+	subject string
+	timeout time.Duration
+	schemas []string
+	tables  []string
+	conn    *nats.Conn
 }
 
 func NewNatsProtoTransformer(options map[string]interface{}) (transformer.Transformer, error) {
@@ -90,13 +91,20 @@ func (t *NatsProtoTransformer) Transform(ctx context.Context, m *protocol.Messag
 }
 
 func (t *NatsProtoTransformer) TransformBatch(ctx context.Context, msgs []protocol.Message) ([]protocol.Message, error) {
-	matching, passthrough := t.filterMessages(msgs)
+	matchingIndices := make([]int, 0)
+	for i, m := range msgs {
+		if t.matchesFilter(m) {
+			matchingIndices = append(matchingIndices, i)
+		}
+	}
 
-	var result []protocol.Message
-	result = append(result, passthrough...)
+	if len(matchingIndices) == 0 {
+		return msgs, nil
+	}
 
-	if len(matching) == 0 {
-		return result, nil
+	matching := make([]protocol.Message, 0, len(matchingIndices))
+	for _, idx := range matchingIndices {
+		matching = append(matching, msgs[idx])
 	}
 
 	req, err := t.buildTransformRequest(matching)
@@ -109,12 +117,26 @@ func (t *NatsProtoTransformer) TransformBatch(ctx context.Context, msgs []protoc
 		return nil, fmt.Errorf("failed to send transform request: %w", err)
 	}
 
-	transformed, err := t.parseResponse(matching, resp)
+	results, err := t.parseResponseWithOrder(matching, resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transform response: %w", err)
 	}
 
-	result = append(result, transformed...)
+	result := make([]protocol.Message, 0, len(msgs))
+	matchIdx := 0
+	for i, m := range msgs {
+		if matchIdx < len(matchingIndices) && i == matchingIndices[matchIdx] {
+			if results[matchIdx].msg != nil {
+				result = append(result, *results[matchIdx].msg)
+			} else {
+				log.Printf("WARNING: matched record dropped by transformer: UUID=%s", m.UUID)
+			}
+			matchIdx++
+		} else {
+			result = append(result, m)
+		}
+	}
+
 	return result, nil
 }
 
@@ -180,9 +202,9 @@ func (t *NatsProtoTransformer) buildTransformRequest(msgs []protocol.Message) (*
 		var schemaMeta *cdctransformv1.SchemaMetadata
 		if m.Schema != nil {
 			schemaMeta = &cdctransformv1.SchemaMetadata{
-				Table:      m.Schema.Table,
-				Schema:     m.Schema.Schema,
-				Columns:    m.Schema.Columns,
+				Table:     m.Schema.Table,
+				Schema:    m.Schema.Schema,
+				Columns:   m.Schema.Columns,
 				PkColumns: m.Schema.PKColumns,
 			}
 		}
@@ -240,18 +262,25 @@ func (t *NatsProtoTransformer) sendRequest(ctx context.Context, req proto.Messag
 	return &resp, nil
 }
 
-func (t *NatsProtoTransformer) parseResponse(msgs []protocol.Message, resp *cdctransformv1.TransformResponse) ([]protocol.Message, error) {
+// transformedResult holds a transformed message or nil if dropped.
+type transformedResult struct {
+	msg *protocol.Message
+}
+
+func (t *NatsProtoTransformer) parseResponseWithOrder(msgs []protocol.Message, resp *cdctransformv1.TransformResponse) ([]transformedResult, error) {
 	if len(resp.Results) != len(msgs) {
 		return nil, fmt.Errorf("response result count (%d) does not match request count (%d)", len(resp.Results), len(msgs))
 	}
 
-	var result []protocol.Message
+	results := make([]transformedResult, len(msgs))
 	for i, res := range resp.Results {
 		if !res.Success {
 			return nil, fmt.Errorf("transform failed for record %d: %s", i, res.Error)
 		}
 
 		if !res.Keep {
+			// Mark as dropped (nil msg indicates drop)
+			results[i] = transformedResult{msg: nil}
 			continue
 		}
 
@@ -261,23 +290,27 @@ func (t *NatsProtoTransformer) parseResponse(msgs []protocol.Message, resp *cdct
 		}
 		if res.TransformedSchema != nil {
 			original.Schema = &protocol.SchemaMetadata{
-				Table:      res.TransformedSchema.Table,
-				Schema:     res.TransformedSchema.Schema,
-				Columns:    res.TransformedSchema.Columns,
+				Table:     res.TransformedSchema.Table,
+				Schema:    res.TransformedSchema.Schema,
+				Columns:   res.TransformedSchema.Columns,
 				PKColumns: res.TransformedSchema.PkColumns,
 			}
 		}
-		result = append(result, original)
+		results[i] = transformedResult{msg: &original}
 	}
 
-	return result, nil
+	return results, nil
 }
 
-func (t *NatsProtoTransformer) Stop() error {
+func (t *NatsProtoTransformer) Close() error {
 	if t.conn != nil {
 		t.conn.Close()
 	}
 	return nil
+}
+
+func (t *NatsProtoTransformer) Stop() error {
+	return t.Close()
 }
 
 func sanitizeMapForStructPB(m map[string]interface{}) map[string]interface{} {

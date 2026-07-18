@@ -3,8 +3,8 @@ package transformer
 import (
 	"context"
 	"fmt"
-	"plugin"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"plugin"
 )
 
 // Transformer defines a programmatic interface for data pre-processing.
@@ -22,6 +22,15 @@ type BatchTransformer interface {
 	TransformBatch(ctx context.Context, msgs []protocol.Message) ([]protocol.Message, error)
 }
 
+// CloseableTransformer is an optional interface for transformers that hold resources
+// (e.g., NATS connections) that must be explicitly released during shutdown.
+// This allows transformers to implement resource cleanup without modifying the base
+// Transformer interface that callers depend on.
+type CloseableTransformer interface {
+	Transformer
+	Close() error
+}
+
 // TransformerFactory is a function that creates a Transformer from config.
 type TransformerFactory func(options map[string]interface{}) (Transformer, error)
 
@@ -32,7 +41,8 @@ var transformerRegistry = make(map[string]TransformerFactory)
 // Directory Mapping Pattern: when a subfolder transformer calls RegisterTransformer,
 // it must include its directory in the type name. For example, a transformer in
 // the "ddl" subfolder registering itself should call:
-//   RegisterTransformer("ddl/add_column", factoryFunc)
+//
+//	RegisterTransformer("ddl/add_column", factoryFunc)
 //
 // This allows users to specify "type: \"ddl/add_column\"" in pipeline configuration
 // to reference transformers by their full path from the transformer root directory.

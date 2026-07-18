@@ -10,15 +10,32 @@ import (
 	"os"
 )
 
-func GetEncryptionKey() []byte {
-	key := os.Getenv("ENCRYPTION_KEY")
-	if key == "" {
-		// In a real prod env, we'd fail. For this exercise, we'll return nil
-		// and the caller should handle it.
-		return nil
+// GetEncryptionKey returns a valid AES key (16, 24, or 32 bytes).
+// It accepts keys in three forms:
+// 1. Raw bytes of exactly 16, 24, or 32 bytes (use os.Getenv with string conversion)
+// 2. Base64-encoded strings that decode to 16, 24, or 32 bytes (preferred for safety)
+// Human-readable passphrases are NOT accepted; they must be hashed via PBKDF2 first.
+// This prevents weak keys from being used for encryption.
+func GetEncryptionKey() ([]byte, error) {
+	keyStr := os.Getenv("ENCRYPTION_KEY")
+	if keyStr == "" {
+		return nil, errors.New("ENCRYPTION_KEY environment variable is not set")
 	}
-	// Key must be 16, 24, or 32 bytes for AES
-	return []byte(key)
+
+	// Try base64 decode first; if it succeeds and produces valid length, use it
+	decoded, err := base64.StdEncoding.DecodeString(keyStr)
+	if err == nil && len(decoded) == 16 || len(decoded) == 24 || len(decoded) == 32 {
+		return decoded, nil
+	}
+
+	// If raw string is exactly 16, 24, or 32 bytes, use it directly
+	if len([]byte(keyStr)) == 16 || len([]byte(keyStr)) == 24 || len([]byte(keyStr)) == 32 {
+		return []byte(keyStr), nil
+	}
+
+	// Human-readable passphrases are not allowed without PBKDF2.
+	// Reject them explicitly to prevent weak key vulnerabilities.
+	return nil, errors.New("ENCRYPTION_KEY must be 16, 24, or 32 raw bytes or base64-encoded; human-readable passphrases are not permitted")
 }
 
 func Encrypt(plaintext string, key []byte) (string, error) {

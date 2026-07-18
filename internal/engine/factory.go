@@ -61,7 +61,9 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	if err := json.Unmarshal(sourceEntry.Value(), &srcCfg); err != nil {
 		return nil, err
 	}
-	srcCfg.Decrypt()
+	if err := srcCfg.Decrypt(); err != nil {
+		return nil, fmt.Errorf("failed to decrypt source config: %w", err)
+	}
 
 	// Currently only postgres is supported, but could be a registry too
 	src := postgres.NewPostgresSource(sourceID)
@@ -82,7 +84,9 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 		if err := json.Unmarshal(sinkEntry.Value(), &snkCfg); err != nil {
 			return nil, err
 		}
-		snkCfg.Decrypt()
+		if err := snkCfg.Decrypt(); err != nil {
+			return nil, fmt.Errorf("failed to decrypt sink config: %w", err)
+		}
 
 		// Use Sink Registry
 		snk, err := sink.New(snkCfg.Type, sinkID, snkCfg.DSN, snkCfg.Options)
@@ -155,7 +159,9 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	if err := json.Unmarshal(srcEntry.Value(), &srcConfig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal source config %s: %w", srcID, err)
 	}
-	srcConfig.Decrypt()
+	if err := srcConfig.Decrypt(); err != nil {
+		return nil, fmt.Errorf("failed to decrypt source config: %w", err)
+	}
 
 	prod := NewProducer(id, f.NatsURL, cfg, src, f.Publisher, prodSub, f.KV, srcConfig)
 

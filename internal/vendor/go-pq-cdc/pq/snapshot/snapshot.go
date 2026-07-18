@@ -48,38 +48,45 @@ type orderByCacheEntry struct {
 	columns []string
 }
 
-func New(ctx context.Context, snapshotConfig config.SnapshotConfig, tables publication.Tables, dsn string, m metric.Metric) (*Snapshotter, error) {
-	metadataConn, err := pq.NewConnection(ctx, dsn)
-	if err != nil {
-		return nil, errors.Wrap(err, "create metadata connection")
-	}
-
-	healthcheckConn, err := pq.NewConnection(ctx, dsn)
-	if err != nil {
-		return nil, errors.Wrap(err, "create healthcheck connection")
-	}
-
-	// Create connection pool for chunk processing (5 connections)
-	connectionPool, err := NewConnectionPool(ctx, dsn, 5)
-	if err != nil {
-		return nil, errors.Wrap(err, "create connection pool")
-	}
-
+// vendored-patch: T1-4 - Deferred connection establishment to avoid eager allocation when snapshot is skipped
+func New(snapshotConfig config.SnapshotConfig, tables publication.Tables, dsn string, m metric.Metric) *Snapshotter {
 	// Create decoder cache for efficient type decoding
 	decoderCache := NewDecoderCache()
 
 	return &Snapshotter{
-		dsn:             dsn,
-		metadataConn:    metadataConn,
-		healthcheckConn: healthcheckConn,
-		connectionPool:  connectionPool,
-		decoderCache:    decoderCache,
-		config:          snapshotConfig,
-		tables:          tables,
-		typeMap:         pgtype.NewMap(),
-		metric:          m,
-		orderByCache:    make(map[string]orderByCacheEntry),
-	}, nil
+		dsn:          dsn,
+		decoderCache: decoderCache,
+		config:       snapshotConfig,
+		tables:       tables,
+		typeMap:      pgtype.NewMap(),
+		metric:       m,
+		orderByCache: make(map[string]orderByCacheEntry),
+	}
+}
+
+// vendored-patch: T1-4 - Connect establishes database connections lazily.
+// Call this only when snapshot is actually needed.
+func (s *Snapshotter) Connect(ctx context.Context) error {
+	metadataConn, err := pq.NewConnection(ctx, s.dsn)
+	if err != nil {
+		return errors.Wrap(err, "create metadata connection")
+	}
+	s.metadataConn = metadataConn
+
+	healthcheckConn, err := pq.NewConnection(ctx, s.dsn)
+	if err != nil {
+		return errors.Wrap(err, "create healthcheck connection")
+	}
+	s.healthcheckConn = healthcheckConn
+
+	// Create connection pool for chunk processing (5 connections)
+	connectionPool, err := NewConnectionPool(ctx, s.dsn, 5)
+	if err != nil {
+		return errors.Wrap(err, "create connection pool")
+	}
+	s.connectionPool = connectionPool
+
+	return nil
 }
 
 // Prepare sets up snapshot metadata and exports snapshot transaction

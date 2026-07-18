@@ -34,6 +34,16 @@ export function useSSE<T = unknown>(
 		null,
 	);
 
+	// T1-16: callers typically pass an inline object literal for `options`,
+	// e.g. `useSSE("/x", { onMessage: fn })`. A plain `[endpoint, token, options]`
+	// dependency array would therefore re-create the EventSource on every render,
+	// leaking the previous connection. Hold the latest callbacks in a ref so the
+	// connect closure reads the freshest handlers without invalidating itself.
+	const optionsRef = useRef<SSEOptions>(options);
+	useEffect(() => {
+		optionsRef.current = options;
+	}, [options]);
+
 	const connect = useCallback(() => {
 		// Close existing connection
 		if (eventSourceRef.current) {
@@ -70,7 +80,7 @@ export function useSSE<T = unknown>(
 					isConnected: true,
 					error: null,
 				}));
-				options.onOpen?.();
+				optionsRef.current.onOpen?.();
 			};
 
 			es.onmessage = (event) => {
@@ -80,7 +90,7 @@ export function useSSE<T = unknown>(
 						...prev,
 						data: parsedData,
 					}));
-					options.onMessage?.(parsedData);
+					optionsRef.current.onMessage?.(parsedData);
 				} catch (_err) {
 					// If not JSON, use raw data
 					const rawData = event.data as unknown as T;
@@ -88,7 +98,7 @@ export function useSSE<T = unknown>(
 						...prev,
 						data: rawData,
 					}));
-					options.onMessage?.(rawData);
+					optionsRef.current.onMessage?.(rawData);
 				}
 			};
 
@@ -98,7 +108,7 @@ export function useSSE<T = unknown>(
 					isConnected: false,
 					error: new Error("SSE connection error"),
 				}));
-				options.onError?.(error);
+				optionsRef.current.onError?.(error);
 
 				// Auto-reconnect after 3 seconds
 				reconnectTimeoutRef.current = setTimeout(() => {
@@ -113,7 +123,7 @@ export function useSSE<T = unknown>(
 					err instanceof Error ? err : new Error("Failed to connect to SSE"),
 			}));
 		}
-	}, [endpoint, token, options]);
+	}, [endpoint, token]);
 
 	const reconnect = useCallback(() => {
 		setState({

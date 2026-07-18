@@ -1,6 +1,6 @@
 import Editor from "@monaco-editor/react";
 import { AlertCircle, RotateCcw, Save } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -23,6 +23,17 @@ export function ConfigEditor({
 }: ConfigEditorProps) {
 	const [value, setValue] = useState(initialValue);
 	const [error, setError] = useState<string | null>(null);
+
+	// T2-9: `useState(initialValue)` only seeds the editor once on mount. When
+	// the parent re-renders with a fresh server value (e.g. after an unrelated
+	// query refetch, or navigating between pipelines) the editor keeps showing
+	// the stale text. Mirror `initialValue` into local state so external
+	// updates are reflected without dropping in-flight edits the user has not
+	// saved — `hasChanges` already gates the Reset/Save buttons.
+	useEffect(() => {
+		setValue(initialValue);
+		setError(null);
+	}, [initialValue]);
 
 	const handleChange = useCallback((newValue: string | undefined) => {
 		if (newValue !== undefined) {

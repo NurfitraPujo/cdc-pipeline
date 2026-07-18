@@ -38,6 +38,54 @@ describe("jsonToUpdateRequest", () => {
 		expect(result).toEqual({ id: "p1", name: "Pipeline 1" });
 	});
 
+	test("strips lines starting with // before parsing (T2-8)", () => {
+		const json = `// top comment
+{
+  // inside comment
+  "id": "p1",
+  "name": "Pipeline 1"
+}`;
+		const result = jsonToUpdateRequest(json);
+		expect(result).toEqual({ id: "p1", name: "Pipeline 1" });
+	});
+
+	test("strips mixed # and // comment headers as emitted by pipelineToJson", () => {
+		const json = `// Pipeline Configuration
+// Edit the configuration below and click Save to apply changes
+{
+  "id": "p1",
+  "name": "Pipeline 1",
+  "sources": ["s1"],
+  "sinks": ["k1"],
+  "tables": ["users"]
+}`;
+		const result = jsonToUpdateRequest(json);
+		expect(result).toEqual({
+			id: "p1",
+			name: "Pipeline 1",
+			sources: ["s1"],
+			sinks: ["k1"],
+			tables: ["users"],
+		});
+	});
+
+	test("does not strip // inside string values", () => {
+		const json = `{
+  "name": "http://example.com/path"
+}`;
+		const result = jsonToUpdateRequest(json);
+		expect(result).toEqual({ name: "http://example.com/path" });
+	});
+
+	test("does not strip inline trailing # or // that are not at line start", () => {
+		const json = `{
+  "id": "p1#frag",
+  "name": "Pipeline // 1"
+}`;
+		const result = jsonToUpdateRequest(json);
+		expect(result).toEqual({ id: "p1#frag", name: "Pipeline // 1" });
+	});
+
 	test("returns empty object for {}", () => {
 		const result = jsonToUpdateRequest("{}");
 		expect(result).toEqual({});

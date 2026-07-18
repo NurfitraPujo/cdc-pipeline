@@ -9,11 +9,9 @@ import (
 // CORSMiddleware returns a Gin middleware that handles CORS for specific allowed origins.
 func CORSMiddleware() gin.HandlerFunc {
 	allowedOrigins := map[string]bool{
-		"http://localhost:3000":     true,
-		"http://cdc-stag.daya.ai":    true,
-		"https://cdc-stag.daya.ai":   true,
-		"http://cdc.daya.ai":         true,
-		"https://cdc.daya.ai":        true,
+		"http://localhost:3000":   true,
+		"https://cdc-stag.daya.ai": true,
+		"https://cdc.daya.ai":     true,
 	}
 
 	return func(c *gin.Context) {

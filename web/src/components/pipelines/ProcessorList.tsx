@@ -1,4 +1,5 @@
 import { Plus } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { ProcessorConfigShape } from "./optionsTemplates";
@@ -13,6 +14,9 @@ interface ProcessorListProps {
 
 function makeDefault(): ProcessorConfig {
 	return {
+		// T3-4: a freshly-minted UUID per row so React keys stay stable across
+		// reorders and `onChange` callbacks that replace the entire array.
+		id: crypto.randomUUID(),
 		name: "",
 		type: "mask",
 		operationTypes: [],
@@ -21,6 +25,20 @@ function makeDefault(): ProcessorConfig {
 }
 
 export function ProcessorList({ value, onChange }: ProcessorListProps) {
+	// T3-4: rows arriving from the API (or produced by older code paths) do
+	// not carry an `id`. Backfill them once on mount and whenever the array
+	// length grows so the `key={p.id}` below never falls back to an index.
+	const backfilledRef = useRef(false);
+	useEffect(() => {
+		const needsBackfill = value.some((p) => typeof p.id !== "string");
+		if (!needsBackfill || backfilledRef.current) return;
+		backfilledRef.current = true;
+		const next = value.map((p) =>
+			typeof p.id === "string" ? p : { ...p, id: crypto.randomUUID() },
+		);
+		onChange(next);
+	}, [value, onChange]);
+
 	const update = (i: number, p: ProcessorConfig) => {
 		const next = value.slice();
 		next[i] = p;
@@ -50,10 +68,7 @@ export function ProcessorList({ value, onChange }: ProcessorListProps) {
 				</div>
 			)}
 			{value.map((p, i) => (
-				<Card
-					// biome-ignore lint/suspicious/noArrayIndexKey: list is owned by parent; stable id is not available
-					key={i}
-				>
+				<Card key={p.id ?? `__missing_${i}`}>
 					<CardContent className="pt-6">
 						<ProcessorEditor
 							value={p}

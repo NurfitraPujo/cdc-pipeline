@@ -258,9 +258,9 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 	}
 
 	// Encrypt sensitive credentials for Sources and Sinks using internal/crypto
-	key := crypto.GetEncryptionKey()
-	if len(key) == 0 {
-		return fmt.Errorf("failed to bootstrap: ENCRYPTION_KEY environment variable is empty or missing")
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("failed to bootstrap: %w", err)
 	}
 	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
 		return fmt.Errorf("failed to bootstrap: ENCRYPTION_KEY must be 16, 24, or 32 bytes (got %d)", len(key))

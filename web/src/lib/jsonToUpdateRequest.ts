@@ -3,9 +3,15 @@ import { snakeToCamel } from "@/api/mappers";
 export function jsonToUpdateRequest(
 	jsonContent: string,
 ): Record<string, unknown> {
+	// T2-8: the pipeline JSON scaffold is emitted with `//` comment headers
+	// (see `pipelineToJson` in `routes/pipelines/$id/edit.tsx`). Strip both
+	// `#` and `//` comment lines before handing the result to `JSON.parse`.
 	const cleanedContent = jsonContent
 		.split("\n")
-		.filter((line) => !line.trim().startsWith("#"))
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !trimmed.startsWith("#") && !trimmed.startsWith("//");
+		})
 		.join("\n");
 
 	let parsed: unknown;

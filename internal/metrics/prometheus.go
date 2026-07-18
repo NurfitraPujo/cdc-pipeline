@@ -30,4 +30,14 @@ var (
 		Name: "cdc_pipeline_worker_heartbeat_timestamp",
 		Help: "The last heartbeat timestamp of the worker",
 	}, []string{"worker_id"})
+
+	APICleanupRuns = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cdc_api_cleanup_runs_total",
+		Help: "The total number of stale heartbeat cleanup runs triggered by ListPipelines",
+	})
+
+	NatsPublisherPendingAcks = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cdc_nats_publisher_pending_acks",
+		Help: "The number of pending ACKs during batch publishing",
+	})
 )

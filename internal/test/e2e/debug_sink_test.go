@@ -28,7 +28,7 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 	debugSinkCfg := protocol.SinkConfig{
 		ID:   debugSinkID,
 		Type: "postgres_debug",
-		DSN:  debugDSN,
+		DSN:  encryptForKV(t, debugDSN),
 		Options: map[string]interface{}{
 			"table_name":        "cdc_debug_e2e",
 			"schema_table_name": "cdc_debug_schema_changes",
@@ -141,7 +141,7 @@ func TestE2E_SinkIsolation(t *testing.T) {
 	brokenSinkCfg := protocol.SinkConfig{
 		ID:   brokenSinkID,
 		Type: "postgres_debug",
-		DSN:  debugDSN,
+		DSN:  encryptForKV(t, debugDSN),
 		Options: map[string]interface{}{
 			"table_name": "invalid table name with spaces",
 		},
@@ -154,7 +154,7 @@ func TestE2E_SinkIsolation(t *testing.T) {
 	healthySinkCfg := protocol.SinkConfig{
 		ID:   healthySinkID,
 		Type: "postgres_debug",
-		DSN:  debugDSN,
+		DSN:  encryptForKV(t, debugDSN),
 		Options: map[string]interface{}{
 			"table_name": "cdc_isolation_test",
 		},

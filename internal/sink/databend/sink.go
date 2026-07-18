@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -18,14 +19,53 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	// DefaultMaxPlaceholders bounds the number of `?` placeholders emitted per
+	// REPLACE INTO statement. Databend itself supports up to 65,535
+	// placeholders per prepared statement, but we use a conservative ceiling to
+	// keep memory and parse cost predictable for large CDC batches.
+	DefaultMaxPlaceholders = 10000
+
+	// DefaultDecimalPrecision is the precision used when mapping PostgreSQL
+	// numeric / decimal columns to Databend DECIMAL columns. 38 is the maximum
+	// precision supported by Databend's DECIMAL type.
+	DefaultDecimalPrecision = 38
+
+	// DefaultDecimalScale is the default scale used for numeric / decimal
+	// mappings. 9 covers most financial and scientific use cases.
+	DefaultDecimalScale = 9
+)
+
+// reasonDeserializationFailed is the Prometheus label used for messages that
+// could not be deserialized from their wire payload.
+const reasonDeserializationFailed = "deserialization_failed"
+
+// sinkPKRegex extracts the column list from a `PRIMARY KEY (...)` clause in
+// SHOW CREATE TABLE output. The regex is case-insensitive and tolerant of
+// whitespace and trailing commas.
+var sinkPKRegex = regexp.MustCompile(`(?is)PRIMARY\s+KEY\s*\(([^)]+)\)`)
+
+// DatabendSink writes CDC records into a Databend cluster. The instance is
+// safe for concurrent use.
 type DatabendSink struct {
 	name string
-	db   *sql.DB
+	db   DBExec
 
-	pkMu    sync.RWMutex
-	pkCache map[string][]string // table -> pk columns
+	dlqPublisher DLQPublisher
+	dlqSubject   string
+
+	pkMu     sync.RWMutex
+	pkCache  map[string][]string // table -> pk columns
+	pkLoaded map[string]struct{} // tables we've already attempted SHOW CREATE TABLE on
+
+	maxPlaceholders  int
+	decimalPrecision int
+	decimalScale     int
 }
 
+// NewDatabendSink opens a new Databend sink backed by a real *sql.DB connection
+// pool. The pool is sized for the typical CDC workload (25 idle/open, 5m
+// lifetime) and may be tuned via WithOptions after construction.
 func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 	db, err := sql.Open("databend", dsn)
 	if err != nil {
@@ -36,15 +76,96 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	return &DatabendSink{
-		name:    name,
-		db:      db,
-		pkCache: make(map[string][]string),
+		name:             name,
+		db:               sqlDBAdapter{DB: db},
+		pkCache:          make(map[string][]string),
+		pkLoaded:         make(map[string]struct{}),
+		maxPlaceholders:  DefaultMaxPlaceholders,
+		decimalPrecision: DefaultDecimalPrecision,
+		decimalScale:     DefaultDecimalScale,
+		dlqSubject:       DefaultSinkDeadLetterSubject(name),
 	}, nil
+}
+
+// WithOptions applies configuration values from a sink options map. Supported
+// keys (all optional):
+//
+//   - "max_placeholders"  (int)            upper bound for `?` placeholders per
+//                                              REPLACE INTO statement.
+//   - "decimal_precision" (int)            precision used by DECIMAL mappings.
+//   - "decimal_scale"     (int)            scale used by DECIMAL mappings.
+//   - "dlq_publisher"     (DLQPublisher)   publisher used to emit sink DLQ events.
+//   - "dlq_subject"       (string)         NATS subject used for DLQ events.
+//
+// Returns the receiver for chaining with the registry factory.
+func (s *DatabendSink) WithOptions(options map[string]interface{}) *DatabendSink {
+	if options == nil {
+		return s
+	}
+	if v, ok := options["max_placeholders"]; ok {
+		if n, ok := asInt(v); ok && n > 0 {
+			s.maxPlaceholders = n
+		}
+	}
+	if v, ok := options["decimal_precision"]; ok {
+		if n, ok := asInt(v); ok && n > 0 {
+			s.decimalPrecision = n
+		}
+	}
+	if v, ok := options["decimal_scale"]; ok {
+		if n, ok := asInt(v); ok && n >= 0 {
+			if s.decimalPrecision == 0 {
+				s.decimalPrecision = DefaultDecimalPrecision
+			}
+			if n > s.decimalPrecision {
+				s.decimalScale = s.decimalPrecision
+			} else {
+				s.decimalScale = n
+			}
+		}
+	}
+	if v, ok := options["dlq_publisher"]; ok {
+		if pub, ok := v.(DLQPublisher); ok {
+			s.dlqPublisher = pub
+		}
+	}
+	if v, ok := options["dlq_subject"]; ok {
+		if subject, ok := v.(string); ok && subject != "" {
+			s.dlqSubject = subject
+		}
+	}
+	return s
+}
+
+// asInt coerces an arbitrary options value (typically int, int32, int64 or
+// float64 from YAML/JSON unmarshalling) into a Go int.
+func asInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	}
+	return 0, false
 }
 
 func init() {
 	sink.Register("databend", func(sinkID string, dsn string, options map[string]interface{}) (sink.Sink, error) {
-		return NewDatabendSink(sinkID, dsn)
+		snk, err := NewDatabendSink(sinkID, dsn)
+		if err != nil {
+			return nil, err
+		}
+		return snk.WithOptions(options), nil
 	})
 }
 
@@ -90,9 +211,24 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 	return g.Wait()
 }
 
+// splitQualified splits a qualified table name into schema and table parts.
+// For "schema.table" returns ("schema", "table").
+// For unqualifed names returns ("", "name").
+func splitQualified(name string) (schema, table string) {
+	parts := strings.Split(name, ".")
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", name
+}
+
 func quoteIdentifier(name string) string {
-	// Replace any double quotes with doubled quotes to escape them
-	return "\"" + strings.ReplaceAll(name, "\"", "\"\"") + "\""
+	// Quote each dot-separated component individually for proper SQL quoting
+	parts := strings.Split(name, ".")
+	for i, p := range parts {
+		parts[i] = "\"" + strings.ReplaceAll(p, "\"", "\"\"") + "\""
+	}
+	return strings.Join(parts, ".")
 }
 
 // validateIdentifier checks if the identifier contains only allowed characters
@@ -124,6 +260,7 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 
 	s.pkMu.Lock()
 	s.pkCache[schema.Table] = schema.PKColumns
+	s.pkLoaded[schema.Table] = struct{}{}
 	s.pkMu.Unlock()
 
 	existingCols, err := s.getCurrentColumns(ctx, schema.Table)
@@ -146,7 +283,7 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 				return fmt.Errorf("invalid column name %q: %w", name, err)
 			}
 			pgType := schema.Columns[name]
-			dbType := mapPgTypeToDatabend(pgType)
+			dbType := s.mapPgTypeToDatabend(pgType)
 			colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(name), dbType))
 		}
 		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)",
@@ -165,7 +302,7 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 			continue
 		}
 		if !existingCols[strings.ToLower(name)] {
-			dbType := mapPgTypeToDatabend(pgType)
+			dbType := s.mapPgTypeToDatabend(pgType)
 			query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
 				quotedTable, quoteIdentifier(name), dbType)
 
@@ -180,8 +317,17 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 }
 
 func (s *DatabendSink) getCurrentColumns(ctx context.Context, table string) (map[string]bool, error) {
-	query := "SELECT column_name FROM information_schema.columns WHERE table_name = ?"
-	rows, err := s.db.QueryContext(ctx, query, table)
+	schema, tbl := splitQualified(table)
+	var query string
+	var args []any
+	if schema != "" {
+		query = "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?"
+		args = []any{schema, tbl}
+	} else {
+		query = "SELECT column_name FROM information_schema.columns WHERE table_name = ?"
+		args = []any{table}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,14 +343,42 @@ func (s *DatabendSink) getCurrentColumns(ctx context.Context, table string) (map
 	return cols, nil
 }
 
-func mapPgTypeToDatabend(pgType string) string {
+// mapPgTypeToDatabend translates a PostgreSQL type description (either a
+// canonical name or an OID number) into the closest Databend column type. The
+// DECIMAL precision and scale honour the sink's decimalPrecision /
+// decimalScale configuration so operators can tune financial columns.
+func (s *DatabendSink) mapPgTypeToDatabend(pgType string) string {
 	t := strings.ToLower(pgType)
+
+	// PostgreSQL arrays: `_int`, `int[]`, `text[]`, `numeric[]`, etc.
+	// Databend does not have a first-class ARRAY type, so we encode arrays as
+	// VARIANT (JSON) to preserve fidelity without lossy scalar conversion.
+	if strings.HasSuffix(t, "[]") || strings.HasPrefix(t, "_") || strings.Contains(t, "array") {
+		return "VARIANT"
+	}
+
 	switch {
 	case strings.Contains(t, "bool"):
 		return "BOOLEAN"
 	case strings.Contains(t, "int"):
 		return "INT64"
-	case strings.Contains(t, "float") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+	case strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+		precision := s.decimalPrecision
+		if precision <= 0 {
+			precision = DefaultDecimalPrecision
+		}
+		scale := s.decimalScale
+		if scale < 0 {
+			scale = 0
+		}
+		if scale > precision {
+			scale = precision
+		}
+		if scale == 0 {
+			return fmt.Sprintf("DECIMAL(%d)", precision)
+		}
+		return fmt.Sprintf("DECIMAL(%d, %d)", precision, scale)
+	case strings.Contains(t, "float") || strings.Contains(t, "double") || strings.Contains(t, "real"):
 		return "FLOAT64"
 	case strings.Contains(t, "timestamp"):
 		return "TIMESTAMP"
@@ -243,20 +417,22 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 		return fmt.Errorf("invalid table name: %w", err)
 	}
 
+	// T1-17: lazily resolve PK from Databend the first time we see this table.
+	if err := s.ensurePrimaryKey(ctx, table); err != nil {
+		log.Warn().Err(err).Str("table", table).Msg("ensurePrimaryKey failed; continuing with current cache")
+	}
+
 	// GROUP BY COLUMN SET
 	// CDC batches might contain records with different column sets (evolution or different sources)
 	groups := make(map[string][]map[string]any)
 	groupCols := make(map[string][]string)
 
 	for _, m := range messages {
-		data := m.Data
-		if data == nil {
-			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
-				// Fallback to JSON if msgpack fails
-				if err := json.Unmarshal(m.Payload, &data); err != nil {
-					continue
-				}
-			}
+		data, err := decodePayload(m)
+		if err != nil {
+			// T1-1: surface deserialization failures instead of silently dropping.
+			s.emitDLQ(ctx, m, table, err.Error())
+			continue
 		}
 
 		cols := make([]string, 0, len(data))
@@ -306,39 +482,183 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, table string, messa
 		}
 		colList := strings.Join(quotedColumns, ", ")
 
-		query := fmt.Sprintf("REPLACE INTO %s (%s) ON (%s) VALUES ", quotedTable, colList, pkList)
-
-		valueStrings := make([]string, 0, len(records))
-		valueArgs := make([]any, 0, len(records)*len(columns))
-
-		for _, data := range records {
-			placeholders := make([]string, len(columns))
-			for j, col := range columns {
-				placeholders[j] = "?"
-				val := data[col]
-				if val != nil {
-					switch v := val.(type) {
-					case string, int, int64, float64, bool, time.Time:
-					default:
-						b, _ := json.Marshal(v)
-						val = string(b)
-					}
-				}
-				valueArgs = append(valueArgs, val)
-			}
-			valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
-		}
-
-		query += strings.Join(valueStrings, ", ")
-
-		log.Debug().Str("table", table).Str("query", query).Int("num_records", len(records)).Any("array", valueArgs).Msg("DatabendSink: Executing Upsert")
-
-		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
+		if err := s.executeReplaceIntoChunks(ctx, table, quotedTable, colList, pkList, columns, records); err != nil {
 			return fmt.Errorf("uploadTableBatch for group %s failed: %w", key, err)
 		}
 	}
 
 	return nil
+}
+
+// executeReplaceIntoChunks writes the records to Databend in one or more
+// chunked REPLACE INTO statements. The chunker (T1-14) prevents the
+// placeholder count from exceeding the configured maxPlaceholders per
+// statement, which avoids hitting Databend's 65,535 placeholder ceiling when
+// large heterogeneous batches arrive.
+func (s *DatabendSink) executeReplaceIntoChunks(
+	ctx context.Context,
+	table, quotedTable, colList, pkList string,
+	columns []string,
+	records []map[string]any,
+) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	maxPh := s.maxPlaceholders
+	if maxPh <= 0 {
+		maxPh = DefaultMaxPlaceholders
+	}
+
+	chunkSize := len(records)
+	if len(columns) > 0 {
+		// Compute the largest chunk that stays within the placeholder budget.
+		// Floor to avoid partial-column placeholders.
+		chunkSize = maxPh / len(columns)
+		if chunkSize <= 0 {
+			chunkSize = 1
+		}
+		if chunkSize > len(records) {
+			chunkSize = len(records)
+		}
+	}
+
+	prefix := fmt.Sprintf("REPLACE INTO %s (%s) ON (%s) VALUES ", quotedTable, colList, pkList)
+
+	chunksEmitted := 0
+	for start := 0; start < len(records); start += chunkSize {
+		end := start + chunkSize
+		if end > len(records) {
+			end = len(records)
+		}
+		chunk := records[start:end]
+
+		valueStrings := make([]string, 0, len(chunk))
+		valueArgs := make([]any, 0, len(chunk)*len(columns))
+
+		for _, data := range chunk {
+			placeholders := make([]string, len(columns))
+			for j, col := range columns {
+				placeholders[j] = "?"
+				valueArgs = append(valueArgs, normalizeValue(data[col]))
+			}
+			valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
+		}
+
+		query := prefix + strings.Join(valueStrings, ", ")
+
+		log.Debug().
+			Str("table", table).
+			Str("query", query).
+			Int("num_records", len(chunk)).
+			Int("chunk", chunksEmitted).
+			Msg("DatabendSink: Executing Upsert")
+
+		if _, err := s.db.ExecContext(ctx, query, valueArgs...); err != nil {
+			return fmt.Errorf("chunk %d failed: %w", chunksEmitted, err)
+		}
+		chunksEmitted++
+	}
+
+	if chunksEmitted > 0 {
+		SinkChunksTotal.WithLabelValues(s.name, table).Add(float64(chunksEmitted))
+	}
+	return nil
+}
+
+// normalizeValue returns a value suitable for use as a Databend driver argument.
+// Primitive numeric, string, bool and time values are passed through unchanged.
+// Anything else is JSON encoded so the driver receives a stable representation.
+// The expanded switch (T2-4) covers the full set of Go integer / float types so
+// CDC consumers do not lose precision by accidentally marshalling int8/int16/
+// uint64/etc. into JSON strings.
+func normalizeValue(val any) any {
+	if val == nil {
+		return nil
+	}
+	switch v := val.(type) {
+	case string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64,
+		bool,
+		time.Time:
+		return v
+	default:
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+}
+
+// decodePayload extracts the CDC record data from a message, preferring the
+// in-memory Data field and falling back to MessagePack or JSON deserialisation
+// of the wire payload. The returned error is wrapped so callers can surface a
+// stable reason to the DLQ.
+func decodePayload(m protocol.Message) (map[string]any, error) {
+	if m.Data != nil {
+		return m.Data, nil
+	}
+	if len(m.Payload) == 0 {
+		return nil, fmt.Errorf("payload is empty")
+	}
+	var data map[string]any
+	if err := msgpack.Unmarshal(m.Payload, &data); err == nil {
+		return data, nil
+	} else if jsonErr := json.Unmarshal(m.Payload, &data); jsonErr == nil {
+		return data, nil
+	} else {
+		return nil, fmt.Errorf("msgpack: %v; json: %v", err.Error(), jsonErr.Error())
+	}
+}
+
+// emitDLQ records a deserialization (or other terminal) failure for a single
+// CDC record. It increments the cdc_sink_dlq_total counter, logs the failure
+// with structured context, and (when a DLQPublisher is wired in) publishes a
+// SinkDeadLetterEvent to the configured NATS subject.
+func (s *DatabendSink) emitDLQ(ctx context.Context, m protocol.Message, table, reason string) {
+	log.Error().
+		Err(fmt.Errorf("%s", reason)).
+		Str("table", table).
+		Str("sink_id", s.name).
+		Str("msg_uuid", m.UUID).
+		Uint64("lsn", m.LSN).
+		Msg("failed to deserialize payload")
+
+	SinkDLQTotal.WithLabelValues(s.name, table, reasonDeserializationFailed).Inc()
+
+	if s.dlqPublisher == nil {
+		// Without a wired publisher we can only observe via logs + metrics.
+		return
+	}
+
+	event := SinkDeadLetterEvent{
+		SinkID:    s.name,
+		Table:     table,
+		UUID:      m.UUID,
+		LSN:       m.LSN,
+		Op:        m.Op,
+		SourceID:  m.SourceID,
+		Reason:    reason,
+		Payload:   m.Payload,
+		Data:      m.Data,
+		Timestamp: time.Now().UTC(),
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Error().Err(err).Str("table", table).Msg("failed to marshal DLQ event")
+		return
+	}
+	dlqMsg := buildDLQMessage(m.UUID, payload)
+	subject := s.dlqSubject
+	if subject == "" {
+		subject = DefaultSinkDeadLetterSubject(s.name)
+	}
+	if err := s.dlqPublisher.Publish(subject, dlqMsg); err != nil {
+		log.Error().Err(err).Str("subject", subject).Msg("failed to publish sink DLQ event")
+	}
+	// ctx is reserved for future async-publish hooks; reference it to avoid
+	// unused-parameter warnings and to make it discoverable in trace spans.
+	_ = ctx
 }
 
 func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messages []protocol.Message) error {
@@ -348,6 +668,11 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 
 	if err := validateIdentifier(table); err != nil {
 		return fmt.Errorf("invalid table name: %w", err)
+	}
+
+	// T1-17: lazily resolve PK from Databend the first time we see this table.
+	if err := s.ensurePrimaryKey(ctx, table); err != nil {
+		log.Warn().Err(err).Str("table", table).Msg("ensurePrimaryKey failed; continuing with current cache")
 	}
 
 	s.pkMu.RLock()
@@ -365,14 +690,11 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 	}
 
 	for _, m := range messages {
-		data := m.Data
-		if data == nil {
-			if err := msgpack.Unmarshal(m.Payload, &data); err != nil {
-				// Fallback to JSON if msgpack fails
-				if err := json.Unmarshal(m.Payload, &data); err != nil {
-					continue
-				}
-			}
+		data, err := decodePayload(m)
+		if err != nil {
+			// T1-1: surface deserialization failures instead of silently dropping.
+			s.emitDLQ(ctx, m, table, err.Error())
+			continue
 		}
 
 		var whereClauses []string
@@ -383,7 +705,7 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 				continue
 			}
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteIdentifier(pk)))
-			args = append(args, val)
+			args = append(args, normalizeValue(val))
 		}
 
 		if len(whereClauses) == 0 {
@@ -396,6 +718,114 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, table string, messa
 		}
 	}
 	return nil
+}
+
+// ensurePrimaryKey lazily resolves the primary key columns for a table. It
+// performs at most one SHOW CREATE TABLE per table per process lifetime; after
+// that, lookups are served from the in-memory cache.
+func (s *DatabendSink) ensurePrimaryKey(ctx context.Context, table string) error {
+	return s.refreshPrimaryKey(ctx, table)
+}
+
+// refreshPrimaryKey executes SHOW CREATE TABLE on the sink-side datastore,
+// parses the PRIMARY KEY clause out of the resulting DDL, and updates the
+// cache. Failures are non-fatal: we log + record a metric, fall back to the
+// existing cache (or a default of "id") and continue. The pkLoaded gate
+// ensures SHOW CREATE TABLE is invoked at most once per table per process
+// lifetime, even when called from concurrent goroutines.
+func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, table string) error {
+	// Double-checked locking: skip the query if we have already attempted
+	// resolution for this table.
+	s.pkMu.RLock()
+	if _, loaded := s.pkLoaded[table]; loaded {
+		s.pkMu.RUnlock()
+		return nil
+	}
+	s.pkMu.RUnlock()
+
+	// Reserve the slot BEFORE issuing the query so concurrent callers
+	// short-circuit on their second-check.
+	s.pkMu.Lock()
+	if _, loaded := s.pkLoaded[table]; loaded {
+		s.pkMu.Unlock()
+		return nil
+	}
+	s.pkLoaded[table] = struct{}{}
+	s.pkMu.Unlock()
+
+	quotedTable := quoteIdentifier(table)
+	query := fmt.Sprintf("SHOW CREATE TABLE %s", quotedTable)
+
+	var ddl string
+	scanErr := s.db.QueryRowScan(ctx, query, nil, &ddl)
+
+	if scanErr != nil {
+		log.Warn().Err(scanErr).Str("table", table).Msg("SHOW CREATE TABLE failed; falling back to default PK")
+		s.ensureFallbackPK(table)
+		SinkPKResolved.WithLabelValues(s.name, table).Set(0)
+		return scanErr
+	}
+
+	pks := parsePKFromDDL(ddl)
+	if len(pks) == 0 {
+		log.Warn().Str("table", table).Str("ddl", ddl).Msg("no PRIMARY KEY clause found in SHOW CREATE TABLE; falling back")
+		s.ensureFallbackPK(table)
+		SinkPKResolved.WithLabelValues(s.name, table).Set(0)
+		return nil
+	}
+
+	s.pkMu.Lock()
+	s.pkCache[table] = pks
+	s.pkMu.Unlock()
+	SinkPKResolved.WithLabelValues(s.name, table).Set(1)
+	log.Info().Str("table", table).Strs("pks", pks).Msg("resolved primary key from Databend")
+	return nil
+}
+
+// ensureFallbackPK installs the default "id" primary key for a table if no PK
+// has been recorded yet. This matches the legacy behaviour but is now scoped
+// to tables we have actually attempted to resolve.
+func (s *DatabendSink) ensureFallbackPK(table string) {
+	s.pkMu.Lock()
+	defer s.pkMu.Unlock()
+	if _, ok := s.pkCache[table]; ok {
+		return
+	}
+	s.pkCache[table] = []string{"id"}
+}
+
+// parsePKFromDDL extracts the column list from a `PRIMARY KEY (...)` clause.
+// It returns nil if no clause is present or the input is malformed.
+func parsePKFromDDL(ddl string) []string {
+	if ddl == "" {
+		return nil
+	}
+	match := sinkPKRegex.FindStringSubmatch(ddl)
+	if len(match) < 2 {
+		return nil
+	}
+	rawCols := strings.Split(match[1], ",")
+	pks := make([]string, 0, len(rawCols))
+	for _, c := range rawCols {
+		c = strings.TrimSpace(c)
+		// Strip Databend identifier quoting (backticks / double quotes).
+		c = strings.Trim(c, "\"`")
+		if c == "" {
+			continue
+		}
+		// Strip ASC/DESC qualifiers if present.
+		if idx := strings.IndexAny(c, " \t"); idx > 0 {
+			c = c[:idx]
+		}
+		if c == "" {
+			continue
+		}
+		pks = append(pks, c)
+	}
+	if len(pks) == 0 {
+		return nil
+	}
+	return pks
 }
 
 func (s *DatabendSink) Stop() error {

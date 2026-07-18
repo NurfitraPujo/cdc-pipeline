@@ -25,7 +25,7 @@ func TestEnsureDevAuth_NoOpInProduction(t *testing.T) {
 }
 
 func TestEnsureDevAuth_SkipsWhenUserExists(t *testing.T) {
-	os.Unsetenv("ENV")
+	t.Setenv("ENV", "development")
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -39,7 +39,7 @@ func TestEnsureDevAuth_SkipsWhenUserExists(t *testing.T) {
 }
 
 func TestEnsureDevAuth_SeedsWhenMissing(t *testing.T) {
-	os.Unsetenv("ENV")
+	t.Setenv("ENV", "development")
 	t.Setenv("DEV_ADMIN_USERNAME", "tester")
 	t.Setenv("DEV_ADMIN_PASSWORD", "testerpass")
 
@@ -68,7 +68,7 @@ func TestEnsureDevAuth_SeedsWhenMissing(t *testing.T) {
 }
 
 func TestEnsureDevAuth_DefaultCredentials(t *testing.T) {
-	os.Unsetenv("ENV")
+	t.Setenv("ENV", "development")
 	os.Unsetenv("DEV_ADMIN_USERNAME")
 	os.Unsetenv("DEV_ADMIN_PASSWORD")
 

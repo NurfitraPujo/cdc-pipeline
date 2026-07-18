@@ -31,7 +31,18 @@ import (
 // @name Authorization
 // @description Type "Bearer " followed by your JWT token.
 
+// T3-2: Fail fast if JWT_SECRET is empty or too short
+func validateJWTSecret() {
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if len(jwtSecret) < 32 {
+		log.Fatal().Msg("JWT_SECRET must be set and >= 32 bytes")
+	}
+}
+
 func main() {
+	// T3-2: Validate JWT_SECRET before anything else
+	validateJWTSecret()
+
 	// 1. Initialize Logger
 	logLvl := os.Getenv("LOG_LEVEL")
 	if logLvl == "" {
@@ -91,7 +102,7 @@ func main() {
 
 	v1 := r.Group("/api/v1")
 	{
-		v1.POST("/login", h.Login)
+		v1.POST("/login", api.RateLimitMiddleware(), h.Login)
 
 		authorized := v1.Group("/")
 		authorized.Use(api.AuthMiddleware())
@@ -154,6 +165,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           r,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

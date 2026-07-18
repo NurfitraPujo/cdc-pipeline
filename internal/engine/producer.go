@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,27 +25,55 @@ import (
 )
 
 type tableEvolution struct {
-	Status           string            `json:"status"`
-	Revision         uint64            `json:"revision"`
-	CorrelationID    string            `json:"correlation_id"`
-	CachedSchema     map[string]string `json:"cached_schema"`
-	LastCheckAt      time.Time         `json:"last_check_at"`
-	ChangesThisMin   int               `json:"changes_this_min"`
-	LastChangeAt     time.Time         `json:"last_change_at"`
-	AcknowledgedSinks map[string]bool  `json:"acknowledged_sinks"`
+	Status            string            `json:"status"`
+	Revision          uint64            `json:"revision"`
+	CorrelationID     string            `json:"correlation_id"`
+	CachedSchema      map[string]string `json:"cached_schema"`
+	LastCheckAt       time.Time         `json:"last_check_at"`
+	ChangesThisMin    int               `json:"changes_this_min"`
+	LastChangeAt      time.Time         `json:"last_change_at"`
+	AcknowledgedSinks map[string]bool   `json:"acknowledged_sinks"`
+}
+
+const (
+	publisherCircuitCoolDown = 10 * time.Second
+	evoStatePersistAttempts  = 5
+	evoStatePersistBackoff   = 50 * time.Millisecond
+	evoStatePersistMaxDelay  = 200 * time.Millisecond
+	bufferDrainIdleTimeout   = time.Second
+)
+
+var errPublishRetriesExhausted = errors.New("publisher retries exhausted")
+
+type producerCircuitBreaker interface {
+	Execute(func() (interface{}, error)) (interface{}, error)
+	IsOpen() bool
+}
+
+type gobreakerCircuitBreaker struct {
+	breaker *gobreaker.CircuitBreaker
+}
+
+func (b *gobreakerCircuitBreaker) Execute(request func() (interface{}, error)) (interface{}, error) {
+	return b.breaker.Execute(request)
+}
+
+func (b *gobreakerCircuitBreaker) IsOpen() bool {
+	return b.breaker.State() == gobreaker.StateOpen
 }
 
 type Producer struct {
-	pipelineID   string
-	natsURL      string // NEW: for buffer draining
-	config       protocol.PipelineConfig
-	source       source.Source
-	publisher    stream.Publisher
-	subscriber   stream.Subscriber // NEW: for schema acks
-	kv           nats.KeyValue
-	mu           sync.RWMutex
-	cancelSource context.CancelFunc
-	cb           *gobreaker.CircuitBreaker
+	pipelineID      string
+	natsURL         string // NEW: for buffer draining
+	config          protocol.PipelineConfig
+	source          source.Source
+	publisher       stream.Publisher
+	subscriber      stream.Subscriber // NEW: for schema acks
+	kv              nats.KeyValue
+	mu              sync.RWMutex
+	cancelSource    context.CancelFunc
+	cb              producerCircuitBreaker
+	circuitCoolDown time.Duration
 
 	sourceConfig       protocol.SourceConfig
 	snapshotMu         sync.Mutex
@@ -55,7 +84,7 @@ type Producer struct {
 	evoStates map[string]*tableEvolution // table name -> evolution state
 
 	muTableStates sync.RWMutex
-	tableStates   map[string]string // table name -> snapshot state (Snapshotting, Draining, CDC)
+	tableStates   map[string]string // table name -> snapshot state (Snapshotting, Draining, CDC, Error)
 }
 
 func NewProducer(pipelineID, natsURL string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, sub stream.Subscriber, kv nats.KeyValue, srcConfig protocol.SourceConfig) *Producer {
@@ -63,7 +92,7 @@ func NewProducer(pipelineID, natsURL string, cfg protocol.PipelineConfig, src so
 		Name:        "nats-publisher-" + pipelineID,
 		MaxRequests: 3,
 		Interval:    5 * time.Second,
-		Timeout:     10 * time.Second,
+		Timeout:     publisherCircuitCoolDown,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
 			return counts.Requests >= 3 && failureRatio >= 0.6
@@ -91,7 +120,8 @@ func NewProducer(pipelineID, natsURL string, cfg protocol.PipelineConfig, src so
 		publisher:          pub,
 		subscriber:         sub,
 		kv:                 kv,
-		cb:                 gobreaker.NewCircuitBreaker(settings),
+		cb:                 &gobreakerCircuitBreaker{breaker: gobreaker.NewCircuitBreaker(settings)},
+		circuitCoolDown:    publisherCircuitCoolDown,
 		snapshotInProgress: make(map[string]bool),
 		snapshotDoneChan:   make(chan string, 10),
 		evoStates:          make(map[string]*tableEvolution),
@@ -106,6 +136,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	p.mu.Unlock()
 
 	sourceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	p.mu.Lock()
 	p.cancelSource = cancel
 	p.mu.Unlock()
@@ -197,7 +228,9 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				// 1. Snapshot/Draining State Check
 				p.muTableStates.RLock()
 				tblState := p.tableStates[m.Table]
-				isSnapshotting := tblState == protocol.TableStateSnapshotting || tblState == protocol.TableStateDraining
+				isSnapshotting := tblState == protocol.TableStateSnapshotting ||
+					tblState == protocol.TableStateDraining ||
+					tblState == protocol.TableStateError
 				p.muTableStates.RUnlock()
 
 				// 2. Schema Evolution Check
@@ -302,34 +335,90 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 }
 
 func (p *Producer) publishWithRetry(ctx context.Context, topic string, msg *message.Message, maxRetries int) error {
+	if maxRetries <= 0 {
+		return fmt.Errorf("%w for topic %s: max retries must be positive", errPublishRetriesExhausted, topic)
+	}
+
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; attempt < maxRetries; {
+		if p.cb.IsOpen() {
+			log.Warn().Str("topic", topic).Dur("cool_down", p.circuitCoolDown).Msg("Publisher circuit breaker is open; waiting before retry")
+			if err := waitForRetry(ctx, p.circuitCoolDown); err != nil {
+				return fmt.Errorf("waiting for publisher circuit breaker cool-down: %w", err)
+			}
+			continue
+		}
+
+		attempt++
 		_, lastErr = p.cb.Execute(func() (interface{}, error) {
 			return nil, p.publisher.Publish(topic, msg)
 		})
-
 		if lastErr == nil {
 			return nil
 		}
 
-		log.Warn().Err(lastErr).Str("topic", topic).Int("attempt", attempt+1).Msg("Publish failed, retrying...")
+		log.Warn().Err(lastErr).Str("topic", topic).Int("attempt", attempt).Int("max_attempts", maxRetries).Msg("Publish failed, retrying")
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+		// An Execute failure can open the breaker. Loop immediately so the open-state
+		// branch waits for the full cool-down without consuming another retry.
+		if p.cb.IsOpen() {
+			continue
+		}
+
+		backoff := time.Duration(attempt-1) * 100 * time.Millisecond
+		if err := waitForRetry(ctx, backoff); err != nil {
+			return fmt.Errorf("waiting to retry publish to topic %s: %w", topic, err)
 		}
 	}
-	return fmt.Errorf("exhausted retries for topic %s: %w", topic, lastErr)
+
+	return fmt.Errorf("%w for topic %s after %d attempts: %w", errPublishRetriesExhausted, topic, maxRetries, lastErr)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (p *Producer) publishBufferBatch(ctx context.Context, table string, batch protocol.MessageBatch, maxRetries int) error {
-	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
 	payload, err := batch.MarshalMsg(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshalling routed batch for table %s: %w", table, err)
 	}
 	wmMsg := message.NewMessage(watermill.NewUUID(), payload)
+
+	// Hold the read lock through the durable publish. The Drain -> CDC transition
+	// takes the write lock, so it either observes this buffer publish and drains it,
+	// or flips first and causes this batch to be routed directly to the main stream.
+	p.muEvo.RLock()
+	evoState, hasEvoState := p.evoStates[table]
+	isEvolutionPaused := hasEvoState && (evoState.Status == protocol.SchemaStatusFrozen || evoState.Status == protocol.SchemaStatusDraining)
+	p.muEvo.RUnlock()
+
+	p.muTableStates.RLock()
+	defer p.muTableStates.RUnlock()
+	tableState := p.tableStates[table]
+
+	shouldBuffer := tableState == protocol.TableStateSnapshotting ||
+		tableState == protocol.TableStateDraining ||
+		tableState == protocol.TableStateError ||
+		isEvolutionPaused
+
+	topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
+	if shouldBuffer {
+		topic = fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
+	}
+
 	return p.publishWithRetry(ctx, topic, wmMsg, maxRetries)
 }
 
@@ -441,34 +530,14 @@ func (p *Producer) flushBuffer(ctx context.Context, table string) {
 	}
 
 	mainTopic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
-	// Drain everything currently in the buffer.
-	// We use a short timeout to detect when the buffer is truly empty.
-	for {
-		timer := time.NewTimer(1 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case m, ok := <-msgChan:
-			timer.Stop()
-			if !ok {
-				goto finished
-			}
-			log.Info().Str("table", table).Msg("Republishing buffered message")
-			if err := p.publisher.Publish(mainTopic, m); err != nil {
-				log.Error().Err(err).Msg("Failed to republish buffered message")
-				m.Nack()
-				return
-			}
-			m.Ack()
-		case <-timer.C:
-			// No messages for 1 second, assume buffer is empty
-			goto finished
-		}
+	if _, err := p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, bufferDrainIdleTimeout); err != nil {
+		log.Error().Err(err).Str("table", table).Msg("Failed to drain buffered messages")
+		return
 	}
 
-finished:
-	// 1. Transition evolution state back to STABLE
+	// 1. Transition evolution state back to STABLE. A snapshot drain remains in
+	// Draining while this write occurs, so concurrent table events still route to
+	// the buffer and are covered by the locked final verification below.
 	p.muEvo.Lock()
 	evoState, ok := p.evoStates[table]
 	if ok && evoState.Status == protocol.SchemaStatusDraining {
@@ -479,15 +548,77 @@ finished:
 	}
 	p.muEvo.Unlock()
 
-	// 2. Transition snapshot state back to CDC
-	p.muTableStates.Lock()
-	if p.tableStates[table] == protocol.TableStateDraining {
-		log.Info().Str("table", table).Msg("Buffer flush complete for snapshot, table is now CDC")
-		p.muTableStates.Unlock()
-		p.setTableState(p.sourceConfig.ID, table, protocol.TableStateCDC)
-	} else {
-		p.muTableStates.Unlock()
+	// 2. Transition snapshot state back to CDC. The write lock is held while the
+	// subscriber verifies a final quiet period and while the local state flips.
+	// Incoming routed publishes hold the corresponding read lock through publish,
+	// closing the race where a CDC event could otherwise land after drain exit.
+	p.mu.RLock()
+	sourceID := p.sourceConfig.ID
+	p.mu.RUnlock()
+
+	transitioned, err := p.transitionTableToCDC(sourceID, table, func() (bool, error) {
+		return p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, bufferDrainIdleTimeout)
+	})
+	if err != nil {
+		log.Error().Err(err).Str("table", table).Msg("Failed to complete snapshot buffer drain")
+		return
 	}
+	if transitioned {
+		log.Info().Str("table", table).Msg("Buffer flush complete for snapshot, table is now CDC")
+	}
+}
+
+func (p *Producer) drainBufferedUntilIdle(ctx context.Context, table string, msgChan <-chan *message.Message, mainTopic string, idleTimeout time.Duration) (bool, error) {
+	for {
+		timer := time.NewTimer(idleTimeout)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case m, ok := <-msgChan:
+			timer.Stop()
+			if !ok {
+				return true, nil
+			}
+
+			log.Info().Str("table", table).Msg("Republishing buffered message")
+			if err := p.publisher.Publish(mainTopic, m); err != nil {
+				m.Nack()
+				return false, fmt.Errorf("republishing buffered message for table %s: %w", table, err)
+			}
+			m.Ack()
+		case <-timer.C:
+			return true, nil
+		}
+	}
+}
+
+func (p *Producer) transitionTableToCDC(sourceID, table string, verifyEmpty func() (bool, error)) (bool, error) {
+	p.muTableStates.Lock()
+	if p.tableStates[table] != protocol.TableStateDraining {
+		p.muTableStates.Unlock()
+		return false, nil
+	}
+
+	empty, err := verifyEmpty()
+	if err != nil {
+		p.muTableStates.Unlock()
+		return false, fmt.Errorf("verifying final buffer state for table %s: %w", table, err)
+	}
+	if !empty {
+		p.muTableStates.Unlock()
+		return false, nil
+	}
+
+	p.tableStates[table] = protocol.TableStateCDC
+	p.muTableStates.Unlock()
+
+	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
+	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateCDC)); err != nil {
+		return true, fmt.Errorf("persisting CDC table state for %s: %w", table, err)
+	}
+
+	return true, nil
 }
 
 func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff, bool) {
@@ -507,9 +638,9 @@ func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff,
 			cols[k] = "unknown"
 		}
 		state = &tableEvolution{
-			Status:           protocol.SchemaStatusStable,
-			CachedSchema:     cols,
-			LastCheckAt:      time.Now(),
+			Status:            protocol.SchemaStatusStable,
+			CachedSchema:      cols,
+			LastCheckAt:       time.Now(),
 			AcknowledgedSinks: make(map[string]bool),
 		}
 		p.evoStates[m.Table] = state
@@ -596,21 +727,73 @@ func (p *Producer) emitSchemaChange(ctx context.Context, sourceID, table string,
 	return p.publishWithRetry(ctx, topic, wmMsg, 10)
 }
 
-func (p *Producer) persistEvoState(table string, state *tableEvolution) {
+func (p *Producer) persistEvoState(table string, state *tableEvolution) error {
 	key := protocol.SchemaEvolutionKey(p.pipelineID, table)
-	data, _ := json.Marshal(state)
-	var err error
-	var rev uint64
-	if state.Revision == 0 {
-		rev, err = p.kv.Put(key, data)
-	} else {
-		rev, err = p.kv.Update(key, data, state.Revision)
+	revision := state.Revision
+	var lastErr error
+
+	for attempt := 1; attempt <= evoStatePersistAttempts; attempt++ {
+		state.Revision = revision
+		data, err := json.Marshal(state)
+		if err != nil {
+			lastErr = fmt.Errorf("marshalling evolution state: %w", err)
+			break
+		}
+
+		var newRevision uint64
+		if revision == 0 {
+			newRevision, err = p.kv.Put(key, data)
+		} else {
+			newRevision, err = p.kv.Update(key, data, revision)
+		}
+		if err == nil {
+			state.Revision = newRevision
+			return nil
+		}
+
+		lastErr = err
+		log.Warn().Err(err).Str("table", table).Int("attempt", attempt).Int("max_attempts", evoStatePersistAttempts).Msg("Failed to persist evolution state; retrying")
+		if attempt == evoStatePersistAttempts {
+			break
+		}
+
+		// Refresh the fencing token after a CAS conflict. Retrying a stale revision
+		// unchanged can never converge when another writer has advanced the key.
+		entry, getErr := p.kv.Get(key)
+		if getErr != nil {
+			log.Warn().Err(getErr).Str("table", table).Msg("Failed to refresh evolution state revision")
+		} else {
+			revision = entry.Revision()
+		}
+
+		delay := time.Duration(attempt) * evoStatePersistBackoff
+		if delay > evoStatePersistMaxDelay {
+			delay = evoStatePersistMaxDelay
+		}
+		time.Sleep(delay)
 	}
 
-	if err != nil {
-		log.Error().Err(err).Str("table", table).Msg("Failed to persist evolution state")
-	} else {
-		state.Revision = rev
+	persistErr := fmt.Errorf("persisting evolution state for table %s after %d attempts: %w", table, evoStatePersistAttempts, lastErr)
+	log.Error().Err(persistErr).Str("table", table).Msg("Evolution state persistence exhausted; pausing table CDC ingestion")
+	p.pauseTableCDC(table)
+	return persistErr
+}
+
+func (p *Producer) pauseTableCDC(table string) {
+	p.muTableStates.Lock()
+	p.tableStates[table] = protocol.TableStateError
+	p.muTableStates.Unlock()
+
+	p.mu.RLock()
+	sourceID := p.sourceConfig.ID
+	p.mu.RUnlock()
+	if sourceID == "" || p.kv == nil {
+		return
+	}
+
+	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
+	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateError)); err != nil {
+		log.Error().Err(err).Str("table", table).Msg("Failed to persist paused table state")
 	}
 }
 

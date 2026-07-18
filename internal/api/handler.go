@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
@@ -22,6 +24,52 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/lib/pq"
 )
+
+// isPrivateHost checks if the given IP address is in a private/reserved range.
+// This includes loopback (127.0.0.0/8), link-local (169.254.0.0/16), and RFC 1918 private ranges.
+func isPrivateHost(ip net.IP) bool {
+	// Check loopback
+	if ip.IsLoopback() {
+		return true
+	}
+	// Check link-local
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+	// Check RFC 1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+	// Also include 100.64.0.0/10 (Carrier-grade NAT)
+	// And 192.0.0.0/24 (IETF Protocol assignments)
+	privateBlocks := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"192.0.0.0/24",
+	}
+	for _, block := range privateBlocks {
+		_, cidr, _ := net.ParseCIDR(block)
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateHost resolves the hostname and checks if the resulting IP is allowed.
+// Returns an error message if the host resolves to a private/reserved IP.
+func validateHost(host string) string {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// If DNS resolution fails, we allow the connection attempt (it may fail for other reasons)
+		return ""
+	}
+	for _, ip := range ips {
+		if isPrivateHost(ip) {
+			return fmt.Sprintf("host %s resolved to private IP %s not allowed", host, ip.String())
+		}
+	}
+	return ""
+}
 
 type Handler struct {
 	kv nats.KeyValue
@@ -276,8 +324,12 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 // @Success      200  {object}  map[string]any
 // @Router       /pipelines [get]
 func (h *Handler) ListPipelines(c *gin.Context) {
-	// Cleanup stale worker heartbeats while we're at it
-	go h.cleanupStaleHeartbeats()
+	// Cleanup stale worker heartbeats while we're at it.
+	// Use singleflight to deduplicate concurrent cleanup calls.
+	h.sf.Do("cleanup", func() (any, error) {
+		h.cleanupStaleHeartbeats()
+		return nil, nil
+	})
 
 	search := strings.ToLower(c.Query("search"))
 	statusFilter := c.Query("status")
@@ -290,11 +342,20 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	if l := c.Query("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
+
+	// T2-7: Clamp pagination values to safe ranges to prevent slice index overflow.
+	// Large page values could cause (page-1)*limit to wrap negative.
 	if page < 1 {
 		page = 1
 	}
+	if page > 10000 {
+		page = 10000
+	}
 	if limit < 1 {
-		limit = 10
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
 	}
 
 	keys, err := h.kv.Keys()
@@ -331,7 +392,11 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	total := len(pipelines)
 	start := (page - 1) * limit
 	end := start + limit
-	if start > total {
+
+	// T2-7: Reject negative start values and handle out-of-bounds gracefully.
+	// After clamping page and limit above, start should always be >= 0,
+	// but we keep this check for defensive programming.
+	if start < 0 || start >= total {
 		pipelines = []protocol.PipelineConfig{}
 	} else {
 		if end > total {
@@ -735,7 +800,11 @@ func (h *Handler) CreateSource(c *gin.Context) {
 	}
 
 	// Encrypt sensitive fields
-	key := crypto.GetEncryptionKey()
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if cfg.PassEncrypted != "" {
 		encrypted, err := crypto.Encrypt(cfg.PassEncrypted, key)
 		if err != nil {
@@ -796,7 +865,11 @@ func (h *Handler) UpdateSource(c *gin.Context) {
 	} else if cfg.PassEncrypted == "__CLEAR__" {
 		cfg.PassEncrypted = ""
 	} else {
-		key := crypto.GetEncryptionKey()
+		key, err := crypto.GetEncryptionKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		encrypted, err := crypto.Encrypt(cfg.PassEncrypted, key)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt password"})
@@ -929,8 +1002,10 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 			var cfg protocol.SourceConfig
 			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
 				// Decrypt password
-				encKey := crypto.GetEncryptionKey()
-				if cfg.PassEncrypted != "" {
+				encKey, err := crypto.GetEncryptionKey()
+				if err != nil {
+					log.Error().Err(err).Msg("failed to get encryption key for source schema discovery")
+				} else if cfg.PassEncrypted != "" {
 					decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encKey)
 					if err == nil {
 						cfg.PassEncrypted = decrypted
@@ -994,7 +1069,11 @@ func (h *Handler) ListSinks(c *gin.Context) {
 		return
 	}
 
-	encryptionKey := crypto.GetEncryptionKey()
+	encryptionKey, err := crypto.GetEncryptionKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	var sinks []protocol.SinkConfig
 	for _, key := range keys {
 		if strings.HasPrefix(key, protocol.PrefixSinkConfig) {
@@ -1046,7 +1125,11 @@ func (h *Handler) GetSink(c *gin.Context) {
 	}
 
 	// Decrypt sensitive fields
-	encryptionKey := crypto.GetEncryptionKey()
+	encryptionKey, err := crypto.GetEncryptionKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if cfg.DSN != "" {
 		decrypted, err := crypto.Decrypt(cfg.DSN, encryptionKey)
 		if err != nil {
@@ -1082,7 +1165,11 @@ func (h *Handler) CreateSink(c *gin.Context) {
 	}
 
 	// Encrypt sensitive fields
-	key := crypto.GetEncryptionKey()
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if cfg.DSN != "" {
 		encrypted, err := crypto.Encrypt(cfg.DSN, key)
 		if err != nil {
@@ -1132,7 +1219,11 @@ func (h *Handler) UpdateSink(c *gin.Context) {
 	}
 
 	// Encrypt sensitive fields or reconstruct if masked
-	key := crypto.GetEncryptionKey()
+	key, err := crypto.GetEncryptionKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	var oldCfg protocol.SinkConfig
 	oldKey := protocol.SinkConfigKey(id)
 	if entry, err := h.kv.Get(oldKey); err == nil {
@@ -1221,6 +1312,8 @@ func (h *Handler) GetWorkerHeartbeat(c *gin.Context) {
 }
 
 func (h *Handler) cleanupStaleHeartbeats() {
+	metrics.APICleanupRuns.Inc()
+
 	keys, err := h.kv.Keys()
 	if err != nil {
 		return
@@ -1255,11 +1348,6 @@ func (h *Handler) cleanupStaleHeartbeats() {
 func (h *Handler) StreamMetrics(c *gin.Context) {
 	pipelineID := c.Param("id")
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-
 	// 1. Identify debug sinks for this pipeline to help frontend filter
 	keys, _ := h.kv.Keys()
 	debugSinks := make(map[string]bool)
@@ -1282,13 +1370,20 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	}
 	defer watcher.Stop()
 
+	// Set SSE headers only after watcher creation succeeds
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			return
-		case entry := <-watcher.Updates():
-			if entry == nil {
-				continue
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				log.Warn().Msg("watcher closed, exiting metric stream")
+				return
 			}
 
 			var data any
@@ -1378,6 +1473,12 @@ func (h *Handler) TestSourceConnection(c *gin.Context) {
 		return
 	}
 
+	// T2-1: Validate host resolves to a non-private IP before attempting connection.
+	if errMsg := validateHost(cfg.Host); errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
+	}
+
 	// If id is provided and pass is empty, inject old password from KV
 	if cfg.PassEncrypted == "" {
 		if cfg.ID != "" {
@@ -1385,7 +1486,11 @@ func (h *Handler) TestSourceConnection(c *gin.Context) {
 			if entry, err := h.kv.Get(key); err == nil {
 				var oldCfg protocol.SourceConfig
 				if err := json.Unmarshal(entry.Value(), &oldCfg); err == nil {
-					encKey := crypto.GetEncryptionKey()
+					encKey, err := crypto.GetEncryptionKey()
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+						return
+					}
 					if oldCfg.PassEncrypted != "" {
 						decrypted, err := crypto.Decrypt(oldCfg.PassEncrypted, encKey)
 						if err == nil {
@@ -1445,7 +1550,11 @@ func (h *Handler) TestSinkConnection(c *gin.Context) {
 				if entry, err := h.kv.Get(key); err == nil {
 					var oldCfg protocol.SinkConfig
 					if err := json.Unmarshal(entry.Value(), &oldCfg); err == nil {
-						encKey := crypto.GetEncryptionKey()
+						encKey, err := crypto.GetEncryptionKey()
+						if err != nil {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+							return
+						}
 						decrypted, err := crypto.Decrypt(oldCfg.DSN, encKey)
 						if err == nil {
 							cfg.DSN = reconstructDSN(cfg.DSN, decrypted)
@@ -1456,23 +1565,21 @@ func (h *Handler) TestSinkConnection(c *gin.Context) {
 		}
 	}
 
-	if cfg.Type == "postgres_debug" {
-		db, err := sql.Open("postgres", cfg.DSN)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to open connection: %v", err)})
-			return
+	if cfg.Type == "postgres_debug" || cfg.Type == "databend" {
+		// T2-1: Validate host resolves to a non-private IP before attempting connection.
+		// Extract host from DSN for validation.
+		var host string
+		if u, err := url.Parse(cfg.DSN); err == nil {
+			host = u.Hostname()
 		}
-		defer db.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := db.PingContext(ctx); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Connection failed: %v", err)})
-			return
+		if host != "" {
+			if errMsg := validateHost(host); errMsg != "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+				return
+			}
 		}
-	} else if cfg.Type == "databend" {
-		db, err := sql.Open("databend", cfg.DSN)
+
+		db, err := sql.Open(cfg.Type, cfg.DSN)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to open connection: %v", err)})
 			return

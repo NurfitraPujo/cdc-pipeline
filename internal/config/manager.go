@@ -14,10 +14,31 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
 )
 
+// WorkerFactory constructs a new PipelineWorker for the given pipeline ID and configuration.
+// Implementations must return a fully-running worker; they must never block.
 type WorkerFactory func(ctx context.Context, pipelineID string, cfg protocol.PipelineConfig) (engine.PipelineWorker, error)
+
+// heartbeatSubjectPrefix is the NATS pub/sub subject prefix used for worker heartbeat
+// notifications. The full subject is `heartbeats.worker.<pipeline_id>`. The pub/sub
+// channel is cheap (no JetStream persistence); see the T1-31 ticket for the rationale.
+const heartbeatSubjectPrefix = "heartbeats.worker."
+
+// supervisorRevisionsKey is the NATS KV bucket key under which the manager persists the
+// per-pipeline last-seen revision map on shutdown. See the T1-27 ticket for context.
+const supervisorRevisionsKey = "cdc.supervisor.revisions"
+
+// heartbeatKVWritesTotal counts every NATS KV write triggered by the worker supervisor for
+// heartbeat purposes. Operators should monitor this counter to confirm the migration
+// described in T1-31 (heartbeat off KV onto a pub/sub subject) is reducing write pressure.
+var heartbeatKVWritesTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "cdc_heartbeat_kv_writes_total",
+	Help: "Total number of NATS KV writes triggered for worker heartbeat status updates.",
+})
 
 type ConfigManager struct {
 	ctx            context.Context
@@ -26,13 +47,22 @@ type ConfigManager struct {
 	factory        WorkerFactory
 	workers        map[string]engine.PipelineWorker
 	configs        map[string]protocol.PipelineConfig // Track current configs for comparison
-	revisions      map[string]uint64                  // Track last seen revision
+	revisions      map[string]uint64                  // Track last seen revision per pipeline
 	supervisors    map[string]context.CancelFunc      // Track supervisor cancel functions
 	workersMu      sync.RWMutex
 	globalConfig   protocol.GlobalConfig
 	globalConfigMu sync.RWMutex
+
+	// natsConn is an optional reference to a NATS connection that callers may inject
+	// via SetNatsConn. When set, worker heartbeats are published via regular NATS
+	// pub/sub (cheap, no persistence) at a 2s cadence; a slow KV write at a 15s
+	// cadence remains for the API to render status. See T1-31.
+	natsConnMu sync.RWMutex
+	natsConn   *nats.Conn
 }
 
+// NewConfigManager constructs a ConfigManager backed by the supplied NATS KeyValue
+// bucket. The manager defaults to KV-only heartbeats until SetNatsConn is called.
 func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 	cfg := protocol.GlobalConfig{
 		BatchSize:          1000,
@@ -53,6 +83,27 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 		supervisors:  make(map[string]context.CancelFunc),
 		globalConfig: cfg,
 	}
+}
+
+// SetNatsConn registers an optional NATS connection used for publishing worker
+// heartbeat messages on a regular pub/sub subject. Pass nil to disable pub/sub
+// heartbeats and fall back to KV-only status updates.
+//
+// This method is safe to call at any time after construction; it is optional and
+// preserves backward compatibility with callers that do not supply a connection.
+func (m *ConfigManager) SetNatsConn(nc *nats.Conn) {
+	m.natsConnMu.Lock()
+	defer m.natsConnMu.Unlock()
+	m.natsConn = nc
+}
+
+// getNatsConn returns the currently registered NATS connection or nil when none has
+// been set. The returned pointer is a snapshot; callers must not assume it remains
+// valid across long-lived operations.
+func (m *ConfigManager) getNatsConn() *nats.Conn {
+	m.natsConnMu.RLock()
+	defer m.natsConnMu.RUnlock()
+	return m.natsConn
 }
 
 func (m *ConfigManager) GetKV() nats.KeyValue {
@@ -98,7 +149,7 @@ func (m *ConfigManager) getGlobalConfig() protocol.GlobalConfig {
 
 func (m *ConfigManager) Watch(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
-	
+
 	// 1. Prime Global Config (Get latest if it exists)
 	if entry, err := m.kv.Get(protocol.KeyGlobalConfig); err == nil {
 		var cfg protocol.GlobalConfig
@@ -109,6 +160,26 @@ func (m *ConfigManager) Watch(ctx context.Context) error {
 			m.globalConfigMu.Unlock()
 			log.Info().Msg("Global config primed from KV")
 		}
+	}
+
+	// 1b. Restore supervisor last-seen revisions so out-of-order watcher events
+	// inherited from a previous restart can be detected safely. See T1-27.
+	if entry, err := m.kv.Get(supervisorRevisionsKey); err == nil {
+		var revs map[string]uint64
+		if err := json.Unmarshal(entry.Value(), &revs); err == nil && len(revs) > 0 {
+			m.workersMu.Lock()
+			for id, rev := range revs {
+				if rev > m.revisions[id] {
+					m.revisions[id] = rev
+				}
+			}
+			m.workersMu.Unlock()
+			log.Info().Int("count", len(revs)).Msg("Restored supervisor revisions from KV")
+		} else if err != nil {
+			log.Warn().Err(err).Msg("Failed to unmarshal supervisor revisions")
+		}
+	} else if err != nil && err != nats.ErrKeyNotFound {
+		log.Warn().Err(err).Msg("Failed to read supervisor revisions from KV")
 	}
 
 	// 2. Start Watchers
@@ -134,7 +205,16 @@ func (m *ConfigManager) handleGlobalUpdates(ctx context.Context, watcher nats.Ke
 		select {
 		case <-ctx.Done():
 			return
-		case entry := <-watcher.Updates():
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				log.Warn().Msg("watcher closed, exiting global config watcher")
+				return
+			}
+			// NATS KV Watch sends a nil entry as an initial-emit sentinel
+			// (e.g. when the watched key does not yet exist). The comma-ok
+			// above catches channel close — these are independent cases, so
+			// we keep both checks to avoid a CPU spin on close while still
+			// tolerating legitimate nil entries.
 			if entry == nil {
 				continue
 			}
@@ -206,7 +286,11 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 		select {
 		case <-ctx.Done():
 			return
-		case entry := <-watcher.Updates():
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				log.Warn().Msg("watcher closed, exiting pipeline config watcher")
+				return
+			}
 			if entry == nil {
 				continue
 			}
@@ -217,7 +301,25 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			}
 
 			if entry.Operation() == nats.KeyValuePurge || entry.Operation() == nats.KeyValueDelete {
-				log.Info().Str("pipeline_id", pipelineID).Msg("Pipeline deleted")
+				// T1-27: ignore stale delete markers whose revision does not exceed what
+				// we have already observed. Otherwise an out-of-order watcher redelivery
+				// could terminate a freshly-started worker that has not yet generated a
+				// new revision for this pipeline.
+				m.workersMu.Lock()
+				lastRev := m.revisions[pipelineID]
+				if entry.Revision() <= lastRev {
+					m.workersMu.Unlock()
+					log.Debug().
+						Str("pipeline_id", pipelineID).
+						Uint64("event_rev", entry.Revision()).
+						Uint64("last_rev", lastRev).
+						Msg("Stale pipeline delete event ignored")
+					continue
+				}
+				m.revisions[pipelineID] = entry.Revision()
+				m.workersMu.Unlock()
+
+				log.Info().Str("pipeline_id", pipelineID).Uint64("revision", entry.Revision()).Msg("Pipeline deleted")
 				m.stopWorker(ctx, pipelineID)
 				continue
 			}
@@ -251,13 +353,16 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 				continue
 			}
 
-			// Smart reload: detect if ONLY Tables changed
+			// Smart reload: detect if ONLY Tables changed. The worker pointer is
+			// captured under the WRITE lock so we never observe a torn or stale
+			// reference between releasing the write lock and reacquiring read.
+			// This addresses T1-28's "concurrently-confused map lookup".
 			var newTables []string
 			if exists && m.onlyTablesChanged(currentCfg, cfg, &newTables) {
-				m.workersMu.Unlock() // Unlock early as we are not modifying the worker map
-				m.workersMu.RLock()
 				worker, workerExists := m.workers[pipelineID]
-				m.workersMu.RUnlock()
+				m.configs[pipelineID] = cfg
+				m.revisions[pipelineID] = entry.Revision()
+				m.workersMu.Unlock()
 
 				if workerExists {
 					log.Info().
@@ -265,13 +370,9 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 						Strs("new_tables", newTables).
 						Msg("Smart reload: signaling dynamic table addition")
 
-					// Update config in memory for future comparisons
-					m.workersMu.Lock()
-					m.configs[pipelineID] = cfg
-					m.revisions[pipelineID] = entry.Revision()
-					m.workersMu.Unlock()
-					
-					// This is a conceptual method on the Worker interface
+					// This is a conceptual method on the Worker interface.
+					// The pointer was captured atomically with the maps above; it
+					// remains valid even though we have released the lock.
 					worker.SignalDynamicTables(newTables)
 				}
 				continue
@@ -483,9 +584,30 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	go m.monitorWorker(supCtx, newWorker, id, cfg, 0)
 }
 
+const (
+	// maxBackoffAttempt caps the attempt counter for exponential backoff to prevent
+	// integer overflow when shifting (1 << (attempt-1)). At attempt=63, a signed
+	// int shift overflows to a negative number, causing a tight crash loop.
+	// Capping at 15 limits max backoff to 2^14 * baseDelay = ~21 hours with default
+	// 5s base, well beyond any practical retry scenario.
+	maxBackoffAttempt = 15
+	// maxBackoff is the absolute ceiling on backoff delay regardless of attempt count.
+	maxBackoff = 60 * time.Second
+	// fastHeartbeatInterval is the cadence at which the heartbeat goroutine fires
+	// the fast (pub/sub) heartbeat. The slow KV write runs at slowHeartbeatInterval.
+	fastHeartbeatInterval = 2 * time.Second
+	// slowHeartbeatInterval is the cadence at which the heartbeat goroutine fires
+	// the slow KV write so that the API can render status. See T1-31.
+	slowHeartbeatInterval = 15 * time.Second
+)
+
 func (m *ConfigManager) getBackoffDelay(attempt int) time.Duration {
 	if attempt <= 0 {
 		return 0
+	}
+	// Clamp attempt to prevent shift overflow.
+	if attempt > maxBackoffAttempt {
+		attempt = maxBackoffAttempt
 	}
 	baseDelay := m.getGlobalConfig().CrashRecoveryDelay
 	if baseDelay <= 0 {
@@ -496,14 +618,41 @@ func (m *ConfigManager) getBackoffDelay(attempt int) time.Duration {
 	multiplier := 1 << (attempt - 1)
 	delay := baseDelay * time.Duration(multiplier)
 
-	maxDelay := 1 * time.Minute
-	if delay > maxDelay {
-		delay = maxDelay
+	if delay > maxBackoff {
+		delay = maxBackoff
 	}
 
 	// Add 10% random jitter
 	jitter := time.Duration(float64(delay) * 0.1 * (2*rand.Float64() - 1))
 	return delay + jitter
+}
+
+// writeHeartbeatKV persists the heartbeat to NATS KV, bumps the heartbeat KV write
+// counter, and updates the Prometheus gauge for visibility. It is the single
+// chokepoint for KV writes emitted by the supervisor and guarantees that the
+// counter increments exactly once per write (success or failure). When the write
+// fails, the counter still increments so operators can correlate with NATS errors.
+func (m *ConfigManager) writeHeartbeatKV(pid string, hb protocol.WorkerHeartbeat, data []byte) {
+	if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
+		log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update worker heartbeat in KV")
+	}
+	heartbeatKVWritesTotal.Inc()
+	metrics.WorkerHeartbeat.WithLabelValues(hb.WorkerID).Set(float64(hb.UpdatedAt.Unix()))
+}
+
+// publishHeartbeatPS publishes the heartbeat message on a NATS pub/sub subject
+// (`heartbeats.worker.<pipeline_id>`). The operation is best-effort: when no NATS
+// connection has been registered, the call is a no-op so the heartbeat degrades to
+// KV-only updates without panicking. See T1-31.
+func (m *ConfigManager) publishHeartbeatPS(pid string, hb protocol.WorkerHeartbeat, data []byte) {
+	nc := m.getNatsConn()
+	if nc == nil {
+		return
+	}
+	subject := heartbeatSubjectPrefix + pid
+	if err := nc.Publish(subject, data); err != nil {
+		log.Warn().Err(err).Str("subject", subject).Msg("Failed to publish worker heartbeat over pub/sub")
+	}
 }
 
 func (m *ConfigManager) attemptRestart(ctx context.Context, pid string, cfg protocol.PipelineConfig, attempt int) {
@@ -554,7 +703,8 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 		delay := m.getBackoffDelay(attempt)
 		log.Warn().Str("pipeline_id", pid).Int("attempt", attempt).Dur("delay", delay).Msg("SUPERVISOR: Pipeline failed to start initially. Retrying with backoff...")
 
-		// Write retry heartbeat immediately
+		// Write retry heartbeat immediately so the API surfaces the "Retrying"
+		// status as soon as the supervisor enters the loop.
 		now := time.Now()
 		hb := protocol.WorkerHeartbeat{
 			WorkerID:  fmt.Sprintf("%s-retry", pid),
@@ -563,16 +713,19 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 			UpdatedAt: now,
 		}
 		data, _ := json.Marshal(hb)
-		if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-			log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
-		}
-		metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(now.Unix()))
+		m.writeHeartbeatKV(pid, hb, data)
+		m.publishHeartbeatPS(pid, hb, data)
 
 		delayTimer := time.NewTimer(delay)
 		defer delayTimer.Stop()
 
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
+		// Retrying is operationally significant state; we keep the existing
+		// 2s KV writes here so dashboards stay accurate even when pub/sub is
+		// down. The fast ticker also fans out via pub/sub when available.
+		retryKVTicker := time.NewTicker(fastHeartbeatInterval)
+		defer retryKVTicker.Stop()
+		retryPSTicker := time.NewTicker(fastHeartbeatInterval)
+		defer retryPSTicker.Stop()
 
 		for {
 			select {
@@ -591,7 +744,7 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 
 				m.attemptRestart(ctx, pid, cfg, attempt)
 				return
-			case t := <-ticker.C:
+			case t := <-retryKVTicker.C:
 				hb := protocol.WorkerHeartbeat{
 					WorkerID:  fmt.Sprintf("%s-retry", pid),
 					Status:    "Retrying",
@@ -599,21 +752,34 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 					UpdatedAt: t,
 				}
 				data, _ := json.Marshal(hb)
-				if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-					log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+				m.writeHeartbeatKV(pid, hb, data)
+			case t := <-retryPSTicker.C:
+				hb := protocol.WorkerHeartbeat{
+					WorkerID:  fmt.Sprintf("%s-retry", pid),
+					Status:    "Retrying",
+					UptimeSec: 0,
+					UpdatedAt: t,
 				}
+				data, _ := json.Marshal(hb)
+				m.publishHeartbeatPS(pid, hb, data)
 				metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(t.Unix()))
 			}
 		}
 	}
 
-	// Heartbeat setup
-	ticker := time.NewTicker(2 * time.Second) // More frequent for testing
-	defer ticker.Stop()
+	// Heartbeat setup. We run two tickers: a fast (2s) one that fans out via
+	// pub/sub and a slow (15s) one that writes to KV so the API can read status
+	// out-of-band. See T1-31 for the rationale.
 	startTime := time.Now()
 	workerID := fmt.Sprintf("%s-%s", pid, startTime.Format("05.000")) // Unique ID per instance
 
-	// Write initial heartbeat immediately
+	fastTicker := time.NewTicker(fastHeartbeatInterval)
+	defer fastTicker.Stop()
+	slowTicker := time.NewTicker(slowHeartbeatInterval)
+	defer slowTicker.Stop()
+
+	// Write initial heartbeat immediately so the API renders "Running" right
+	// after the worker is registered.
 	hb := protocol.WorkerHeartbeat{
 		WorkerID:  workerID,
 		Status:    "Running",
@@ -621,10 +787,8 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 		UpdatedAt: startTime,
 	}
 	data, _ := json.Marshal(hb)
-	if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-		log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update worker heartbeat")
-	}
-	metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(startTime.Unix()))
+	m.writeHeartbeatKV(pid, hb, data)
+	m.publishHeartbeatPS(pid, hb, data)
 
 	for {
 		select {
@@ -675,16 +839,18 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 					UpdatedAt: now,
 				}
 				data, _ := json.Marshal(hb)
-				if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-					log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
-				}
-				metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(now.Unix()))
+				m.writeHeartbeatKV(pid, hb, data)
+				m.publishHeartbeatPS(pid, hb, data)
 
 				delayTimer := time.NewTimer(delay)
 				defer delayTimer.Stop()
 
-				restartTicker := time.NewTicker(2 * time.Second)
-				defer restartTicker.Stop()
+				// Retrying is operationally significant state; we keep the
+				// existing 2s KV cadence here so dashboards stay accurate.
+				restartKVTicker := time.NewTicker(fastHeartbeatInterval)
+				defer restartKVTicker.Stop()
+				restartPSTicker := time.NewTicker(fastHeartbeatInterval)
+				defer restartPSTicker.Stop()
 
 				for {
 					select {
@@ -703,7 +869,7 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 
 						m.attemptRestart(ctx, pid, cfg, nextAttempt)
 						return
-					case t := <-restartTicker.C:
+					case t := <-restartKVTicker.C:
 						hb := protocol.WorkerHeartbeat{
 							WorkerID:  fmt.Sprintf("%s-retry", pid),
 							Status:    "Retrying",
@@ -711,26 +877,42 @@ func (m *ConfigManager) monitorWorker(ctx context.Context, worker engine.Pipelin
 							UpdatedAt: t,
 						}
 						data, _ := json.Marshal(hb)
-						if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-							log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update retry worker heartbeat")
+						m.writeHeartbeatKV(pid, hb, data)
+					case t := <-restartPSTicker.C:
+						hb := protocol.WorkerHeartbeat{
+							WorkerID:  fmt.Sprintf("%s-retry", pid),
+							Status:    "Retrying",
+							UptimeSec: 0,
+							UpdatedAt: t,
 						}
+						data, _ := json.Marshal(hb)
+						m.publishHeartbeatPS(pid, hb, data)
 						metrics.WorkerHeartbeat.WithLabelValues(fmt.Sprintf("%s-retry", pid)).Set(float64(t.Unix()))
 					}
 				}
 			}
 			return // End this monitoring goroutine
-		case t := <-ticker.C:
+		case t := <-fastTicker.C:
 			hb := protocol.WorkerHeartbeat{
 				WorkerID:  workerID,
-				Status:    "Running", // If it's ticking, it's running
+				Status:    "Running",
 				UptimeSec: int64(t.Sub(startTime).Seconds()),
 				UpdatedAt: t,
 			}
 			data, _ := json.Marshal(hb)
-			// Use the generic pipeline ID for the key so it's predictable in tests
-			if _, err := m.kv.Put(protocol.WorkerHeartbeatKey(pid), data); err != nil {
-				log.Warn().Err(err).Str("pipeline_id", pid).Msg("Failed to update worker heartbeat")
+			// Fast path: pub/sub only, no KV write.
+			m.publishHeartbeatPS(pid, hb, data)
+			metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(t.Unix()))
+		case t := <-slowTicker.C:
+			hb := protocol.WorkerHeartbeat{
+				WorkerID:  workerID,
+				Status:    "Running",
+				UptimeSec: int64(t.Sub(startTime).Seconds()),
+				UpdatedAt: t,
 			}
+			data, _ := json.Marshal(hb)
+			// Slow path: KV write for API status rendering.
+			m.writeHeartbeatKV(pid, hb, data)
 			metrics.WorkerHeartbeat.WithLabelValues(workerID).Set(float64(t.Unix()))
 		}
 	}
@@ -782,8 +964,21 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 			log.Error().Err(err).Str("pipeline_id", id).Msg("Error draining worker during stop")
 		}
 
-		// Wait for drain to finish
-		<-w.Finished()
+		// T1-30: bound the drain wait so a hung worker cannot leak the supervisor
+		// goroutine forever. The drain timeout mirrors the global config so
+		// operators have a single knob; if a worker is intentionally cancelled via
+		// the supervisor context we still proceed to shutdown rather than block.
+		drainTimeout := m.getGlobalConfig().DrainTimeout
+		waitTimer := time.NewTimer(drainTimeout)
+		defer waitTimer.Stop()
+		select {
+		case <-w.Finished():
+			log.Info().Str("pipeline_id", id).Msg("Worker drained successfully")
+		case <-waitTimer.C:
+			log.Warn().Str("pipeline_id", id).Dur("drain_timeout", drainTimeout).Msg("Drain timed out, proceeding to shutdown")
+		case <-ctx.Done():
+			log.Warn().Str("pipeline_id", id).Msg("Drain interrupted by context cancellation; proceeding to shutdown")
+		}
 
 		// Perform shutdown synchronously
 		shutdownTimeout := m.getGlobalConfig().ShutdownTimeout
@@ -801,6 +996,25 @@ func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
 func (m *ConfigManager) Stop(ctx context.Context) {
 	if m.cancel != nil {
 		m.cancel()
+	}
+
+	// T1-27: persist the last-seen revisions snapshot so that a subsequent
+	// process restart can detect out-of-order watcher events. Best-effort
+	// because Stop should never fail-fast on observability writes.
+	m.workersMu.RLock()
+	revisionsSnapshot := make(map[string]uint64, len(m.revisions))
+	for id, rev := range m.revisions {
+		revisionsSnapshot[id] = rev
+	}
+	m.workersMu.RUnlock()
+	if len(revisionsSnapshot) > 0 {
+		if data, err := json.Marshal(revisionsSnapshot); err == nil {
+			if _, err := m.kv.Put(supervisorRevisionsKey, data); err != nil {
+				log.Warn().Err(err).Msg("Failed to persist supervisor revisions")
+			}
+		} else {
+			log.Warn().Err(err).Msg("Failed to marshal supervisor revisions")
+		}
 	}
 
 	m.workersMu.Lock()

@@ -53,6 +53,9 @@ type connector struct {
 	listenerFunc       replication.ListenerFunc
 	once               sync.Once
 	heartbeatMu        sync.Mutex
+	// vendored-patch: T1-5 - sync.Once to prevent double-close of signal channels
+	closeCancelChOnce sync.Once
+	closeReadyChOnce  sync.Once
 }
 
 func NewConnectorWithConfigFile(ctx context.Context, configFilePath string, listenerFunc replication.ListenerFunc) (Connector, error) {
@@ -113,10 +116,8 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc replicati
 		return nil, errors.Wrap(err, "get snapshot tables")
 	}
 
-	snapshotter, err := initializeSnapshot(ctx, cfg, snapshotTables, m)
-	if err != nil {
-		return nil, err
-	}
+	// vendored-patch: T1-4 - Connection establishment deferred to Connect() when snapshot is needed
+	snapshotter := initializeSnapshot(cfg, snapshotTables, m)
 
 	stream := replication.NewStream(cfg.ReplicationDSN(), cfg, m, listenerFunc)
 
@@ -170,11 +171,8 @@ func newSnapshotOnlyConnector(ctx context.Context, cfg config.Config, listenerFu
 		return nil, errors.Wrap(err, "get snapshot tables")
 	}
 
-	// Initialize snapshotter with tables from snapshot config
-	snapshotter, err := initializeSnapshot(ctx, cfg, snapshotTables, m)
-	if err != nil {
-		return nil, err
-	}
+	// vendored-patch: T1-4 - Connection establishment deferred to Connect() when snapshot is needed
+	snapshotter := initializeSnapshot(cfg, snapshotTables, m)
 
 	prometheusRegistry := metric.NewRegistry(m)
 
@@ -205,11 +203,12 @@ func initializePublication(ctx context.Context, cfg config.Config, conn pq.Conne
 // tables parameter should come from publicationInfo (not from config) to support both scenarios:
 // 1. When user provides tables in config (createIfNotExists: true)
 // 2. When user uses existing publication without specifying tables (createIfNotExists: false)
-func initializeSnapshot(ctx context.Context, cfg config.Config, tables publication.Tables, m metric.Metric) (*snapshot.Snapshotter, error) {
+// vendored-patch: T1-4 - Connection establishment moved to Connect() method to avoid eager allocation
+func initializeSnapshot(cfg config.Config, tables publication.Tables, m metric.Metric) *snapshot.Snapshotter {
 	if !cfg.Snapshot.Enabled {
-		return nil, nil
+		return nil
 	}
-	return snapshot.New(ctx, cfg.Snapshot, tables, cfg.DSN(), m)
+	return snapshot.New(cfg.Snapshot, tables, cfg.DSN(), m)
 }
 
 func (c *connector) AddRelation(rel *format.Relation) {
@@ -236,6 +235,12 @@ func (c *connector) Start(ctx context.Context) {
 
 	// Snapshot-only mode: execute snapshot and exit
 	if c.cfg.IsSnapshotOnlyMode() {
+		// vendored-patch: T1-4 - Establish connections before checking if snapshot is needed
+		if err := c.snapshotter.Connect(ctx); err != nil {
+			logger.Error("snapshot connection failed", "error", err)
+			return
+		}
+
 		// Check if snapshot already completed (resume capability)
 		if !c.shouldTakeSnapshotOnly(ctx) {
 			logger.Info("snapshot-only already completed, exiting")
@@ -252,10 +257,19 @@ func (c *connector) Start(ctx context.Context) {
 
 	// Snapshot Pre-phase (optional): Prepare → CreateSlot → Execute
 	// This happens BEFORE the normal CDC flow to avoid data loss
-	if c.cfg.Snapshot.Enabled && c.shouldTakeSnapshot(ctx) {
-		if err := c.prepareSnapshotAndSlot(ctx); err != nil {
-			logger.Error("snapshot preparation failed", "error", err)
+	if c.cfg.Snapshot.Enabled {
+		// vendored-patch: T1-4 - Establish connections before any snapshot query.
+		// shouldTakeSnapshot calls LoadJob which needs s.metadataConn to be
+		// ready, so Connect must run before the probe.
+		if err := c.snapshotter.Connect(ctx); err != nil {
+			logger.Error("snapshot connection failed", "error", err)
 			return
+		}
+		if c.shouldTakeSnapshot(ctx) {
+			if err := c.prepareSnapshotAndSlot(ctx); err != nil {
+				logger.Error("snapshot preparation failed", "error", err)
+				return
+			}
 		}
 	} else {
 		// No snapshot: Create slot normally before starting CDC
@@ -595,13 +609,13 @@ func (c *connector) Close() {
 
 	logger.Debug("[connector] closing connector")
 
-	// Close signal channels
-	if !isClosed(c.cancelCh) {
+	// vendored-patch: T1-5 - Use sync.Once to safely close channels without draining signals
+	c.closeCancelChOnce.Do(func() {
 		close(c.cancelCh)
-	}
-	if !isClosed(c.readyCh) {
+	})
+	c.closeReadyChOnce.Do(func() {
 		close(c.readyCh)
-	}
+	})
 
 	// Close snapshotter connections if still open (fallback for crash/error scenarios)
 	// Normal flow: connections are already closed in finalizeSnapshot() when snapshot completes
@@ -736,14 +750,4 @@ func (c *connector) closeHeartbeatConn(ctx context.Context) {
 		_ = c.heartbeatConn.Close(ctx)
 		c.heartbeatConn = nil
 	}
-}
-
-func isClosed[T any](ch <-chan T) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-	}
-
-	return false
 }
