@@ -24,7 +24,7 @@ func GetEncryptionKey() ([]byte, error) {
 
 	// Try base64 decode first; if it succeeds and produces valid length, use it
 	decoded, err := base64.StdEncoding.DecodeString(keyStr)
-	if err == nil && len(decoded) == 16 || len(decoded) == 24 || len(decoded) == 32 {
+	if err == nil && (len(decoded) == 16 || len(decoded) == 24 || len(decoded) == 32) {
 		return decoded, nil
 	}
 

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"sort"
 	"sync"
 )
 
@@ -23,13 +24,17 @@ type AckManager struct {
 	mu        sync.Mutex
 	pending   map[uint64]bool // LSN -> confirmed (true) or in-flight (false)
 	watermark uint64          // Highest contiguous confirmed LSN
+	lsns      []uint64        // Sorted slice of observed but unconfirmed LSNs
 }
 
 // NewAckManager returns an AckManager ready to track observed LSNs.
 // The initial watermark is zero; callers should hydrate it from a
 // persisted checkpoint before observing new LSNs if a resume is desired.
 func NewAckManager() *AckManager {
-	return &AckManager{pending: make(map[uint64]bool)}
+	return &AckManager{
+		pending: make(map[uint64]bool),
+		lsns:    nil,
+	}
 }
 
 // Observe registers an LSN as in-flight: the replication stream has produced
@@ -49,6 +54,21 @@ func (a *AckManager) Observe(lsn uint64) {
 	}
 	if _, ok := a.pending[lsn]; !ok {
 		a.pending[lsn] = false
+		// Keep a.lsns sorted. Since logical replication normally streams
+		// LSNs in strictly ascending order, appending is O(1) in the common case.
+		// If an LSN is somehow out-of-order, we can perform a binary search and insert.
+		n := len(a.lsns)
+		if n == 0 || lsn > a.lsns[n-1] {
+			a.lsns = append(a.lsns, lsn)
+		} else {
+			i := sort.Search(len(a.lsns), func(i int) bool { return a.lsns[i] >= lsn })
+			if i < len(a.lsns) && a.lsns[i] == lsn {
+				return
+			}
+			a.lsns = append(a.lsns, 0)
+			copy(a.lsns[i+1:], a.lsns[i:])
+			a.lsns[i] = lsn
+		}
 	}
 }
 
@@ -64,14 +84,17 @@ func (a *AckManager) Confirm(lsn uint64) uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pending[lsn] = true
-	for {
-		next := a.watermark + 1
-		acked, ok := a.pending[next]
-		if !ok || !acked {
+
+	// Consume confirmed LSNs from the front of the sorted slice
+	for len(a.lsns) > 0 {
+		oldest := a.lsns[0]
+		if confirmed, ok := a.pending[oldest]; ok && confirmed {
+			a.watermark = oldest
+			delete(a.pending, oldest)
+			a.lsns = a.lsns[1:]
+		} else {
 			break
 		}
-		a.watermark = next
-		delete(a.pending, next)
 	}
 	return a.watermark
 }
@@ -103,4 +126,5 @@ func (a *AckManager) Hydrate(watermark uint64) {
 	}
 	a.watermark = watermark
 	a.pending = make(map[uint64]bool)
+	a.lsns = nil
 }

@@ -760,6 +760,10 @@ func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, table string) erro
 	scanErr := s.db.QueryRowScan(ctx, query, nil, &ddl)
 
 	if scanErr != nil {
+		s.pkMu.Lock()
+		delete(s.pkLoaded, table)
+		s.pkMu.Unlock()
+
 		log.Warn().Err(scanErr).Str("table", table).Msg("SHOW CREATE TABLE failed; falling back to default PK")
 		s.ensureFallbackPK(table)
 		SinkPKResolved.WithLabelValues(s.name, table).Set(0)

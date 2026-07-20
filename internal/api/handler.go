@@ -1385,6 +1385,9 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 				log.Warn().Msg("watcher closed, exiting metric stream")
 				return
 			}
+			if entry == nil {
+				continue
+			}
 
 			var data any
 			key := entry.Key()

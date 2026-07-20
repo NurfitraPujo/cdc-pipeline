@@ -1022,10 +1022,57 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 		chunkSize = cfg.SnapshotChunkSize
 	}
 
-	offset := 0
+	cpKey := protocol.IngressCheckpointKey(p.pipelineID, sourceID, tableName)
+	var lastPKValues []interface{}
+
+	entry, err := p.kv.Get(cpKey)
+	if err == nil {
+		var cp protocol.Checkpoint
+		if _, err := cp.UnmarshalMsg(entry.Value()); err == nil {
+			if cp.Status == "Snapshotting" && cp.LastPK != "" {
+				var lastPKData map[string]interface{}
+				if err := json.Unmarshal([]byte(cp.LastPK), &lastPKData); err == nil {
+					lastPKValues = make([]interface{}, len(pkCols))
+					valid := true
+					for i, col := range pkCols {
+						val, ok := lastPKData[col]
+						if !ok {
+							valid = false
+							break
+						}
+						lastPKValues[i] = val
+					}
+					if !valid {
+						lastPKValues = nil
+					} else {
+						log.Info().Str("table", tableName).Str("last_pk", cp.LastPK).Msg("Resuming snapshot from last PK checkpoint")
+					}
+				}
+			}
+		}
+	}
+
+	totalRows := 0
 	for {
-		query := fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT %d OFFSET %d", tableName, pkStr, chunkSize, offset)
-		rows, err := db.Query(query)
+		var query string
+		var args []interface{}
+		if len(lastPKValues) > 0 {
+			if len(pkCols) == 1 {
+				query = fmt.Sprintf("SELECT * FROM %s WHERE %s > $1 ORDER BY %s LIMIT %d", tableName, pkCols[0], pkStr, chunkSize)
+				args = append(args, lastPKValues[0])
+			} else {
+				placeholders := make([]string, len(pkCols))
+				for i := range pkCols {
+					placeholders[i] = fmt.Sprintf("$%d", i+1)
+				}
+				query = fmt.Sprintf("SELECT * FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d", tableName, pkStr, strings.Join(placeholders, ", "), pkStr, chunkSize)
+				args = lastPKValues
+			}
+		} else {
+			query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT %d", tableName, pkStr, chunkSize)
+		}
+
+		rows, err := db.Query(query, args...)
 		if err != nil {
 			return fmt.Errorf("snapshot query failed: %w", err)
 		}
@@ -1033,6 +1080,7 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 		cols, _ := rows.Columns()
 		count := 0
 		batch := make(protocol.MessageBatch, 0, chunkSize)
+		var lastRowPK map[string]interface{}
 
 		for rows.Next() {
 			count++
@@ -1063,6 +1111,7 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 					}
 				}
 			}
+			lastRowPK = pkData
 
 			pkJSON, _ := json.Marshal(pkData)
 			batch = append(batch, protocol.Message{
@@ -1087,15 +1136,48 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 			if err := p.publishWithRetry(context.Background(), topic, wmMsg, 10); err != nil {
 				return fmt.Errorf("failed to publish snapshot batch: %w", err)
 			}
+
+			// Persist progress to NATS KV
+			lastMsg := batch[len(batch)-1]
+			cp := protocol.Checkpoint{
+				IngressLSN: 0,
+				LastPK:     lastMsg.PK,
+				Status:     "Snapshotting",
+				UpdatedAt:  time.Now(),
+			}
+			cpData, err := cp.MarshalMsg(nil)
+			if err == nil {
+				if _, err := p.kv.Put(cpKey, cpData); err != nil {
+					log.Error().Err(err).Str("table", tableName).Msg("Failed to persist snapshot checkpoint")
+				}
+			}
 		}
 
+		if count > 0 && lastRowPK != nil {
+			lastPKValues = make([]interface{}, len(pkCols))
+			for i, col := range pkCols {
+				lastPKValues[i] = lastRowPK[col]
+			}
+		}
+
+		totalRows += count
 		if count < chunkSize {
 			break
 		}
-		offset += count
 	}
 
-	log.Info().Str("table", tableName).Int("total_rows", offset).Msg("Snapshot complete")
+	// Finalize status to ACTIVE
+	cp := protocol.Checkpoint{
+		IngressLSN: 0,
+		LastPK:     "",
+		Status:     "ACTIVE",
+		UpdatedAt:  time.Now(),
+	}
+	if cpData, err := cp.MarshalMsg(nil); err == nil {
+		_, _ = p.kv.Put(cpKey, cpData)
+	}
+
+	log.Info().Str("table", tableName).Int("total_rows", totalRows).Msg("Snapshot complete")
 	return nil
 }
 

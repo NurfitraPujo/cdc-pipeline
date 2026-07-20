@@ -53,14 +53,13 @@ func TestAckManager(t *testing.T) {
 
 	t.Run("Gap in confirmations holds the watermark", func(t *testing.T) {
 		m := NewAckManager()
-		// Observe 1, 2, 3, 4, 5 then leave a gap and observe 100.
-		for lsn := uint64(1); lsn <= 5; lsn++ {
+		// Observe 1..100, creating pending entries.
+		for lsn := uint64(1); lsn <= 100; lsn++ {
 			m.Observe(lsn)
 		}
-		m.Observe(100)
 
 		// Confirm 1..5; the watermark should advance to 5 and then
-		// stop because LSN 6..99 are missing.
+		// stop because LSN 6..99 are not yet confirmed.
 		for lsn := uint64(1); lsn <= 5; lsn++ {
 			m.Confirm(lsn)
 		}
@@ -72,10 +71,8 @@ func TestAckManager(t *testing.T) {
 		assert.Equal(t, uint64(5), m.Watermark(), "watermark must not skip the gap even when a higher LSN is confirmed")
 
 		// Filling the gap advances the watermark through the missing
-		// LSNs (when the replication stream eventually redelivers them)
-		// and on to 100.
+		// LSNs and on to 100.
 		for lsn := uint64(6); lsn <= 100; lsn++ {
-			m.Observe(lsn)
 			m.Confirm(lsn)
 		}
 		assert.Equal(t, uint64(100), m.Watermark())
@@ -204,4 +201,26 @@ func TestUpdateXLogPosPersistsCheckpoint(t *testing.T) {
 	if got, want := s.lastCheckpoint.IngressLSN, uint64(77); got != want {
 		t.Fatalf("lastCheckpoint.IngressLSN = %d, want %d (after second call)", got, want)
 	}
+}
+
+func TestAckManager_GappedLSNs(t *testing.T) {
+	m := NewAckManager()
+
+	// Observe gapped LSNs: 100, 250, 310, 480
+	gaps := []uint64{100, 250, 310, 480}
+	for _, lsn := range gaps {
+		m.Observe(lsn)
+	}
+
+	// Confirm 100
+	assert.Equal(t, uint64(100), m.Confirm(100))
+
+	// Confirm 310 out of order; watermark stays at 100 because 250 is missing
+	assert.Equal(t, uint64(100), m.Confirm(310))
+
+	// Confirm 250; watermark advances to 310
+	assert.Equal(t, uint64(310), m.Confirm(250))
+
+	// Confirm 480; watermark advances to 480
+	assert.Equal(t, uint64(480), m.Confirm(480))
 }
