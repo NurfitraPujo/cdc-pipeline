@@ -796,6 +796,245 @@ func (z OperationType) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
+func (z *RecordAck) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "pid":
+			z.PipelineID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "PipelineID")
+				return
+			}
+		case "sid":
+			z.SourceID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SourceID")
+				return
+			}
+		case "snk":
+			z.SinkID, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
+		case "lsns":
+			var zb0002 uint32
+			zb0002, err = dc.ReadArrayHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "LSNs")
+				return
+			}
+			if cap(z.LSNs) >= int(zb0002) {
+				z.LSNs = (z.LSNs)[:zb0002]
+			} else {
+				z.LSNs = make([]uint64, zb0002)
+			}
+			for za0001 := range z.LSNs {
+				z.LSNs[za0001], err = dc.ReadUint64()
+				if err != nil {
+					err = msgp.WrapError(err, "LSNs", za0001)
+					return
+				}
+			}
+		case "ts":
+			z.Timestamp, err = dc.ReadTime()
+			if err != nil {
+				err = msgp.WrapError(err, "Timestamp")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *RecordAck) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 5
+	// write "pid"
+	err = en.Append(0x85, 0xa3, 0x70, 0x69, 0x64)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.PipelineID)
+	if err != nil {
+		err = msgp.WrapError(err, "PipelineID")
+		return
+	}
+	// write "sid"
+	err = en.Append(0xa3, 0x73, 0x69, 0x64)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.SourceID)
+	if err != nil {
+		err = msgp.WrapError(err, "SourceID")
+		return
+	}
+	// write "snk"
+	err = en.Append(0xa3, 0x73, 0x6e, 0x6b)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.SinkID)
+	if err != nil {
+		err = msgp.WrapError(err, "SinkID")
+		return
+	}
+	// write "lsns"
+	err = en.Append(0xa4, 0x6c, 0x73, 0x6e, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteArrayHeader(uint32(len(z.LSNs)))
+	if err != nil {
+		err = msgp.WrapError(err, "LSNs")
+		return
+	}
+	for za0001 := range z.LSNs {
+		err = en.WriteUint64(z.LSNs[za0001])
+		if err != nil {
+			err = msgp.WrapError(err, "LSNs", za0001)
+			return
+		}
+	}
+	// write "ts"
+	err = en.Append(0xa2, 0x74, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteTime(z.Timestamp)
+	if err != nil {
+		err = msgp.WrapError(err, "Timestamp")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *RecordAck) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 5
+	// string "pid"
+	o = append(o, 0x85, 0xa3, 0x70, 0x69, 0x64)
+	o = msgp.AppendString(o, z.PipelineID)
+	// string "sid"
+	o = append(o, 0xa3, 0x73, 0x69, 0x64)
+	o = msgp.AppendString(o, z.SourceID)
+	// string "snk"
+	o = append(o, 0xa3, 0x73, 0x6e, 0x6b)
+	o = msgp.AppendString(o, z.SinkID)
+	// string "lsns"
+	o = append(o, 0xa4, 0x6c, 0x73, 0x6e, 0x73)
+	o = msgp.AppendArrayHeader(o, uint32(len(z.LSNs)))
+	for za0001 := range z.LSNs {
+		o = msgp.AppendUint64(o, z.LSNs[za0001])
+	}
+	// string "ts"
+	o = append(o, 0xa2, 0x74, 0x73)
+	o = msgp.AppendTime(o, z.Timestamp)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *RecordAck) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "pid":
+			z.PipelineID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "PipelineID")
+				return
+			}
+		case "sid":
+			z.SourceID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SourceID")
+				return
+			}
+		case "snk":
+			z.SinkID, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SinkID")
+				return
+			}
+		case "lsns":
+			var zb0002 uint32
+			zb0002, bts, err = msgp.ReadArrayHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "LSNs")
+				return
+			}
+			if cap(z.LSNs) >= int(zb0002) {
+				z.LSNs = (z.LSNs)[:zb0002]
+			} else {
+				z.LSNs = make([]uint64, zb0002)
+			}
+			for za0001 := range z.LSNs {
+				z.LSNs[za0001], bts, err = msgp.ReadUint64Bytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "LSNs", za0001)
+					return
+				}
+			}
+		case "ts":
+			z.Timestamp, bts, err = msgp.ReadTimeBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "Timestamp")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *RecordAck) Msgsize() (s int) {
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.PipelineID) + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.SinkID) + 5 + msgp.ArrayHeaderSize + (len(z.LSNs) * (msgp.Uint64Size)) + 3 + msgp.TimeSize
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
 func (z *SchemaDiff) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
