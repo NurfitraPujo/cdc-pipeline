@@ -30,6 +30,15 @@ type Config struct {
 	DebugMode        bool               `json:"debugMode" yaml:"debugMode"`
 	ExtensionSupport ExtensionSupport   `json:"extensionSupport" yaml:"extensionSupport"`
 	StartLSN         pq.LSN             `json:"-" yaml:"-"`
+	// vendored-patch: T0-1 - manual-commit mode: when true, ListenerContext.Ack() and
+	// keepalive handling no longer advance the WAL position; the embedding application
+	// owns advancement exclusively via Connector.UpdateXLogPos. Default false preserves
+	// upstream behavior byte-for-byte.
+	ManualCommit bool `json:"manualCommit" yaml:"manualCommit"`
+	// vendored-patch: T0-1 - KeepaliveFunc, when non-nil and ManualCommit is set, receives
+	// ServerWALEnd from primary keepalive messages instead of the internal fast-forward.
+	// Excluded from serialization (func values are not marshalable).
+	KeepaliveFunc func(pq.LSN) `json:"-" yaml:"-"`
 }
 
 type MetricConfig struct {

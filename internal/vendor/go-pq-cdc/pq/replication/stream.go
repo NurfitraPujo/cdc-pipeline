@@ -297,11 +297,21 @@ func (s *stream) handleKeepalive(ctx context.Context, data []byte) error {
 	}
 
 	if pkm.ServerWALEnd > 0 {
-		s.UpdateXLogPos(pkm.ServerWALEnd)
-		logger.Debug("updated xlog position from keepalive", "serverWALEnd", pkm.ServerWALEnd.String())
+		// vendored-patch: T0-1 - under ManualCommit, route the server's WAL end to the
+		// embedder's KeepaliveFunc instead of fast-forwarding lastXLogPos ourselves.
+		if s.config.ManualCommit {
+			if s.config.KeepaliveFunc != nil {
+				s.config.KeepaliveFunc(pkm.ServerWALEnd)
+			}
+		} else {
+			s.UpdateXLogPos(pkm.ServerWALEnd)
+			logger.Debug("updated xlog position from keepalive", "serverWALEnd", pkm.ServerWALEnd.String())
+		}
 	}
 
-	if pkm.ReplyRequested {
+	// vendored-patch: T0-1 - guard reply on a confirmed position (mirrors the guard at
+	// the receive-timeout branch above) so we never report LSN 0 to the primary.
+	if pkm.ReplyRequested && s.LoadXLogPos() > 0 {
 		if err = SendStandbyStatusUpdate(ctx, s.conn, uint64(s.LoadXLogPos())); err != nil {
 			logger.Error("standby status update", "error", err)
 			return err
@@ -331,7 +341,12 @@ func (s *stream) handleXLogData(data []byte, buf *messageBuffer) {
 		if err != nil {
 			logger.Debug("wal data message parsing error", "error", err)
 		}
-		s.UpdateXLogPos(xld.WALStart)
+		// vendored-patch: T0-1 - under ManualCommit, undecodable messages must not
+		// advance the position; unobserved LSNs cannot stall the AckManager since the
+		// next confirmed event advances past them.
+		if !s.config.ManualCommit {
+			s.UpdateXLogPos(xld.WALStart)
+		}
 		return
 	}
 
@@ -395,6 +410,12 @@ func (s *stream) process(ctx context.Context) {
 			Message: msg.message,
 			LSN:     pq.LSN(msg.walStart),
 			Ack: func() error {
+				// vendored-patch: T0-1 - under ManualCommit, position ownership moves
+				// entirely to the embedder's explicit UpdateXLogPos calls; Ack becomes a
+				// no-op that neither advances lastXLogPos nor talks to the primary.
+				if s.config.ManualCommit {
+					return nil
+				}
 				pos := pq.LSN(msg.walStart)
 				s.UpdateXLogPos(pos)
 				logger.Debug("send stand by status update", "xLogPos", s.LoadXLogPos().String())
@@ -446,14 +467,21 @@ func (s *stream) SetSnapshotLSN(lsn pq.LSN) {
 }
 
 func (s *stream) UpdateXLogPos(lsn pq.LSN) {
+	// vendored-patch: T0-1 - monotonic guard: the *stored/reported* position must never
+	// regress, but the standby status update must still be sent every call (including when
+	// lsn <= lastXLogPos) so PostgreSQL keeps seeing liveness from this replica on an idle
+	// stream (wal_receiver_timeout). Clamp what we report, don't skip the send.
 	s.mu.Lock()
-	s.lastXLogPos = lsn
+	if lsn > s.lastXLogPos {
+		s.lastXLogPos = lsn
+	}
+	pos := s.lastXLogPos
 	s.mu.Unlock()
 
 	if s.conn != nil && !s.conn.IsClosed() {
 		// Force a status update to advance the slot in Postgres
-		if err := SendStandbyStatusUpdate(context.Background(), s.conn, uint64(lsn)); err != nil {
-			logger.Error("failed to send manual standby status update", "error", err, "lsn", lsn.String())
+		if err := SendStandbyStatusUpdate(context.Background(), s.conn, uint64(pos)); err != nil {
+			logger.Error("failed to send manual standby status update", "error", err, "lsn", pos.String())
 		}
 	}
 }

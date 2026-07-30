@@ -44,6 +44,20 @@ go test ./internal/source/postgres/...
 
 ---
 
+## **Current Patches**
+
+See `internal/vendor/go-pq-cdc/PATCHES.md` for the full catalogue of local divergences
+(searchable via `// vendored-patch:` markers). Notably **T0-1** adds an opt-in
+`Config.ManualCommit` mode plus a `Config.KeepaliveFunc` callback so an embedding source can
+own replication-slot advancement exclusively (gating it on downstream sink acks) instead of
+the library advancing the slot the instant an event is handed off, and it also always-on-fixes
+a monotonic-position bug in `stream.UpdateXLogPos` (the reported LSN could regress on
+keepalive/per-message interleaving). Because T0-1 is flag-guarded (default `false` = upstream
+byte-for-byte) except for two small always-on bug-fix guards, it should re-apply cleanly via
+the diff/rsync/patch workflow below — but re-verify all six sites in the PATCHES.md T0-1 entry
+by hand after any upstream re-sync, since `stream.go` is exactly the file most likely to shift
+underneath a line-based patch.
+
 ## **Recommended Alternative: Use a Fork**
 
 If you find yourself frequently updating this dependency, the most sustainable approach is to:
