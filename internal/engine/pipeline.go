@@ -23,6 +23,13 @@ type Pipeline struct {
 	wg                sync.WaitGroup
 	finished          chan struct{}
 	dynamicTablesChan chan []string
+
+	// auxWg tracks goroutines that are lifecycle-adjacent but must NOT gate
+	// Finished()/p.wg.Wait() — e.g. the dynamic-tables handler goroutine.
+	// Finished() has to mean "producer + consumers done" so the graceful
+	// Drain() path (which never calls p.cancel()) can complete promptly;
+	// auxWg is only waited on in Shutdown, after p.cancel() has fired.
+	auxWg sync.WaitGroup
 }
 
 func NewPipeline(id string, prod *Producer, consumers []*Consumer, cfg protocol.PipelineConfig) *Pipeline {
@@ -63,90 +70,15 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	go func() {
 		defer p.wg.Done()
 
-		// 1. Resolve Sources
-		if len(p.config.Sources) == 0 {
-			log.Warn().Str("pipeline_id", p.id).Msg("No sources defined")
-			return
-		}
-		sourceID := p.config.Sources[0]
-		srcKey := protocol.SourceConfigKey(sourceID)
-		entry, err := p.producer.kv.Get(srcKey)
-		if err != nil {
-			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to get source config")
-			return
-		}
-
-		var srcCfg protocol.SourceConfig
-		if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
-			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
-			return
-		}
-		if err := srcCfg.Decrypt(); err != nil {
-			log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to decrypt source config")
-			return
-		}
-
-		// Apply pipeline overrides
-		if p.config.BatchSize > 0 {
-			srcCfg.BatchSize = p.config.BatchSize
-		}
-		if p.config.BatchWait > 0 {
-			srcCfg.BatchWait = p.config.BatchWait
-		}
-		srcCfg.Tables = p.config.Tables
-		// Ensure unique slot for every worker instance to avoid contention on reload
-		// Use pipeline ID suffix for stable slot naming across restarts (preserves LSN continuity)
-		if srcCfg.Type == "postgres" && srcCfg.SlotName != "" {
-			srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, strings.ReplaceAll(p.id, "-", "_"))
-		}
-
-		// 2. Get Checkpoints for all tables (use EgressLSN for resume safety)
-		minLSN := uint64(0)
-		for _, table := range p.config.Tables {
-			// Pull from egress checkpoints for all configured sinks
-			for _, sinkID := range p.config.Sinks {
-				cpKey := protocol.EgressCheckpointKey(p.id, sourceID, sinkID, table)
-				cpEntry, err := p.producer.kv.Get(cpKey)
-				if err == nil {
-					var cp protocol.Checkpoint
-					if _, err := cp.UnmarshalMsg(cpEntry.Value()); err == nil {
-						if cp.EgressLSN > 0 && (minLSN == 0 || cp.EgressLSN < minLSN) {
-							minLSN = cp.EgressLSN
-						}
-					}
-				}
+		if err := p.runProducer(); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed. Cancelling pipeline so consumers exit and the supervisor can restart it.")
 			}
-		}
-
-		initialCP := protocol.Checkpoint{IngressLSN: minLSN}
-
-		// 3. Load Egress Stats for all consumers
-		for _, cons := range p.consumers {
-			cons.LoadStats(sourceID, p.config.Tables)
-		}
-
-		// 4. Setup dynamic table handling
-		p.producer.SetDynamicTablesChan(p.dynamicTablesChan)
-
-		lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			if errors.Is(err, errPublishRetriesExhausted) && p.ctx.Err() == nil {
-				log.Warn().Err(err).Str("pipeline_id", p.id).Msg("Producer exhausted publisher retries; attempting one recovery run")
-				lsn, err = p.recoverProducer(srcCfg, initialCP)
-			}
-
-			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed after recovery policy. Shutting down pipeline.")
-				p.cancel() // Stop all consumers only after the single recovery attempt fails.
-				return
-			}
-		}
-
-		// In a drain scenario, the producer finishes normally.
-		// We should tell all consumers to drain until this LSN.
-		log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling all consumers to drain.")
-		for _, cons := range p.consumers {
-			cons.Drain(lsn)
+			// Any error return (including config-load failures) must cancel the
+			// pipeline: otherwise consumers keep running on p.ctx forever, wg.Wait()
+			// never returns, finished never closes, and the supervisor heartbeats
+			// "Running" for a pipeline that has stopped ingesting (Critical 13).
+			p.cancel()
 		}
 	}()
 
@@ -155,6 +87,112 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.wg.Wait()
 		close(p.finished)
 	}()
+
+	return nil
+}
+
+// runProducer resolves the source config, wires up the producer, and runs it
+// to completion. It returns a non-nil error for every failure path — including
+// the config-load failures (KV get, unmarshal, decrypt) that used to return
+// silently — so the caller (the goroutine started in Start) knows to cancel
+// the pipeline. The one path that must NOT trigger a cancel-before-drain is
+// the normal completion path below: the producer drained cleanly, and
+// consumers must be signalled to drain via cons.Drain(lsn) before anything
+// tears down p.ctx.
+func (p *Pipeline) runProducer() error {
+	// 1. Resolve Sources
+	if len(p.config.Sources) == 0 {
+		log.Warn().Str("pipeline_id", p.id).Msg("No sources defined")
+		return fmt.Errorf("pipeline %s: no sources defined", p.id)
+	}
+	sourceID := p.config.Sources[0]
+	srcKey := protocol.SourceConfigKey(sourceID)
+	entry, err := p.producer.kv.Get(srcKey)
+	if err != nil {
+		log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to get source config")
+		return fmt.Errorf("getting source config for %s: %w", sourceID, err)
+	}
+
+	var srcCfg protocol.SourceConfig
+	if err := json.Unmarshal(entry.Value(), &srcCfg); err != nil {
+		log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to unmarshal source config")
+		return fmt.Errorf("unmarshalling source config for %s: %w", sourceID, err)
+	}
+	if err := srcCfg.Decrypt(); err != nil {
+		log.Error().Err(err).Str("pipeline_id", p.id).Str("source_id", sourceID).Msg("Failed to decrypt source config")
+		return fmt.Errorf("decrypting source config for %s: %w", sourceID, err)
+	}
+
+	// Apply pipeline overrides
+	if p.config.BatchSize > 0 {
+		srcCfg.BatchSize = p.config.BatchSize
+	}
+	if p.config.BatchWait > 0 {
+		srcCfg.BatchWait = p.config.BatchWait
+	}
+	srcCfg.Tables = p.config.Tables
+	// Ensure unique slot for every worker instance to avoid contention on reload
+	// Use pipeline ID suffix for stable slot naming across restarts (preserves LSN continuity)
+	if srcCfg.Type == "postgres" && srcCfg.SlotName != "" {
+		srcCfg.SlotName = fmt.Sprintf("%s_%s", srcCfg.SlotName, strings.ReplaceAll(p.id, "-", "_"))
+	}
+
+	// 2. Get Checkpoints for all tables (use EgressLSN for resume safety)
+	minLSN := uint64(0)
+	for _, table := range p.config.Tables {
+		// Pull from egress checkpoints for all configured sinks
+		for _, sinkID := range p.config.Sinks {
+			cpKey := protocol.EgressCheckpointKey(p.id, sourceID, sinkID, table)
+			cpEntry, err := p.producer.kv.Get(cpKey)
+			if err == nil {
+				var cp protocol.Checkpoint
+				if _, err := cp.UnmarshalMsg(cpEntry.Value()); err == nil {
+					if cp.EgressLSN > 0 && (minLSN == 0 || cp.EgressLSN < minLSN) {
+						minLSN = cp.EgressLSN
+					}
+				}
+			}
+		}
+	}
+
+	initialCP := protocol.Checkpoint{IngressLSN: minLSN}
+
+	// 3. Load Egress Stats for all consumers
+	for _, cons := range p.consumers {
+		cons.LoadStats(sourceID, p.config.Tables)
+	}
+
+	// 4. Setup dynamic table handling. Bound to p.ctx so it exits instead of
+	// leaking, but tracked on p.auxWg (NOT p.wg): dynamicTablesChan is never
+	// closed, so this goroutine's only exit is ctx cancellation, which does
+	// NOT happen on the graceful Drain() path. Putting it on p.wg would make
+	// Finished() hang for the full drain timeout on every normal drain/stop.
+	// See SetDynamicTablesChan and Pipeline.Shutdown.
+	p.producer.SetDynamicTablesChan(p.ctx, &p.auxWg, p.dynamicTablesChan)
+
+	lsn, err := p.producer.Run(p.ctx, srcCfg, initialCP)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		if errors.Is(err, errPublishRetriesExhausted) && p.ctx.Err() == nil {
+			log.Warn().Err(err).Str("pipeline_id", p.id).Msg("Producer exhausted publisher retries; attempting one recovery run")
+			lsn, err = p.recoverProducer(srcCfg, initialCP)
+		}
+
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Error().Err(err).Str("pipeline_id", p.id).Msg("Producer failed after recovery policy. Shutting down pipeline.")
+			return fmt.Errorf("running producer: %w", err)
+		}
+	}
+
+	// In a drain scenario, the producer finishes normally.
+	// We should tell all consumers to drain until this LSN.
+	// IMPORTANT: this is the normal/graceful completion path. Consumers must be
+	// signalled to drain via cons.Drain(lsn) BEFORE we return (and before any
+	// p.cancel() happens in the caller) — draining, not cancellation, is what
+	// stops them here. Returning nil below means the caller does NOT cancel.
+	log.Info().Str("pipeline_id", p.id).Uint64("lsn", lsn).Msg("Producer finished. Signaling all consumers to drain.")
+	for _, cons := range p.consumers {
+		cons.Drain(lsn)
+	}
 
 	return nil
 }
@@ -185,6 +223,21 @@ func (p *Pipeline) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.finished:
+		// p.cancel() above (or an earlier producer error) is what unblocks the
+		// auxiliary goroutines tracked on p.auxWg (e.g. the dynamic-tables
+		// handler) — wait for them here rather than on p.wg, so Finished()
+		// itself stays fast on the graceful-drain path.
+		auxDone := make(chan struct{})
+		go func() {
+			p.auxWg.Wait()
+			close(auxDone)
+		}()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-auxDone:
+		}
+
 		// Close all transformers after pipeline goroutines have finished
 		p.closeTransformers()
 		return nil

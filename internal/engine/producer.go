@@ -890,13 +890,34 @@ func (p *Producer) SetSourceConfig(cfg protocol.SourceConfig) {
 	p.sourceConfig = cfg
 }
 
-func (p *Producer) SetDynamicTablesChan(ch <-chan []string) {
+// SetDynamicTablesChan spawns a goroutine that consumes dynamic-table signals
+// off ch until ctx is cancelled. It never blocks forever on a channel that is
+// never closed: it selects on ctx.Done() alongside the channel receive.
+//
+// The caller must track the goroutine on wg so it isn't leaked, but that wg
+// must NOT be the Pipeline's main WaitGroup: this goroutine's only exit is
+// ctx cancellation, and the pipeline's graceful Drain() path deliberately
+// does not cancel ctx (Producer.Drain only cancels cancelSource). Wiring this
+// into the main wg would make Finished() hang until something else cancels
+// the context. Callers should use a separate auxiliary WaitGroup that is
+// waited on only after ctx is cancelled (see Pipeline.Shutdown).
+func (p *Producer) SetDynamicTablesChan(ctx context.Context, wg *sync.WaitGroup, ch <-chan []string) {
+	wg.Add(1)
 	go func() {
-		for tables := range ch {
-			p.mu.RLock()
-			sid := p.sourceConfig.ID
-			p.mu.RUnlock()
-			p.handleDynamicTables(sid, tables)
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case tables, ok := <-ch:
+				if !ok {
+					return
+				}
+				p.mu.RLock()
+				sid := p.sourceConfig.ID
+				p.mu.RUnlock()
+				p.handleDynamicTables(sid, tables)
+			}
 		}
 	}()
 }
