@@ -58,6 +58,26 @@ the diff/rsync/patch workflow below — but re-verify all six sites in the PATCH
 by hand after any upstream re-sync, since `stream.go` is exactly the file most likely to shift
 underneath a line-based patch.
 
+**T0-2** is a different and more invasive class of patch: it is **API-breaking**. It widens
+`UpdateXLogPos` to `(ctx context.Context, lsn pq.LSN) error` across three exported interfaces
+(`Connector`, `replication.Streamer`, `slot.XLogUpdater`), and bounds the standby status write
+by running it on its own goroutine behind a capacity-1 semaphore. Both are required for a
+correct at-least-once contract: under T0-1's `ManualCommit`, `UpdateXLogPos` is the *only* thing
+that advances the replication slot, so the caller must be able to bound the write and learn
+whether it succeeded — otherwise a stalled slot silently retains WAL on the source primary until
+its disk fills.
+
+Note that `SendStandbyStatusUpdate` itself is left in its upstream form with the context still
+ignored. Bounding it via a socket write deadline was tried and rejected as unsafe: pgx's own
+context watcher concurrently clears deadlines on the same socket (defeating it), and a deadline
+firing mid-frame would leave a truncated protocol frame on a connection nothing marks as broken.
+The PATCHES.md T0-2 entry documents this in full — **do not reintroduce the deadline approach.**
+
+Consequences for re-sync: T0-2 cannot "mostly apply". Because the signatures change,
+a partial re-apply **fails to compile**, which is intentional — it is loud rather than silent.
+Re-apply the interface changes first, then the implementations, then the call sites listed in
+the PATCHES.md T0-2 entry. This patch is a strong argument for the fork approach below.
+
 ## **Recommended Alternative: Use a Fork**
 
 If you find yourself frequently updating this dependency, the most sustainable approach is to:

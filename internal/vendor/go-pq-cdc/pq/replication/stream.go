@@ -21,6 +21,17 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
+// vendored-patch: T0-2 - returned by UpdateXLogPos when there is no usable connection to send
+// a standby status update on. Distinguishable so callers can treat it as expected during
+// shutdown instead of as a failed slot advance.
+var ErrStreamClosed = goerrors.New("replication stream connection is closed")
+
+// vendored-patch: T0-2 - returned by UpdateXLogPos when a previous standby status write is
+// still blocked on the socket. The in-memory position was still advanced (the monotonic store
+// happens first); only the network send was skipped, so the caller should simply retry later
+// rather than treat this as a failed advance.
+var ErrStandbyWriteInFlight = goerrors.New("standby status update already in flight")
+
 var (
 	ErrorSlotInUse    = errors.New("replication slot in use")
 	ErrorNotConnected = errors.New("stream is not connected")
@@ -50,7 +61,9 @@ type Streamer interface {
 	GetSystemInfo() *pq.IdentifySystemResult
 	GetMetric() metric.Metric
 	OpenFromSnapshotLSN()
-	UpdateXLogPos(lsn pq.LSN)
+	// vendored-patch: T0-2 - ctx bounds the standby-status write; error lets the caller
+	// detect that the replication slot did not advance.
+	UpdateXLogPos(ctx context.Context, lsn pq.LSN) error
 	AddRelation(rel *format.Relation)
 }
 
@@ -69,6 +82,11 @@ type stream struct {
 	snapshotLSN         pq.LSN
 	openFromSnapshotLSN bool
 	closed              atomic.Bool
+	// vendored-patch: T0-2 - capacity-1 semaphore serialising standby status writes issued by
+	// UpdateXLogPos. Without it, a write that blocks on a full TCP send buffer plus a caller
+	// that retries on the next tick would put two goroutines into
+	// Frontend().SendUnbufferedEncodedCopyData concurrently and interleave protocol frames.
+	standbySem chan struct{}
 }
 
 func NewStream(dsn string, cfg config.Config, m metric.Metric, listenerFunc ListenerFunc) Streamer {
@@ -85,6 +103,8 @@ func NewStream(dsn string, cfg config.Config, m metric.Metric, listenerFunc List
 		lastXLogPos: 0,
 		sinkEnd:     make(chan struct{}, 1),
 		mu:          &sync.RWMutex{},
+		// vendored-patch: T0-2
+		standbySem: make(chan struct{}, 1),
 	}
 }
 
@@ -304,7 +324,12 @@ func (s *stream) handleKeepalive(ctx context.Context, data []byte) error {
 				s.config.KeepaliveFunc(pkm.ServerWALEnd)
 			}
 		} else {
-			s.UpdateXLogPos(pkm.ServerWALEnd)
+			// vendored-patch: T0-2 - log rather than propagate: a failed keepalive-driven
+			// advance is not fatal to the stream loop (the next keepalive retries), and
+			// returning here would tear down replication on a transient write error.
+			if err := s.UpdateXLogPos(ctx, pkm.ServerWALEnd); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+				logger.Warn("keepalive xlog position update failed", "error", err, "serverWALEnd", pkm.ServerWALEnd.String())
+			}
 			logger.Debug("updated xlog position from keepalive", "serverWALEnd", pkm.ServerWALEnd.String())
 		}
 	}
@@ -345,7 +370,14 @@ func (s *stream) handleXLogData(data []byte, buf *messageBuffer) {
 		// advance the position; unobserved LSNs cannot stall the AckManager since the
 		// next confirmed event advances past them.
 		if !s.config.ManualCommit {
-			s.UpdateXLogPos(xld.WALStart)
+			// vendored-patch: T0-2 - handleXLogData has no context in scope. This path runs
+			// only with ManualCommit off, so context.Background() deliberately preserves
+			// upstream behavior: threading a bounded ctx here would *introduce* a write
+			// deadline where upstream had none. Error is logged, not propagated (this
+			// function returns nothing and an undecodable message is already non-fatal).
+			if err := s.UpdateXLogPos(context.Background(), xld.WALStart); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+				logger.Warn("xlog position update failed for undecodable message", "error", err, "walStart", xld.WALStart.String())
+			}
 		}
 		return
 	}
@@ -417,7 +449,13 @@ func (s *stream) process(ctx context.Context) {
 					return nil
 				}
 				pos := pq.LSN(msg.walStart)
-				s.UpdateXLogPos(pos)
+				// vendored-patch: T0-2 - log rather than propagate so the legacy Ack keeps
+				// its upstream contract (the explicit send below is the value it returns).
+				// Note the redundant double-send is pre-existing upstream behavior, retained
+				// here deliberately: this branch is unreachable under ManualCommit.
+				if err := s.UpdateXLogPos(ctx, pos); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+					logger.Warn("ack xlog position update failed", "error", err, "lsn", pos.String())
+				}
 				logger.Debug("send stand by status update", "xLogPos", s.LoadXLogPos().String())
 				return SendStandbyStatusUpdate(ctx, s.conn, uint64(s.LoadXLogPos()))
 			},
@@ -466,7 +504,12 @@ func (s *stream) SetSnapshotLSN(lsn pq.LSN) {
 	s.snapshotLSN = lsn
 }
 
-func (s *stream) UpdateXLogPos(lsn pq.LSN) {
+// vendored-patch: T0-2 - takes a context and returns an error. Under ManualCommit this is the
+// ONLY path that advances the replication slot, so the caller must be able to bound the write
+// and learn whether it succeeded; silently failing here would stall the slot invisibly.
+// Returns ErrStreamClosed when there is no usable connection (normal during shutdown — callers
+// should check with errors.Is rather than treating it as a hard failure).
+func (s *stream) UpdateXLogPos(ctx context.Context, lsn pq.LSN) error {
 	// vendored-patch: T0-1 - monotonic guard: the *stored/reported* position must never
 	// regress, but the standby status update must still be sent every call (including when
 	// lsn <= lastXLogPos) so PostgreSQL keeps seeing liveness from this replica on an idle
@@ -478,11 +521,54 @@ func (s *stream) UpdateXLogPos(lsn pq.LSN) {
 	pos := s.lastXLogPos
 	s.mu.Unlock()
 
-	if s.conn != nil && !s.conn.IsClosed() {
-		// Force a status update to advance the slot in Postgres
-		if err := SendStandbyStatusUpdate(context.Background(), s.conn, uint64(pos)); err != nil {
+	if s.conn == nil || s.conn.IsClosed() {
+		return ErrStreamClosed
+	}
+
+	// vendored-patch: T0-2 - bound the write WITHOUT a socket deadline.
+	//
+	// The obvious implementation — push ctx's deadline onto the underlying net.Conn via
+	// SetWriteDeadline — is WRONG on this connection, for three reasons:
+	//  1. pgconn installs a DeadlineContextWatcherHandler by default, and sinkLoop calls
+	//     ReceiveMessage with a 300ms deadline on every iteration forever, deliberately
+	//     letting it expire. Each expiry runs SetDeadline(now) then SetDeadline(zero),
+	//     which clears any write deadline we set from another goroutine — so the bound is
+	//     silently defeated in exactly the "write is blocked" case it was meant to cover.
+	//  2. Symmetrically, clearing the deadline afterwards would stomp a deadline pgx set
+	//     for its own in-flight cancellation.
+	//  3. Worst: a write deadline firing mid-frame inside SendUnbufferedEncodedCopyData
+	//     leaves a TRUNCATED CopyData frame on the wire. That path bypasses PgConn's
+	//     locking and status machinery, so nothing marks the connection broken and the
+	//     next update writes a fresh frame onto a corrupted stream.
+	//
+	// Instead we run the write on its own goroutine and let the CALLER stop waiting. The
+	// write itself is not cancelled — it completes or fails whenever the socket drains —
+	// but the caller gets a bounded wait, which is what it actually needs to avoid stalling
+	// the ack coordinator. The semaphore guarantees at most one standby write is ever in
+	// flight, so a slow write plus a retrying caller cannot interleave protocol frames.
+	select {
+	case s.standbySem <- struct{}{}:
+	default:
+		// A previous standby write is still blocked on the socket. Piling on would risk
+		// frame interleaving; report it so the caller can retry on its next tick.
+		return ErrStandbyWriteInFlight
+	}
+
+	done := make(chan error, 1) // buffered: the goroutine must never block on an abandoned caller
+	go func() {
+		defer func() { <-s.standbySem }()
+		done <- SendStandbyStatusUpdate(context.Background(), s.conn, uint64(pos))
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
 			logger.Error("failed to send manual standby status update", "error", err, "lsn", pos.String())
 		}
+		return err
+	case <-ctx.Done():
+		// The write is still running; the semaphore is released when it finishes.
+		return ctx.Err()
 	}
 }
 
@@ -578,6 +664,9 @@ func (s *stream) fetchSnapshotLSN(ctx context.Context) (pq.LSN, error) {
 	return snapshotLSN, nil
 }
 
+// NOTE (vendored-patch: T0-2): this function is deliberately left in its upstream form, with
+// the context ignored. Bounding the write happens one level up in stream.UpdateXLogPos — see
+// the long comment there for why a socket write deadline is NOT usable on this connection.
 func SendStandbyStatusUpdate(_ context.Context, conn pq.Connection, walWritePosition uint64) error {
 	data := make([]byte, 0, 34)
 	data = append(data, StandbyStatusUpdateByteID)

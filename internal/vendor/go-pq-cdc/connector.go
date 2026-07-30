@@ -35,7 +35,10 @@ type Connector interface {
 	Close()
 	GetConfig() *config.Config
 	SetMetricCollectors(collectors ...prometheus.Collector)
-	UpdateXLogPos(lsn pq.LSN)
+	// vendored-patch: T0-2 - ctx bounds the standby-status write; error lets the caller detect
+	// that the replication slot did not advance. Under ManualCommit this is the only path that
+	// advances the slot, so both are required for a correct at-least-once contract.
+	UpdateXLogPos(ctx context.Context, lsn pq.LSN) error
 	AddRelation(rel *format.Relation)
 }
 
@@ -217,10 +220,14 @@ func (c *connector) AddRelation(rel *format.Relation) {
 	}
 }
 
-func (c *connector) UpdateXLogPos(lsn pq.LSN) {
-	if c.stream != nil {
-		c.stream.UpdateXLogPos(lsn)
+// vendored-patch: T0-2 - propagates ctx and the error from the stream. Returns
+// replication.ErrStreamClosed when no stream exists yet, so a caller cannot mistake
+// "never sent" for "sent successfully".
+func (c *connector) UpdateXLogPos(ctx context.Context, lsn pq.LSN) error {
+	if c.stream == nil {
+		return replication.ErrStreamClosed
 	}
+	return c.stream.UpdateXLogPos(ctx, lsn)
 }
 
 func (c *connector) Start(ctx context.Context) {
@@ -289,7 +296,17 @@ func (c *connector) Start(ctx context.Context) {
 
 	// NEW: Use StartLSN from config if provided
 	if c.cfg.StartLSN > 0 {
-		c.UpdateXLogPos(c.cfg.StartLSN)
+		// vendored-patch: T0-2 - log rather than abort: failing to seed the position is not
+		// fatal (replication falls back to the slot's confirmed_flush_lsn, which is the
+		// correct resume point anyway), but it must not be silent.
+		//
+		// ErrStreamClosed is EXPECTED here and must not be logged: this seed deliberately
+		// runs before stream.Connect below, so there is no socket yet. The in-memory
+		// position is still stored (the monotonic clamp happens before the conn check), so
+		// the seed genuinely succeeded — only the pointless pre-connect send was skipped.
+		if err := c.UpdateXLogPos(ctx, c.cfg.StartLSN); err != nil && !goerrors.Is(err, replication.ErrStreamClosed) {
+			logger.Warn("failed to seed xlog position from StartLSN", "error", err, "startLSN", c.cfg.StartLSN.String())
+		}
 	}
 
 	// Normal CDC flow (unchanged for backward compatibility)

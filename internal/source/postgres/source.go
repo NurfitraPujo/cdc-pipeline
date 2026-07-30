@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -518,7 +519,14 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 			if conn == nil {
 				continue
 			}
-			conn.UpdateXLogPos(pq.LSN(wm))
+			// T0-2: the vendored UpdateXLogPos now takes a ctx and returns an error.
+			// TODO(WI-4): replace with the bounded, retry-on-next-tick coordinator write
+			// (do not advance lastFlushedWatermark on failure) plus a slot_advance_errors
+			// metric. Kept minimal here so T0-2 lands as a pure signature change.
+			if err := conn.UpdateXLogPos(ctx, pq.LSN(wm)); err != nil {
+				log.Warn().Err(err).Uint64("watermark", wm).Msg("Failed to advance replication slot position")
+				continue
+			}
 			lastFlushedWatermark = wm
 		}
 	}
@@ -604,7 +612,17 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 	}()
 
 	if checkpoint.IngressLSN > 0 {
-		conn.UpdateXLogPos(pq.LSN(checkpoint.IngressLSN))
+		// T0-2: signature now carries ctx + error. WI-7 deletes this seed entirely (the
+		// slot's own confirmed_flush_lsn becomes the resume authority), so this is
+		// deliberately just made to compile and be non-silent.
+		//
+		// ErrStreamClosed is EXPECTED and deliberately not logged: this runs before
+		// conn.Start below, so the stream has no socket yet. The in-memory position is
+		// still stored, so the seed succeeded; only the pre-connect send was skipped.
+		if err := conn.UpdateXLogPos(sourceCtx, pq.LSN(checkpoint.IngressLSN)); err != nil &&
+			!errors.Is(err, replication.ErrStreamClosed) {
+			log.Warn().Err(err).Uint64("lsn", checkpoint.IngressLSN).Msg("Failed to seed xlog position from checkpoint")
+		}
 	}
 
 	conn.Start(sourceCtx)
@@ -644,7 +662,12 @@ func (s *PostgresSource) UpdateXLogPos(ctx context.Context, lsn uint64) error {
 	connector := s.connector
 	s.mu.Unlock()
 	if connector != nil {
-		connector.UpdateXLogPos(pq.LSN(lsn))
+		// T0-2: propagate the error instead of discarding it. This method's own signature
+		// already promised an error return but always returned nil, so a failed slot
+		// advance was invisible to callers.
+		if err := connector.UpdateXLogPos(ctx, pq.LSN(lsn)); err != nil {
+			return fmt.Errorf("advance replication slot to %d: %w", lsn, err)
+		}
 	}
 	return nil
 }

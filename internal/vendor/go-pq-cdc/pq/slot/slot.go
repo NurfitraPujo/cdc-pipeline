@@ -19,8 +19,10 @@ var (
 	ErrorSlotClosed      = errors.New("replication slot is closed")
 )
 
+// vendored-patch: T0-2 - UpdateXLogPos gained a context and an error return so the embedding
+// application can bound the standby-status write and detect a slot that failed to advance.
 type XLogUpdater interface {
-	UpdateXLogPos(lsn pq.LSN)
+	UpdateXLogPos(ctx context.Context, lsn pq.LSN) error
 }
 
 type Slot struct {

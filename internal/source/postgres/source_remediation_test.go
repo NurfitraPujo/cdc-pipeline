@@ -30,9 +30,18 @@ type stubConnector struct {
 	startCount atomic.Int32
 	closeCount atomic.Int32
 	lastCtx    atomic.Pointer[context.Context]
+
+	// T0-2: UpdateXLogPos now carries a ctx and returns an error, so the stub records
+	// what it was asked to advance to and can be told to fail.
+	updateCount   atomic.Int32
+	lastUpdateLSN atomic.Uint64
+	updateErr     atomic.Pointer[error]
 }
 
 func newStubConnector() *stubConnector { return &stubConnector{} }
+
+// failUpdatesWith makes every subsequent UpdateXLogPos return err.
+func (s *stubConnector) failUpdatesWith(err error) { s.updateErr.Store(&err) }
 
 func (s *stubConnector) Start(ctx context.Context) {
 	s.startCount.Add(1)
@@ -40,12 +49,19 @@ func (s *stubConnector) Start(ctx context.Context) {
 	<-ctx.Done()
 }
 
-func (s *stubConnector) WaitUntilReady(_ context.Context) error                   { return nil }
-func (s *stubConnector) Close()                                                  { s.closeCount.Add(1) }
-func (s *stubConnector) UpdateXLogPos(_ pq.LSN)                                   {}
-func (s *stubConnector) GetConfig() *config.Config                                { return nil }
-func (s *stubConnector) SetMetricCollectors(_ ...prometheus.Collector)           {}
-func (s *stubConnector) AddRelation(_ *format.Relation)                           {}
+func (s *stubConnector) WaitUntilReady(_ context.Context) error { return nil }
+func (s *stubConnector) Close()                                 { s.closeCount.Add(1) }
+func (s *stubConnector) UpdateXLogPos(_ context.Context, lsn pq.LSN) error {
+	s.updateCount.Add(1)
+	s.lastUpdateLSN.Store(uint64(lsn))
+	if errp := s.updateErr.Load(); errp != nil {
+		return *errp
+	}
+	return nil
+}
+func (s *stubConnector) GetConfig() *config.Config                     { return nil }
+func (s *stubConnector) SetMetricCollectors(_ ...prometheus.Collector) {}
+func (s *stubConnector) AddRelation(_ *format.Relation)                {}
 
 // stubFactory produces fresh stubConnector instances per invocation.
 type stubFactory struct {
@@ -402,4 +418,58 @@ func errorFromPanic(r interface{}) error {
 	default:
 		return errors.New("recovered from panic")
 	}
+}
+
+// TestUpdateXLogPos_PropagatesConnectorError is the first coverage of the slot-advance
+// error path, made possible by vendored patch T0-2 (which gave the vendored
+// Connector.UpdateXLogPos a context and an error return).
+//
+// Before T0-2 the vendored call could not fail as far as the caller was concerned, so
+// PostgresSource.UpdateXLogPos always returned nil despite its signature promising an
+// error — a slot that silently stopped advancing was undetectable. Under the new
+// at-least-once contract the slot write is the single most safety-critical call in the
+// system, so a failure here must reach the caller.
+func TestUpdateXLogPos_PropagatesConnectorError(t *testing.T) {
+	t.Run("error is propagated", func(t *testing.T) {
+		conn := newStubConnector()
+		sentinel := errors.New("standby status update failed")
+		conn.failUpdatesWith(sentinel)
+
+		s := &PostgresSource{connector: conn}
+
+		err := s.UpdateXLogPos(context.Background(), 12345)
+
+		require.Error(t, err, "a failed slot advance must not be reported as success")
+		assert.ErrorIs(t, err, sentinel, "the underlying cause must be preserved for errors.Is")
+		assert.Equal(t, int32(1), conn.updateCount.Load())
+		assert.Equal(t, uint64(12345), conn.lastUpdateLSN.Load())
+	})
+
+	t.Run("success returns nil and forwards the lsn", func(t *testing.T) {
+		conn := newStubConnector()
+		s := &PostgresSource{connector: conn}
+
+		require.NoError(t, s.UpdateXLogPos(context.Background(), 999))
+		assert.Equal(t, uint64(999), conn.lastUpdateLSN.Load())
+	})
+
+	t.Run("checkpoint is still advanced in memory", func(t *testing.T) {
+		// The in-memory checkpoint assignment (T1-2) happens before the connector call and
+		// must not regress: it is what a restart resumes from.
+		conn := newStubConnector()
+		s := &PostgresSource{connector: conn}
+
+		require.NoError(t, s.UpdateXLogPos(context.Background(), 777))
+
+		s.mu.Lock()
+		got := s.lastCheckpoint.IngressLSN
+		s.mu.Unlock()
+		assert.Equal(t, uint64(777), got)
+	})
+
+	t.Run("nil connector is not an error", func(t *testing.T) {
+		// Stop/Start races can leave connector nil; that is not a failed advance.
+		s := &PostgresSource{}
+		assert.NoError(t, s.UpdateXLogPos(context.Background(), 1))
+	})
 }
