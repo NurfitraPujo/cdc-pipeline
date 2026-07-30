@@ -622,9 +622,18 @@ func (m *ConfigManager) getBackoffDelay(attempt int) time.Duration {
 		delay = maxBackoff
 	}
 
-	// Add 10% random jitter
+	// Add 10% random jitter, then re-clamp. maxBackoff is documented as an absolute
+	// ceiling, so jitter must not be able to push past it: capping before jitter alone
+	// let a capped delay return up to 66s.
 	jitter := time.Duration(float64(delay) * 0.1 * (2*rand.Float64() - 1))
-	return delay + jitter
+	delay += jitter
+	if delay > maxBackoff {
+		delay = maxBackoff
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	return delay
 }
 
 // writeHeartbeatKV persists the heartbeat to NATS KV, bumps the heartbeat KV write
