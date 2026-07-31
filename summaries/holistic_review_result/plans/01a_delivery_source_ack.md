@@ -505,8 +505,27 @@ half), High panic-deadlock, Medium lsnChan/ackChan findings.
 1. Consumer `flush` (`consumer.go:448-465`) and `flushWithFilter` (:513-529): replace the
    per-message `Op:"ack"` publish with a single
    `protocol.Message{Op: OpRecordAck, SinkID: c.sinkID, SourceID: ..., Payload: msgpEncode(RecordAck{LSNs: batchLSNs})}`
-   per successful `BatchUpload`, where `batchLSNs` collects `m.LSN` for every uploaded
-   message with `m.LSN > 0` and `m.Op != OpSnapshot`.
+   per successful `BatchUpload`, where `batchLSNs` collects `m.LSN` for every **terminally
+   handled** message with `m.LSN > 0` and `m.Op != OpSnapshot`.
+
+   > **CORRECTION (found by WI-5 validation — the original wording here said "every uploaded
+   > message" and was wrong).** The set must be derived from the whole input `batch`, not from
+   > the uploaded subset. **Any terminal decision must produce a confirmation, not just a
+   > durable write:** a row dropped by a transformer, routed to DLQ, or written during
+   > poison-batch isolation will never be written by anyone, so the source must be told its LSN
+   > needs no replay. Confirming those is *correct*, not over-broad. Under `ManualCommit` an
+   > unconfirmed LSN stays in `AckManager.pending` forever → watermark frozen → replication slot
+   > frozen → unbounded WAL on the source primary, with `cdc_source_pending_lsns` as the only
+   > symptom.
+   >
+   > Four paths originally acked a wmMsg with no `RecordAck` at all and must each publish first
+   > (and Nack on publish failure): the `len(toUpload) == 0` early return, a partial transformer
+   > drop, the `isolatePoisonBatch` success path, and DLQ routing. Two of them need no unusual
+   > conditions — isolation is entered after only `MaxRetries` (default 3), i.e. any moderately
+   > long transient sink outage.
+   >
+   > This is not over-broad **provided** every widened publish sits strictly after a successful
+   > `BatchUpload`; the upload-failure paths must return before reaching it.
    - **Ordering (fixes a crash window — review finding A).** Publish the `RecordAck`
      **before** JetStream-acking the wmMsgs, not after. Today `flush` acks wmMsgs first and
      publishes the ack second (`consumer.go` acks at the top of the block, ack-publish at
@@ -560,6 +579,17 @@ is trusted.
   primary's disk).
 - **Gate:** `strict_ack` MUST NOT be flipped on for a pipeline until this metric + alert are
   live for its source. Encode this as a checklist item in §6's deploy order, not just prose.
+- **Runbook entry — pinned LSN from an unparseable ingest payload (found by WI-5 validation).**
+  A wmMsg whose msgp payload fails to unmarshal has **no recoverable LSN**: the LSNs live inside
+  the blob that failed to decode, the producer publishes with `message.NewMessage(watermill.
+  NewUUID(), payload)` so no header or JetStream metadata carries it, and the `AckManager` holds
+  no wmMsg↔LSN mapping to consult. DLQ-routing it therefore pins that LSN in
+  `AckManager.pending` and the slot **stays frozen until the pipeline restarts** (restart
+  rebuilds the AckManager and replays from the slot, so it self-heals only then).
+  *Reachability is low* — `Run` already unmarshals the same payload and Nacks on failure, so a
+  payload reaching `isolatePoisonBatch` has parsed successfully once — but it is not zero.
+  **Symptom to document:** `cdc_source_pending_lsns` flat and non-zero while
+  `cdc_source_slot_lag_bytes` grows. **Response:** restart the pipeline.
 **Why:** the correct at-least-once trade (freeze the slot rather than lose data) is only safe
 to operate if the resulting WAL growth is visible and alertable before it endangers the source.
 **Deps:** WI-4 (watermark exists), WI-7 (slot is authoritative). Independent of WI-6/WI-9.
@@ -911,6 +941,18 @@ is expected; the flag flip is safe when the watermark tracks closely under produ
   only occurs during a rolling deploy against the shared durable
   (`cdc-worker-<id>-producer-acks`, factory.go:141-150); dual-read covers it. Remove legacy
   parsing one release later.
+
+  > ⚠ **The legacy shape carries no `SinkID`**, so a naive dual-read forwards an empty sink
+  > identity that can never satisfy `AckManager.required` — which would freeze the slot for the
+  > whole rolling deploy. Implemented behavior: a legacy ack confirms **every** configured sink.
+  >
+  > **Operator-visible consequence, deliberately accepted:** for a *multi-sink* pipeline this
+  > temporarily degrades delivery to pre-WI-5 semantics for the lagging sink. A pre-WI-5
+  > consumer's ack for sink A confirms the LSN for A *and* B; if B has not yet written that row
+  > and the process restarts mid-deploy, B loses it. Pre-WI-5 behavior was no better (the slot
+  > advanced per-event regardless of any sink), so this is the right trade versus a frozen slot
+  > — but it is a real, bounded loss window and must be planned for, not discovered by reading
+  > `producer.go`. Single-sink pipelines are unaffected.
 - **KV `Checkpoint` (`internal/protocol/state.go:10-16`):** no field changes — semantics
   only. `IngressLSN` written by the producer remains "published-to-NATS position"; the new
   `SourceWatermarkKey` entry is additive. Old entries need no migration.
