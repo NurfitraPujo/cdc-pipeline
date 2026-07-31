@@ -14,6 +14,7 @@ import (
 	reflect "reflect"
 
 	protocol "github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	source "github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -69,34 +70,20 @@ func (mr *MockSourceMockRecorder) Name() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Name", reflect.TypeOf((*MockSource)(nil).Name))
 }
 
-// RestartWithNewTables mocks base method.
-func (m *MockSource) RestartWithNewTables(ctx context.Context, newTables []string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RestartWithNewTables", ctx, newTables)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// RestartWithNewTables indicates an expected call of RestartWithNewTables.
-func (mr *MockSourceMockRecorder) RestartWithNewTables(ctx, newTables any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RestartWithNewTables", reflect.TypeOf((*MockSource)(nil).RestartWithNewTables), ctx, newTables)
-}
-
 // Start mocks base method.
-func (m *MockSource) Start(ctx context.Context, config protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
+func (m *MockSource) Start(ctx context.Context, config protocol.SourceConfig, checkpoint protocol.Checkpoint, ackers []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Start", ctx, config, checkpoint)
+	ret := m.ctrl.Call(m, "Start", ctx, config, checkpoint, ackers)
 	ret0, _ := ret[0].(<-chan []protocol.Message)
-	ret1, _ := ret[1].(chan<- struct{})
+	ret1, _ := ret[1].(chan<- source.SourceAck)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
 }
 
 // Start indicates an expected call of Start.
-func (mr *MockSourceMockRecorder) Start(ctx, config, checkpoint any) *gomock.Call {
+func (mr *MockSourceMockRecorder) Start(ctx, config, checkpoint, ackers any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockSource)(nil).Start), ctx, config, checkpoint)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockSource)(nil).Start), ctx, config, checkpoint, ackers)
 }
 
 // Stop mocks base method.

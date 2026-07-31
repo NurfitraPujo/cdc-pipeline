@@ -1,0 +1,67 @@
+# WI-5a: this is templates/worker/prometheusrule.yaml's `spec.groups` block
+# rendered by hand with the staging values (values.staging.yml:
+# worker.alerts.slotLag/pendingStuck/probeStale) substituted in, reshaped
+# from the PrometheusRule CRD (apiVersion/kind/metadata/spec.groups) to the
+# plain `groups:` document promtool's native rule format expects.
+#
+# This file exists ONLY so `promtool test rules` can prove
+# CDCSourcePendingLSNsStuck actually fires now that pendingLSNsGauge and
+# ackWatermarkGauge share an identical {pipeline,source,slot} label set
+# (WI-5a review Defect 1) -- and that it stays silent when the two gauges'
+# label sets are deliberately made to diverge again, which is the failure
+# mode this whole exercise exists to catch. It is a manually-kept mirror,
+# not machine-generated from the Helm template; if the Helm template's
+# expressions or the staging thresholds change, update this file to match
+# by hand.
+groups:
+  - name: cdc-source-slot-lag
+    rules:
+      - alert: CDCSourceSlotLagWarning
+        expr: |
+          cdc_source_slot_lag_bytes > 536870912
+          and
+          delta(cdc_source_slot_lag_bytes[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CDC replication slot lag is growing"
+
+      - alert: CDCSourceSlotLagCritical
+        expr: |
+          cdc_source_slot_lag_bytes > 5368709120
+          and
+          delta(cdc_source_slot_lag_bytes[15m]) > 0
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "CDC replication slot lag threatens source primary disk"
+
+      - alert: CDCSourcePendingLSNsStuck
+        expr: |
+          cdc_source_pending_lsns > 0
+          and
+          delta(cdc_source_ack_watermark[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CDC source has pending LSNs that are not draining"
+
+      - alert: CDCSourceSlotLagProbeStale
+        expr: |
+          time() - cdc_source_slot_lag_probe_last_success_timestamp_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CDC slot-lag probe has not succeeded recently"
+
+      - alert: CDCSourceIdleAdvanceRefused
+        expr: |
+          increase(cdc_source_idle_advance_refused_total[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "CDC IdleAdvance refused an unsafe fast-forward"

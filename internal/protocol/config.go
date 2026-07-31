@@ -95,6 +95,16 @@ func EgressCheckpointKey(pid, sid, sinkID, table string) string {
 	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, sinkID, table)
 }
 
+// SourceWatermarkKey addresses a per-source, per-pipeline observability
+// record of the AckManager watermark (see WI-7 §3 "persistWatermark").
+// Unlike IngressCheckpointKey, this is not consulted on resume -- the
+// replication slot's own confirmed_flush_lsn is the resume authority. It
+// exists purely so dashboards/operators can see current watermark
+// progress without querying PostgreSQL directly.
+func SourceWatermarkKey(pid, sid string) string {
+	return fmt.Sprintf("%s%s.sources.%s.watermark", PrefixPipelineState, pid, sid)
+}
+
 func DLQTopic(pid string) string {
 	return fmt.Sprintf("cdc_pipeline_%s_dlq", pid)
 }

@@ -13,6 +13,8 @@ const (
 	OpSnapshot        OperationType = "snapshot"
 	OpSchemaChange    OperationType = "schema_change"
 	OpSchemaChangeAck OperationType = "schema_change_ack"
+	OpRecordAck       OperationType = "record_ack" // replaces the bare "ack" string literal
+	OpDrainMarker     OperationType = "drain_marker"
 )
 
 type SchemaMetadata struct {
@@ -36,6 +38,16 @@ type SchemaDiff struct {
 	Removed       []string              `msg:"rem" json:"removed"`
 	TypeChanges   map[string]TypeChange `msg:"type" json:"type_changes"`
 	CorrelationID string                `msg:"c_id" json:"correlation_id"`
+}
+
+// RecordAck is published by a consumer on AcksTopic after a durable sink write.
+// One message per successful flush; LSNs lists every LSN in the flushed batch.
+type RecordAck struct {
+	PipelineID string    `msg:"pid"`
+	SourceID   string    `msg:"sid"`
+	SinkID     string    `msg:"snk"`
+	LSNs       []uint64  `msg:"lsns"`
+	Timestamp  time.Time `msg:"ts"`
 }
 
 type Message struct {

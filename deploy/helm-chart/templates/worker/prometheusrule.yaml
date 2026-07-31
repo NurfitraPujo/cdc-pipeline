@@ -1,0 +1,165 @@
+{{- if .Values.worker.alerts.enabled }}
+# WI-5a (plan 01a §3): slot-lag observability. Under ManualCommit -- gated by
+# the `strict_ack` flag (CDC_STRICT_ACK, internal/source/postgres/source.go:
+# resolveStrictAck, defaults ON in dev/test and OFF in prod) -- the
+# replication slot only advances after every configured sink has durably
+# written an LSN, so a dead/slow sink freezes confirmed_flush_lsn and
+# PostgreSQL retains WAL without bound on the SOURCE primary, for any
+# pipeline that has strict_ack turned on. That is the correct at-least-once
+# trade (loss -> visible backpressure), but it is only safe to operate with
+# these alerts live -- and until worker.alerts.enabled is true here, it is
+# NOT visible. Per the RUNBOOK's deploy order, worker.alerts.enabled: true
+# is a precondition for flipping strict_ack on for any pipeline in this
+# environment, not a follow-up.
+#
+# See deploy/helm-chart/RUNBOOK.md for the full risk statement, the
+# deploy-order checklist, and the three distinct failure modes these
+# alerts and their siblings cover.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Values.worker.name }}-slot-lag
+  labels:
+    app.kubernetes.io/name: {{ .Values.worker.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+    {{- with .Values.worker.alerts.ruleSelectorLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: cdc-source-slot-lag
+      rules:
+        # (a) Sink down -> WAL growth (the headline risk this WI exists
+        # for). Fires when slot lag has been non-trivially large AND
+        # growing for a sustained window, so a normal burst of write
+        # traffic followed by a healthy catch-up does not page anyone.
+        - alert: CDCSourceSlotLagWarning
+          expr: |
+            cdc_source_slot_lag_bytes > {{ .Values.worker.alerts.slotLag.warnBytes }}
+            and
+            delta(cdc_source_slot_lag_bytes[15m]) > 0
+          for: {{ .Values.worker.alerts.slotLag.warnFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC replication slot lag is growing for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_bytes for slot {{ "{{" }} $labels.slot {{ "}}" }} is
+              {{ "{{" }} $value | humanize1024 {{ "}}" }}B and rising. This means the
+              replication slot's confirmed_flush_lsn is not advancing as fast as the
+              source primary is generating WAL -- almost always a downstream sink
+              that is down, slow, or misconfigured. WAL is being retained without
+              bound on the SOURCE primary until this resolves. See runbook
+              failure mode (a) in deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#a-sink-down--wal-growth"
+        - alert: CDCSourceSlotLagCritical
+          expr: |
+            cdc_source_slot_lag_bytes > {{ .Values.worker.alerts.slotLag.pageBytes }}
+            and
+            delta(cdc_source_slot_lag_bytes[15m]) > 0
+          for: {{ .Values.worker.alerts.slotLag.pageFor }}
+          labels:
+            severity: page
+          annotations:
+            summary: "CDC replication slot lag threatens source primary disk for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_bytes for slot {{ "{{" }} $labels.slot {{ "}}" }} is
+              {{ "{{" }} $value | humanize1024 {{ "}}" }}B and still growing. This is
+              approaching a source-primary disk-pressure outage. Page on-call. See
+              runbook failure mode (a) in deploy/helm-chart/RUNBOOK.md -- the
+              disaster floor is max_slot_wal_keep_size on the source DB, which
+              accepts slot invalidation and a forced re-snapshot rather than
+              filling the primary's disk.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#a-sink-down--wal-growth"
+
+        # (b) Wedged connector needing a process restart. pending_lsns is
+        # stuck non-zero, but distinguishing (b) from (c) requires an
+        # operator to also look at cdc_source_slot_lag_bytes (flat here,
+        # growing in (c)) -- both share this trigger and the runbook
+        # documents how to tell them apart.
+        - alert: CDCSourcePendingLSNsStuck
+          expr: |
+            cdc_source_pending_lsns > 0
+            and
+            delta(cdc_source_ack_watermark[10m]) == 0
+          for: {{ .Values.worker.alerts.pendingStuck.for }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC source has pending LSNs that are not draining for {{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_pending_lsns has been non-zero and
+              cdc_source_ack_watermark has not moved for at least
+              {{ .Values.worker.alerts.pendingStuck.for }}. This is either a
+              wedged connector needing a process restart (failure mode (b)) or
+              a pinned LSN from an unparseable ingest payload (failure mode
+              (c)) -- check cdc_source_slot_lag_bytes to tell them apart.
+              Response either way: restart the pipeline. See
+              deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#telling-b-and-c-apart-from-a"
+
+        # Probe-health alert (WI-5a review Defect 3). slotLagBytesGauge is a
+        # plain gauge: on a probe failure it silently keeps its LAST value
+        # rather than clearing it, so a degraded source-DB connection --
+        # exactly the kind of problem most likely to co-occur with a real
+        # slot-lag incident -- would otherwise scrape as a stale, healthy-
+        # looking number and silence CDCSourceSlotLagWarning/Critical during
+        # the incident they exist for. This alert fires on staleness itself,
+        # independent of whatever the last-reported lag value was.
+        - alert: CDCSourceSlotLagProbeStale
+          expr: |
+            time() - cdc_source_slot_lag_probe_last_success_timestamp_seconds > {{ .Values.worker.alerts.probeStale.staleAfterSeconds }}
+          for: {{ .Values.worker.alerts.probeStale.for }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC slot-lag probe has not succeeded recently for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_probe_last_success_timestamp_seconds for
+              slot {{ "{{" }} $labels.slot {{ "}}" }} has not advanced in over
+              {{ .Values.worker.alerts.probeStale.staleAfterSeconds }}s. The
+              probe queries pg_replication_slots over the same DB connection
+              used for replication -- treat this as a signal that either the
+              source DB connection or the probe itself is degraded, and that
+              cdc_source_slot_lag_bytes may be reporting a stale, out-of-date
+              value rather than the current one. Do not trust the lag alerts
+              while this is firing; investigate DB connectivity directly.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#probe-health"
+
+        # OPS-2 (holistic review, 03_IMPLEMENTATION_REVIEW.md): T0-3
+        # (commit f192fe3) fixed a data-loss bug where IdleAdvance could
+        # fast-forward the watermark past a replay backlog that had never
+        # been re-Observe()d, while cdc_source_pending_lsns read a healthy
+        # 0 throughout -- no existing metric moved. The guard T0-3 added
+        # alongside the fix is log-only and latching (one Error line, then
+        # `idleTrusted = true` and it stops checking), so a regression of
+        # that exact ordering bug would once again be invisible to every
+        # dashboard and alert in this file. cdc_source_idle_advance_refused_total
+        # is the counter that makes it visible. Any increase at all is
+        # itself the signal -- there is no "acceptable rate" of a data-loss
+        # class this alert exists to catch, so it fires on the first
+        # occurrence rather than waiting for a sustained rate, and is
+        # rated `page` (not `warning`) because the failure mode is a silent
+        # correctness regression, not a recoverable operational condition.
+        - alert: CDCSourceIdleAdvanceRefused
+          expr: |
+            increase(cdc_source_idle_advance_refused_total[15m]) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "CDC IdleAdvance refused an unsafe fast-forward for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_idle_advance_refused_total for slot {{ "{{" }} $labels.slot {{ "}}" }}
+              increased in the last 15m. This means the AckManager's
+              IdleAdvance guard refused to fast-forward the watermark past a
+              replay backlog that had not been re-observed -- the exact
+              stream-ordering hazard fixed in commit f192fe3 (T0-3) may have
+              regressed upstream of the guard. Because cdc_source_pending_lsns
+              reads 0 and the watermark keeps moving "healthily" throughout
+              this failure mode, this counter and this alert are the ONLY
+              signal that exists for it -- do not wait for corroborating
+              symptoms on the other gauges in this file. Page on-call and
+              treat as a possible silent data-loss regression. See runbook
+              section on OPS-2 in deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#ops-2-idle-advance-refused-t0-3-regression-canary"
+{{- end }}

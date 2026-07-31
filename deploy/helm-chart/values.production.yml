@@ -113,6 +113,33 @@ api:
 
 worker:
   name: cdc-worker
+  # WI-5a (plan 01a §3): PrometheusRule for cdc_source_slot_lag_bytes and
+  # friends.
+  #
+  # IMPORTANT -- read deploy/helm-chart/RUNBOOK.md's "Status as of this
+  # commit" section: ManualCommit (the slot-freezing behaviour these alerts
+  # cover) is gated by the `strict_ack` flag (CDC_STRICT_ACK,
+  # internal/source/postgres/source.go: resolveStrictAck), which defaults
+  # OFF here since no CDC_STRICT_ACK is set and this is a production
+  # environment -- production does NOT yet carry the WAL-retention risk.
+  # `enabled: false` here is therefore correct FOR NOW, but it is a
+  # precondition, not a follow-up: per the RUNBOOK's "Deploy order", this
+  # MUST be flipped to `true` (once the prometheus-operator CRDs and alert
+  # routing are confirmed for this cluster) BEFORE CDC_STRICT_ACK is ever
+  # set to true for any pipeline in this environment.
+  alerts:
+    enabled: false
+    ruleSelectorLabels: {}
+    slotLag:
+      warnBytes: 536870912   # 512MiB
+      warnFor: 15m
+      pageBytes: 5368709120  # 5GiB
+      pageFor: 15m
+    pendingStuck:
+      for: 10m
+    probeStale:
+      staleAfterSeconds: 120  # 8x the 15s probe interval
+      for: 2m
   args: ["/app/worker"]
   image:
     repository: swr.ap-southeast-3.myhuaweicloud.com/daya-engineering/cdc-data-pipeline

@@ -44,6 +44,66 @@ go test ./internal/source/postgres/...
 
 ---
 
+## **Current Patches**
+
+See `internal/vendor/go-pq-cdc/PATCHES.md` for the full catalogue of local divergences
+(searchable via `// vendored-patch:` markers). Notably **T0-1** adds an opt-in
+`Config.ManualCommit` mode plus a `Config.KeepaliveFunc` callback so an embedding source can
+own replication-slot advancement exclusively (gating it on downstream sink acks) instead of
+the library advancing the slot the instant an event is handed off, and it also always-on-fixes
+a monotonic-position bug in `stream.UpdateXLogPos` (the reported LSN could regress on
+keepalive/per-message interleaving). Because T0-1 is flag-guarded (default `false` = upstream
+byte-for-byte) except for two small always-on bug-fix guards, it should re-apply cleanly via
+the diff/rsync/patch workflow below — but re-verify all six sites in the PATCHES.md T0-1 entry
+by hand after any upstream re-sync, since `stream.go` is exactly the file most likely to shift
+underneath a line-based patch.
+
+> ⚠ **The "byte-for-byte upstream" claim above is for T0-1 in isolation only.** T0-2 (next)
+> rewrites `UpdateXLogPos` into a goroutine+semaphore form that all three legacy
+> (`ManualCommit == false`) call sites go through, which is itself a set of documented,
+> non-byte-for-byte legacy-mode deltas (see the T0-2 paragraph's "Runtime" reference below, and
+> PATCHES.md's T0-2 "Runtime" section for the full four-item list). Read both entries together;
+> do not conclude the flag-off path is inert from T0-1's paragraph alone.
+
+**T0-2** is a different and more invasive class of patch: it is **API-breaking**. It widens
+`UpdateXLogPos` to `(ctx context.Context, lsn pq.LSN) error` across three exported interfaces
+(`Connector`, `replication.Streamer`, `slot.XLogUpdater`), and bounds the standby status write
+by running it on its own goroutine behind a capacity-1 semaphore. Both are required for a
+correct at-least-once contract: under T0-1's `ManualCommit`, `UpdateXLogPos` is the *only* thing
+that advances the replication slot, so the caller must be able to bound the write and learn
+whether it succeeded — otherwise a stalled slot silently retains WAL on the source primary until
+its disk fills.
+
+Note that `SendStandbyStatusUpdate` itself is left in its upstream form with the context still
+ignored. Bounding it via a socket write deadline was tried and rejected as unsafe: pgx's own
+context watcher concurrently clears deadlines on the same socket (defeating it), and a deadline
+firing mid-frame would leave a truncated protocol frame on a connection nothing marks as broken.
+The PATCHES.md T0-2 entry documents this in full — **do not reintroduce the deadline approach.**
+
+Consequences for re-sync: T0-2 cannot "mostly apply". Because the signatures change,
+a partial re-apply **fails to compile**, which is intentional — it is loud rather than silent.
+Re-apply the interface changes first, then the implementations, then the call sites listed in
+the PATCHES.md T0-2 entry. This patch is a strong argument for the fork approach below.
+
+**T0-3** closes a shipping-blocker data-loss bug found in T0-1's own design: under
+`ManualCommit`, `handleKeepalive` called `Config.KeepaliveFunc` inline on the `sink` goroutine,
+bypassing the `messageCH` queue (and the one-message look-ahead in `messageBuffer`) that actually
+feeds `Observe` via `process`/`listenerFunc`. On a fresh start with a WAL replay backlog, the
+first keepalive's `ServerWALEnd` typically already sits past every buffered commit, so an
+embedder's "nothing pending" idle-advance logic (this repo's `AckManager.IdleAdvance`) could
+fast-forward its watermark past an entire backlog before a single row of it had reached `Observe`
+— silent, unrecoverable data loss with a healthy-looking pending-count metric throughout. T0-3
+fixes this by enqueuing the keepalive as an in-band marker on `messageCH` itself (after flushing
+`messageBuffer`'s look-ahead), so `KeepaliveFunc` only fires once every previously decoded message
+has already reached `Observe`. Like T0-1, it is flag-guarded (`ManualCommit`-only) and additive to
+the `Message`/`process` shapes, so it should re-apply cleanly via the diff/rsync/patch workflow —
+but re-verify `handleKeepalive`'s new `buf *messageBuffer` parameter and `process()`'s
+`keepaliveMarker` type-switch branch by hand, for the same reason as T0-1 (`stream.go` is the file
+most likely to shift underneath a line-based patch). See the PATCHES.md T0-3 entry for the full
+reasoning on the flush-ordering guarantee and the full-channel drop decision, and
+`internal/source/postgres/ack.go`'s `AckManager.IdleAdvance` (`highestSeen`/`idleTrusted`) for the
+application-side defence-in-depth added alongside it.
+
 ## **Recommended Alternative: Use a Fork**
 
 If you find yourself frequently updating this dependency, the most sustainable approach is to:

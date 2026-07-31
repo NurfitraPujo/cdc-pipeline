@@ -66,7 +66,16 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	}
 
 	// Currently only postgres is supported, but could be a registry too
-	src := postgres.NewPostgresSource(sourceID)
+	// WithKV wires the same NATS KV bucket the engine uses for checkpoints
+	// (f.KV) and this pipeline's ID: without it, PostgresSource.pipelineID
+	// stays "" and every gauge it exports (cdc_source_slot_lag_bytes,
+	// cdc_source_pending_lsns, cdc_source_ack_watermark,
+	// cdc_source_slot_lag_probe_last_success_timestamp_seconds) carries an
+	// empty pipeline label, breaking dashboards/alerts keyed on it, and
+	// persistWatermark short-circuits (kv == nil check), so the
+	// SourceWatermarkKey twin the WI-7 bake period depends on is never
+	// written. See OPS-1.
+	src := postgres.NewPostgresSource(sourceID).WithKV(id, f.KV)
 
 	// Create a sink and subscriber for each configured sink
 	var activeSinkIDs []string
