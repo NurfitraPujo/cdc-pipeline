@@ -10,6 +10,7 @@ import (
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine/mocks"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,8 +109,8 @@ func TestPipeline_DynamicTablesChan_GoroutineExitsOnShutdown(t *testing.T) {
 	// Producer.Run blocks until ctx is cancelled: the source's Start returns a
 	// msgChan/ackChan pair that never delivers anything.
 	srcMsgChan := make(chan []protocol.Message)
-	ackChan := make(chan struct{})
-	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
+	ackChan := make(chan source.SourceAck)
+	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
 
 	producer := NewProducer(pipelineID, "nats://localhost:4222", cfg, mockSrc, nil, mockSub, mockKV, srcCfg)
 
@@ -188,8 +189,8 @@ func TestPipeline_Drain_FinishesWithoutCancel(t *testing.T) {
 	mockKV.EXPECT().Get(gomock.Any()).Return(nil, errors.New("no checkpoint")).AnyTimes()
 
 	srcMsgChan := make(chan []protocol.Message)
-	ackChan := make(chan struct{})
-	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
+	ackChan := make(chan source.SourceAck)
+	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
 
 	consumerMsgChan := make(chan *message.Message, 1)
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return((<-chan *message.Message)(consumerMsgChan), nil).AnyTimes()

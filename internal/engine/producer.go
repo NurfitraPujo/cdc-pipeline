@@ -144,7 +144,15 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	// 0. Recovery: Check KV for frozen tables and restore state
 	p.recoverEvoStates(ctx)
 
-	msgChan, ackChan, err := p.source.Start(sourceCtx, srcConfig, checkpoint)
+	// TODO(WI-5): ackers should be derived from the sinks actually wired
+	// into this pipeline's consumers (p.config.Sinks), gating the source's
+	// AckManager on every one of them. Passed through as-is for now; WI-5
+	// is where the engine starts forwarding typed, LSN-carrying acks that
+	// make this parameter meaningful.
+	p.mu.RLock()
+	ackers := append([]string(nil), p.config.Sinks...)
+	p.mu.RUnlock()
+	msgChan, ackChan, err := p.source.Start(sourceCtx, srcConfig, checkpoint, ackers)
 	if err != nil {
 		return 0, fmt.Errorf("failed to start source: %w", err)
 	}
@@ -180,9 +188,15 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				p.handleSchemaAck(ctx, ack)
 				ackMsg.Ack()
 			} else if ack.Op == "ack" {
-				// Record ack: Propagate to source handler
+				// TODO(WI-5): this is still the legacy anonymous-ack path;
+				// it carries no LSN or sink identity. WI-5 replaces it with
+				// decoding protocol.OpRecordAck into a source.SourceAck
+				// (with the real SinkID and LSNs) and a blocking, ctx-bound
+				// send (deleting the `default:` drop below). Kept as a
+				// best-effort forward here purely so the interface change
+				// compiles.
 				select {
-				case ackChan <- struct{}{}:
+				case ackChan <- source.SourceAck{}:
 				case <-ctx.Done():
 					return lastLSN, nil
 				default:

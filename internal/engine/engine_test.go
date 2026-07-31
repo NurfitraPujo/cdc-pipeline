@@ -9,6 +9,7 @@ import (
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine/mocks"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
@@ -174,7 +175,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 	cp := protocol.Checkpoint{}
 
 	t.Run("Source Start Failure", func(t *testing.T) {
-		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil, errors.New("pg failed"))
+		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil, errors.New("pg failed"))
 
 		_, err := p.Run(context.Background(), srcCfg, cp)
 		assert.Error(t, err)
@@ -186,8 +187,8 @@ func TestProducer_FailurePaths(t *testing.T) {
 		defer cancel()
 
 		srcMsgChan := make(chan []protocol.Message, 1)
-		ackChan := make(chan struct{}, 1)
-		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil)
+		ackChan := make(chan source.SourceAck, 1)
+		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil)
 
 		srcMsgChan <- []protocol.Message{{SourceID: "s1", Table: "t1", Op: protocol.OpInsert}}
 
@@ -647,7 +648,7 @@ type stubSink struct {
 	applySchemaCalled bool
 }
 
-func (s *stubSink) Name() string                                              { return "stub-sink" }
+func (s *stubSink) Name() string { return "stub-sink" }
 func (s *stubSink) BatchUpload(ctx context.Context, msgs []protocol.Message) error {
 	return nil // not used in this test
 }

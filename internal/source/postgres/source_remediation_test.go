@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 )
 
 // stubConnector is a no-op cdc.Connector used by the restart regression
@@ -119,12 +120,12 @@ func primeSourceState(t *testing.T, s *PostgresSource, factory *stubFactory) {
 	t.Helper()
 	s.config = validSourceConfig()
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan struct{}, 1000)
+	s.ackChan = make(chan source.SourceAck, 1000)
 	s.lsnChan = make(chan uint64, 1000)
 	ctx, cancel := context.WithCancel(context.Background())
 	s.ctx = ctx
 	s.cancel = cancel
-	s.ackMgr = NewAckManager()
+	s.ackMgr = NewAckManager(nil)
 
 	conn, err := factory.Build(context.Background(), config.Config{}, nil)
 	require.NoError(t, err)
@@ -228,8 +229,8 @@ func TestRestartWithNewTables_NoDoubleClose(t *testing.T) {
 	// the test binary.
 	restartErr := runWithoutPanic(func() {
 		// First restart.
-		if err := s.RestartWithNewTables(context.Background(), []string{"public.t2"}); err != nil {
-			t.Fatalf("first RestartWithNewTables failed: %v", err)
+		if _, _, err := s.Restart(context.Background(), []string{"public.t2"}); err != nil {
+			t.Fatalf("first Restart failed: %v", err)
 		}
 
 		// Sanity: a new connector must have been built, and the old
@@ -243,8 +244,8 @@ func TestRestartWithNewTables_NoDoubleClose(t *testing.T) {
 		assert.GreaterOrEqual(t, firstStub.closeCount.Load(), int32(1), "old connector must be Closed")
 
 		// Second restart in rapid succession.
-		if err := s.RestartWithNewTables(context.Background(), []string{"public.t3"}); err != nil {
-			t.Fatalf("second RestartWithNewTables failed: %v", err)
+		if _, _, err := s.Restart(context.Background(), []string{"public.t3"}); err != nil {
+			t.Fatalf("second Restart failed: %v", err)
 		}
 		assert.Equal(t, 3, factory.Calls(), "factory must be called for the second restart as well")
 	})
@@ -285,11 +286,11 @@ func TestRestartWithNewTables_StaticMetricPort(t *testing.T) {
 	port := s.resolveMetricPort()
 	assert.Equal(t, 31999, port, "first Start must use the configured static port")
 
-	require.NoError(t, s.RestartWithNewTables(context.Background(), []string{"public.t2"}))
+	func() { _, _, err := s.Restart(context.Background(), []string{"public.t2"}); require.NoError(t, err) }()
 	assert.Equal(t, 31999, s.resolveMetricPort(),
 		"first restart must keep the configured static port (NOT increment)")
 
-	require.NoError(t, s.RestartWithNewTables(context.Background(), []string{"public.t3"}))
+	func() { _, _, err := s.Restart(context.Background(), []string{"public.t3"}); require.NoError(t, err) }()
 	assert.Equal(t, 31999, s.resolveMetricPort(),
 		"second restart must keep the configured static port (NOT increment)")
 
@@ -322,8 +323,8 @@ func TestSourceRestartTotal_IncrementsOnRestart(t *testing.T) {
 	s.SetConnectorFactory(factory.Build)
 	primeSourceState(t, s, factory)
 
-	require.NoError(t, s.RestartWithNewTables(context.Background(), []string{"public.t2"}))
-	require.NoError(t, s.RestartWithNewTables(context.Background(), []string{"public.t3"}))
+	func() { _, _, err := s.Restart(context.Background(), []string{"public.t2"}); require.NoError(t, err) }()
+	func() { _, _, err := s.Restart(context.Background(), []string{"public.t3"}); require.NoError(t, err) }()
 
 	after := testutil.ToFloat64(sourceRestartTotal)
 	assert.Equal(t, float64(2), after-before,
@@ -346,10 +347,10 @@ func TestStop_WaitsForBackgroundGoroutines(t *testing.T) {
 	// start (and what context they listen on).
 	s.config = validSourceConfig()
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan struct{}, 1000)
+	s.ackChan = make(chan source.SourceAck, 1000)
 	s.lsnChan = make(chan uint64, 1000)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.ackMgr = NewAckManager()
+	s.ackMgr = NewAckManager(nil)
 	conn, err := factory.Build(context.Background(), config.Config{}, nil)
 	require.NoError(t, err)
 	s.connector = conn

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	cdc "github.com/Trendyol/go-pq-cdc"
 	"github.com/Trendyol/go-pq-cdc/config"
 	"github.com/Trendyol/go-pq-cdc/pq"
@@ -105,10 +106,16 @@ type PostgresSource struct {
 	// has been durably published downstream". The replication callback
 	// blocks on ackChan (instead of auto-acking) so the slot LSN never
 	// advances past an unconfirmed event.
-	ackChan chan struct{}
+	ackChan chan source.SourceAck
 	// lsnChan is the internal channel used by the replication callback to
 	// hand observed LSNs to the coordinator goroutine for watermark
 	// tracking. It is not exposed to callers.
+	//
+	// TODO(WI-4): lsnChan is the "closed loop" the plan retires — the
+	// coordinator's confirms should come exclusively from the engine's
+	// SourceAck channel (s.ackChan), not from the replication callback
+	// itself. Left in place for this WI so the handler/coordinator keep
+	// compiling; WI-4 deletes it entirely.
 	lsnChan chan uint64
 	// ackMgr owns the in-memory checkpoint watermark. The coordinator
 	// goroutine is its sole Confirmer; the replication callback is its
@@ -121,7 +128,7 @@ func NewPostgresSource(name string) *PostgresSource {
 	return &PostgresSource{
 		name:             name,
 		oidCache:         make(map[uint32]string),
-		ackMgr:           NewAckManager(),
+		ackMgr:           NewAckManager(nil),
 		connectorFactory: defaultConnectorFactory,
 	}
 }
@@ -307,6 +314,9 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 			// producer managed to publish before our snapshot is consumed
 			// here (otherwise the next event would re-read it and the
 			// coordinator would see a stale watermark).
+			// TODO(WI-4): opportunistic drain of the typed ack channel; WI-4
+			// deletes this entirely once the coordinator owns ackChan
+			// exclusively.
 			select {
 			case <-s.ackChan:
 			default:
@@ -323,20 +333,21 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 	}
 }
 
-func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint) (<-chan []protocol.Message, chan<- struct{}, error) {
+func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint, ackers []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
 	sourceCtx, sourceCancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.config = srcConfig
 	s.cancel = sourceCancel
 	s.ctx = sourceCtx
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan struct{}, 1000)
+	s.ackChan = make(chan source.SourceAck, 1000)
 	s.lsnChan = make(chan uint64, 1000)
 	// Reset the AckManager so each Start cycle begins with a fresh
-	// watermark. The watermark is hydrated from the persisted checkpoint
-	// before the coordinator observes any new LSNs so resumes continue
-	// from the last durable position.
-	s.ackMgr = NewAckManager()
+	// watermark, gated on confirmation from every sink ID in ackers. The
+	// watermark is hydrated from the persisted checkpoint before the
+	// coordinator observes any new LSNs so resumes continue from the
+	// last durable position.
+	s.ackMgr = NewAckManager(ackers)
 	s.lastCheckpoint = checkpoint
 	if checkpoint.IngressLSN > 0 {
 		// Hydrate fast-forwards the watermark past the persisted
@@ -507,7 +518,13 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.ackMgr.Confirm(lsn)
+			// TODO(WI-4): this is the "closed loop" the plan retires — a
+			// bare LSN handed straight back from the replication callback,
+			// with no sinkID, so it only satisfies AckManager.required when
+			// Start was called with no ackers (a vacuous requirement).
+			// WI-4 removes lsnChan and confirms exclusively from s.ackChan
+			// (via SourceAck.SinkID), which is the real downstream signal.
+			s.ackMgr.Confirm(lsn, "")
 		case <-ticker.C:
 			wm := s.ackMgr.Watermark()
 			if wm == 0 || wm == lastFlushedWatermark {
@@ -695,7 +712,20 @@ func (s *PostgresSource) Stop() error {
 	return nil
 }
 
-func (s *PostgresSource) RestartWithNewTables(ctx context.Context, newTables []string) error {
+// Restart replaces the broken in-place RestartWithNewTables. It currently
+// keeps the pre-existing tear-down/rebuild body (renamed and reshaped to
+// return the source.Source-interface channel pair) but does NOT yet
+// implement the rebind protocol specified in plan §3 WI-6: the ack
+// coordinator is not respawned, the returned ackChan is the OLD (already
+// orphaned, per the plan's own diagnosis) channel rather than a fresh one,
+// and callers get back channels that are not wired into a live producer
+// rebind loop.
+//
+// TODO(WI-6): implement the shared startSession(...) extraction, respawn
+// runAckCoordinator against the new session, hydrate the new coordinator
+// from the live (not reconstructed) AckManager, and give the caller a
+// genuinely fresh ackChan. Tracked in plan §3 WI-6 / §7 Q5.
+func (s *PostgresSource) Restart(ctx context.Context, newTables []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
 	// T1-25: Bump the restart counter up front so that an early failure
 	// (e.g. invalid cfg) is still visible to operators. The counter is
 	// package-level so a single Prometheus scrape covers all sources.
@@ -800,7 +830,7 @@ func (s *PostgresSource) RestartWithNewTables(ctx context.Context, newTables []s
 	// factory so tests can stub the real cdc.NewConnector.
 	conn, err := s.connectorFactory(setupCtx, cfg, handler)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	s.connector = conn
 
@@ -830,7 +860,7 @@ func (s *PostgresSource) RestartWithNewTables(ctx context.Context, newTables []s
 		s.startConnector(conn, ctxWithCancel, s.lastCheckpoint, &mu, &msgs, knownTables, triggerFlush, batchWait, discoveryInterval, srcConfigCopy)
 	}()
 
-	return nil
+	return s.msgChan, s.ackChan, nil
 }
 
 func (s *PostgresSource) AlterPublication(ctx context.Context, tableName string) error {
