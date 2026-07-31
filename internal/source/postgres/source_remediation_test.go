@@ -64,22 +64,46 @@ func (s *stubConnector) GetConfig() *config.Config                     { return 
 func (s *stubConnector) SetMetricCollectors(_ ...prometheus.Collector) {}
 func (s *stubConnector) AddRelation(_ *format.Relation)                {}
 
-// stubFactory produces fresh stubConnector instances per invocation.
+// stubFactory produces fresh stubConnector instances per invocation. It
+// also captures the config.Config and replication.ListenerFunc handed to
+// it, so WI-4 tests can drive the real handler built by
+// PostgresSource.createHandler and assert on the exact config Start built
+// (config.Config is non-comparable once it holds a func field — B4 — so
+// callers must assert individual fields, never whole-struct equality).
 type stubFactory struct {
-	mu      sync.Mutex
-	calls   int
-	current *stubConnector
+	mu         sync.Mutex
+	calls      int
+	current    *stubConnector
+	handler    replication.ListenerFunc
+	lastConfig config.Config
 }
 
 func newStubFactory() *stubFactory { return &stubFactory{} }
 
-func (f *stubFactory) Build(_ context.Context, _ config.Config, _ replication.ListenerFunc) (cdc.Connector, error) {
+func (f *stubFactory) Build(_ context.Context, cfg config.Config, h replication.ListenerFunc) (cdc.Connector, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.handler = h
+	f.lastConfig = cfg
 	conn := newStubConnector()
 	f.current = conn
 	return conn, nil
+}
+
+// Handler returns the replication.ListenerFunc most recently passed to
+// Build, i.e. the actual handler produced by PostgresSource.createHandler.
+func (f *stubFactory) Handler() replication.ListenerFunc {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handler
+}
+
+// LastConfig returns the config.Config most recently passed to Build.
+func (f *stubFactory) LastConfig() config.Config {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastConfig
 }
 
 func (f *stubFactory) Last() *stubConnector {
@@ -120,8 +144,7 @@ func primeSourceState(t *testing.T, s *PostgresSource, factory *stubFactory) {
 	t.Helper()
 	s.config = validSourceConfig()
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan source.SourceAck, 1000)
-	s.lsnChan = make(chan uint64, 1000)
+	s.ackChan = make(chan source.SourceAck, 1024)
 	ctx, cancel := context.WithCancel(context.Background())
 	s.ctx = ctx
 	s.cancel = cancel
@@ -239,7 +262,11 @@ func TestRestartWithNewTables_NoDoubleClose(t *testing.T) {
 		assert.Equal(t, 2, factory.Calls(), "factory must be called once per restart (initial + first restart)")
 		require.NotNil(t, factory.Last(), "factory must have produced a connector")
 		assert.NotEqual(t, originalMsgChan, s.msgChan, "RestartWithNewTables must allocate a new msgChan")
-		assert.NotEqual(t, firstStub, factory.Last(), "the connector should be a fresh instance")
+		// Compare POINTERS, not values. assert.NotEqual deep-equals the
+		// struct, which races the new session's conn.Start bumping
+		// startCount inside it — an intermittent -race failure unrelated
+		// to what this assertion is actually checking (identity).
+		assert.False(t, firstStub == factory.Last(), "the connector should be a fresh instance")
 		require.NotNil(t, firstStub, "firstStub must be set from primeSourceState")
 		assert.GreaterOrEqual(t, firstStub.closeCount.Load(), int32(1), "old connector must be Closed")
 
@@ -347,8 +374,7 @@ func TestStop_WaitsForBackgroundGoroutines(t *testing.T) {
 	// start (and what context they listen on).
 	s.config = validSourceConfig()
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan source.SourceAck, 1000)
-	s.lsnChan = make(chan uint64, 1000)
+	s.ackChan = make(chan source.SourceAck, 1024)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.ackMgr = NewAckManager(nil)
 	conn, err := factory.Build(context.Background(), config.Config{}, nil)
@@ -473,4 +499,218 @@ func TestUpdateXLogPos_PropagatesConnectorError(t *testing.T) {
 		s := &PostgresSource{}
 		assert.NoError(t, s.UpdateXLogPos(context.Background(), 1))
 	})
+}
+
+// drainMsgChan drains batches off ch in the background until the returned
+// stop function is called, or the channel closes. Tests that feed events
+// through a live handler need this because triggerFlush's send blocks
+// (msgChan has capacity 1) if nothing is consuming.
+func drainMsgChan(ch <-chan []protocol.Message) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// TestHandler_NeverAcksOrAdvances_UntilCoordinatorConfirmed is plan 01a
+// test 6, the headline unit-level proof of the whole plan: the handler
+// must never call lc.Ack (deleted at all 8 former call sites) and the
+// slot must never advance until runAckCoordinator receives a matching
+// SourceAck from every required sink.
+func TestHandler_NeverAcksOrAdvances_UntilCoordinatorConfirmed(t *testing.T) {
+	s := NewPostgresSource("wi4-handler-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+
+	cfg := validSourceConfig()
+	cfg.Tables = []string{"public.t1"}
+
+	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
+	require.NoError(t, err)
+	defer s.Stop()
+
+	stopDrain := drainMsgChan(msgChan)
+	defer stopDrain()
+
+	handler := factory.Handler()
+	require.NotNil(t, handler, "the factory must have captured the real handler built by createHandler")
+
+	var ackCalls atomic.Int32
+	countingAck := func() error { ackCalls.Add(1); return nil }
+
+	// Filtered events: a Relation message and an Insert against a table
+	// that is not in knownTables. LSN 0 keeps them out of the watermark
+	// scan entirely (ObserveConfirmed only runs when lsn > 0) so they
+	// cannot confound the watermark assertions below; the point of this
+	// block is purely that they never call Ack.
+	handler(&replication.ListenerContext{Message: &format.Relation{OID: 1, Name: "t1"}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Update{TableName: "public.other", NewDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Delete{TableName: "public.other", OldDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Snapshot{EventType: "BEGIN", Table: "public.t1"}, Ack: countingAck, LSN: 0})
+
+	// Data events against the known table.
+	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
+	handler(&replication.ListenerContext{Message: &format.Update{TableName: "public.t1", NewDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 101})
+	handler(&replication.ListenerContext{Message: &format.Delete{TableName: "public.t1", OldDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 102})
+
+	assert.Equal(t, int32(0), ackCalls.Load(), "the handler must never call lc.Ack under ManualCommit")
+
+	conn := factory.Last()
+	// Let a couple of 500ms ticker cycles pass with no SourceAck received:
+	// the watermark must stay at zero and UpdateXLogPos must never fire.
+	time.Sleep(1100 * time.Millisecond)
+	assert.Equal(t, int32(0), ackCalls.Load(), "still zero Ack calls after ticker cycles")
+	assert.Equal(t, int32(0), conn.updateCount.Load(), "no SourceAck yet: the slot must not advance")
+
+	// Now the engine reports the durable write from the only required sink.
+	ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{100, 101, 102}}
+
+	require.Eventually(t, func() bool {
+		return conn.updateCount.Load() == 1
+	}, 3*time.Second, 20*time.Millisecond, "coordinator must issue exactly one UpdateXLogPos once fully confirmed")
+
+	assert.Equal(t, uint64(102), conn.lastUpdateLSN.Load(), "must advance to the fully-confirmed watermark")
+	assert.Equal(t, int32(1), conn.updateCount.Load(), "must not issue more than one UpdateXLogPos call")
+	assert.Equal(t, int32(0), ackCalls.Load(), "lc.Ack must never be called, even after the slot advances")
+}
+
+// TestHandler_PanicSafety_MuNotStranded is plan 01a test 7: a panic during
+// buildMessage's critical section must not strand the message-construction
+// mutex. Before the WI-4 split, a panic between an explicit Lock and
+// Unlock left mu held forever, wedging every subsequent event (including
+// the batch-wait ticker's triggerFlush, which shares the same mutex).
+func TestHandler_PanicSafety_MuNotStranded(t *testing.T) {
+	s := NewPostgresSource("wi4-panic-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+
+	cfg := validSourceConfig()
+	cfg.Tables = []string{"public.t1"}
+
+	msgChan, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+	require.NoError(t, err)
+	defer s.Stop()
+
+	handler := factory.Handler()
+	require.NotNil(t, handler)
+
+	// Force a panic inside buildMessage's Relation branch: a write to a
+	// nil map panics. This exercises the exact failure mode the plan
+	// describes (a panic between Lock and Unlock) because the write
+	// happens while mu (buildMessage's message-construction mutex) is
+	// held via the deferred Unlock.
+	s.oidMu.Lock()
+	s.oidCache = nil
+	s.oidMu.Unlock()
+
+	require.NotPanics(t, func() {
+		handler(&replication.ListenerContext{Message: &format.Relation{OID: 1, Name: "boom"}, Ack: func() error { return nil }, LSN: 0})
+	}, "the handler's own recover() must contain the panic")
+
+	// Restore a valid map so the subsequent, real event can proceed.
+	s.oidMu.Lock()
+	s.oidCache = make(map[uint32]string)
+	s.oidMu.Unlock()
+
+	got := make(chan []protocol.Message, 1)
+	go func() {
+		for batch := range msgChan {
+			select {
+			case got <- batch:
+			default:
+			}
+		}
+	}()
+
+	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: func() error { return nil }, LSN: 200})
+
+	select {
+	case batch := <-got:
+		require.Len(t, batch, 1)
+		assert.Equal(t, protocol.OpInsert, batch[0].Op)
+	case <-time.After(3 * time.Second):
+		t.Fatal("mu was stranded by the earlier panic: the subsequent event never flushed")
+	}
+}
+
+// TestCoordinator_AckIngestion_NoLossUnderBurst is plan 01a test 8: pushing
+// SourceAcks faster than the 500ms ticker must not lose any confirmation,
+// and the watermark must converge on the max fully-confirmed LSN.
+func TestCoordinator_AckIngestion_NoLossUnderBurst(t *testing.T) {
+	s := NewPostgresSource("wi4-burst-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+
+	cfg := validSourceConfig()
+	cfg.Tables = []string{"public.t1"}
+
+	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
+	require.NoError(t, err)
+	defer s.Stop()
+
+	stopDrain := drainMsgChan(msgChan)
+	defer stopDrain()
+
+	handler := factory.Handler()
+	require.NotNil(t, handler)
+
+	const n = 200
+	for i := 1; i <= n; i++ {
+		handler(&replication.ListenerContext{
+			Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"i": i}},
+			Ack:     func() error { return nil },
+			LSN:     pq.LSN(i),
+		})
+	}
+
+	// Push all acks in a tight burst, well before the next 500ms tick.
+	for i := 1; i <= n; i++ {
+		ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{uint64(i)}}
+	}
+
+	require.Eventually(t, func() bool {
+		return s.ackMgr.Watermark() == uint64(n)
+	}, 3*time.Second, 10*time.Millisecond, "watermark must reach the max fully-confirmed LSN with no ack loss")
+
+	conn := factory.Last()
+	require.Eventually(t, func() bool {
+		return conn.lastUpdateLSN.Load() == uint64(n)
+	}, 3*time.Second, 20*time.Millisecond, "the coordinator must eventually flush the max watermark to the connector")
+}
+
+// TestStart_SnapshotEnabledUnconditional is plan 01a test 10 (Critical 11,
+// source half): Snapshot.Enabled must be true even when
+// checkpoint.IngressLSN > 0 — the vendored LoadJob decides skip/resume/
+// fresh, not this config gate. Per blocker B4, config.Config is no longer
+// comparable (it holds a func field), so this asserts individual captured
+// fields rather than whole-struct equality.
+func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
+	s := NewPostgresSource("wi4-snapshot-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+
+	cfg := validSourceConfig()
+	checkpoint := protocol.Checkpoint{IngressLSN: 12345}
+
+	_, _, err := s.Start(context.Background(), cfg, checkpoint, nil)
+	require.NoError(t, err)
+	defer s.Stop()
+
+	got := factory.LastConfig()
+
+	assert.True(t, got.Snapshot.Enabled, "Snapshot.Enabled must be unconditional, not gated on checkpoint.IngressLSN")
+	assert.True(t, got.ManualCommit, "ManualCommit must be set so the coordinator is the sole slot-advance path")
+	assert.NotNil(t, got.KeepaliveFunc, "KeepaliveFunc must be wired to AckManager.IdleAdvance")
+	assert.Equal(t, pq.LSN(12345), got.StartLSN, "the StartLSN seed is WI-7's job to remove, not WI-4's")
 }

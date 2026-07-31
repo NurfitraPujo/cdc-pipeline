@@ -45,6 +45,16 @@ var sourceRestartTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "The total number of times a PostgresSource has been restarted with new tables",
 })
 
+// pendingLSNsGauge exports AckManager.PendingCount() per source. A
+// permanent non-zero value indicates the watermark is stalled: either a
+// downstream sink is not confirming, or a "ghost" entry exists (a Confirm
+// for an LSN that was never Observed) which pins the watermark and blocks
+// IdleAdvance forever. Full slot-lag alerting on top of this is WI-5a.
+var pendingLSNsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "cdc_source_pending_lsns",
+	Help: "Number of observed-or-confirmed LSNs not yet folded into the AckManager watermark",
+}, []string{"source"})
+
 // connectorFactoryFunc is the pluggable factory used by PostgresSource to
 // build a new cdc.Connector. The default implementation calls
 // cdc.NewConnector. Tests can swap in a stub via SetConnectorFactory to
@@ -102,21 +112,11 @@ type PostgresSource struct {
 	// Internal channels for goroutine communication
 	msgChan chan []protocol.Message
 	// ackChan is the public channel returned from Start. The engine sends
-	// struct{}{} on it to signal "the batch carrying the most recent LSN
-	// has been durably published downstream". The replication callback
-	// blocks on ackChan (instead of auto-acking) so the slot LSN never
-	// advances past an unconfirmed event.
+	// source.SourceAck{SinkID, LSNs} on it once a sink has durably written
+	// a batch of LSNs. runAckCoordinator is the SOLE reader: it is the only
+	// path that feeds AckManager.Confirm, which is what allows the
+	// watermark (and therefore the replication slot) to advance.
 	ackChan chan source.SourceAck
-	// lsnChan is the internal channel used by the replication callback to
-	// hand observed LSNs to the coordinator goroutine for watermark
-	// tracking. It is not exposed to callers.
-	//
-	// TODO(WI-4): lsnChan is the "closed loop" the plan retires — the
-	// coordinator's confirms should come exclusively from the engine's
-	// SourceAck channel (s.ackChan), not from the replication callback
-	// itself. Left in place for this WI so the handler/coordinator keep
-	// compiling; WI-4 deletes it entirely.
-	lsnChan chan uint64
 	// ackMgr owns the in-memory checkpoint watermark. The coordinator
 	// goroutine is its sole Confirmer; the replication callback is its
 	// sole Observer.
@@ -188,6 +188,149 @@ func (s *PostgresSource) Name() string {
 	return s.name
 }
 
+// handlerKind classifies what buildMessage did with a single replication
+// event, so the (unlocked) outer closure knows what follow-up action —
+// triggerFlush / AckManager bookkeeping — to take.
+type handlerKind int
+
+const (
+	// handlerKindFiltered covers every early-return branch: Relation
+	// messages, unmatched tables, non-data snapshot events, and any
+	// message type the switch below does not recognise. These self-ack
+	// through AckManager.ObserveConfirmed so they can never stall the
+	// watermark waiting on a downstream sink that will never see them.
+	handlerKindFiltered handlerKind = iota
+	// handlerKindData is an Insert/Update/Delete event appended to the
+	// pending batch; it must be Observe'd so the watermark waits for a
+	// matching downstream confirm before advancing past it.
+	handlerKindData
+	// handlerKindSnapshot is a snapshot data row appended to the pending
+	// batch with LSN zeroed. Snapshot rows are checkpointed by chunk, not
+	// by LSN, so they are deliberately never Observed.
+	handlerKindSnapshot
+)
+
+// handlerResult is buildMessage's report back to the outer, unlocked
+// closure. lsn is only meaningful for handlerKindFiltered/handlerKindData.
+type handlerResult struct {
+	kind handlerKind
+	lsn  uint64
+}
+
+// cacheRelation records an OID -> table-name mapping. It exists so the
+// write happens under a DEFERRED unlock: a nil-map assignment (or any other
+// panic) must not strand s.oidMu, which would deadlock every subsequent
+// handler invocation and silently wedge the source. Same reasoning as
+// buildMessage's own deferred unlock.
+func (s *PostgresSource) cacheRelation(oid uint32, name string) {
+	s.oidMu.Lock()
+	defer s.oidMu.Unlock()
+	// Deliberately NOT nil-guarded: the map is initialised in
+	// NewPostgresSource, and TestHandler_PanicSafety_MuNotStranded forces a
+	// nil map here precisely to prove that a panic under this lock is
+	// survivable. Adding a guard would make that test vacuous.
+	s.oidCache[oid] = name
+}
+
+// lookupRelationName resolves an OID to a cached table name under a
+// deferred read-unlock, for the same panic-safety reason as cacheRelation.
+func (s *PostgresSource) lookupRelationName(oid uint32) string {
+	s.oidMu.RLock()
+	defer s.oidMu.RUnlock()
+	return s.oidCache[oid]
+}
+
+// buildMessage performs the entire message-construction critical section
+// under mu, guarded by a deferred Unlock so that a panic anywhere inside
+// (sanitizePayload, the OID cache, message construction) unwinds through
+// the deferred Unlock before it reaches the outer closure's recover().
+// Before this split, a panic between an explicit Lock and Unlock left mu
+// permanently held, wedging every subsequent event (including the
+// batch-wait ticker's triggerFlush, which blocks on the same mutex).
+//
+// buildMessage must never perform a blocking operation (triggerFlush,
+// AckManager calls, channel sends) — those happen in the caller, after
+// this method returns and mu has been released.
+func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool) handlerResult {
+	mu.Lock()
+	defer mu.Unlock()
+
+	switch msg := lc.Message.(type) {
+	case *format.Relation:
+		s.cacheRelation(msg.OID, msg.Name)
+		log.Info().Str("table", msg.Name).Uint32("oid", msg.OID).Msg("PostgresSource: Received relation")
+		return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+
+	case *format.Insert:
+		tableName := msg.TableName
+		if tableName == "" {
+			tableName = s.lookupRelationName(msg.OID)
+		}
+
+		cleanName := strings.TrimPrefix(tableName, "public.")
+		if tableName == "" || !knownTables[cleanName] {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		sani := sanitizePayload(msg.Decoded)
+		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		*msgs = append(*msgs, m)
+		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
+
+	case *format.Update:
+		tableName := msg.TableName
+		if tableName == "" {
+			tableName = s.lookupRelationName(msg.OID)
+		}
+
+		cleanName := strings.TrimPrefix(tableName, "public.")
+		if tableName == "" || !knownTables[cleanName] {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		sani := sanitizePayload(msg.NewDecoded)
+		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		*msgs = append(*msgs, m)
+		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
+
+	case *format.Snapshot:
+		if msg.EventType != format.SnapshotEventTypeData {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		tableName := msg.Table
+		cleanName := strings.TrimPrefix(tableName, "public.")
+		if tableName == "" || !knownTables[cleanName] {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		sani := sanitizePayload(msg.Data)
+		// Snapshot rows bypass the watermark entirely: LSN is zeroed on
+		// the emitted message and this kind is never Observed. Their
+		// durability story is JetStream + the vendored chunk-job state,
+		// not the replication watermark.
+		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: 0, UUID: uuid.New().String()}
+		*msgs = append(*msgs, m)
+		return handlerResult{kind: handlerKindSnapshot}
+
+	case *format.Delete:
+		tableName := msg.TableName
+		if tableName == "" {
+			tableName = s.lookupRelationName(msg.OID)
+		}
+
+		cleanName := strings.TrimPrefix(tableName, "public.")
+		if tableName == "" || !knownTables[cleanName] {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		sani := sanitizePayload(msg.OldDecoded)
+		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		*msgs = append(*msgs, m)
+		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
+	}
+
+	// Unmatched message type (e.g. Begin/Commit/Truncate): treat exactly
+	// like a filtered event so it self-acks through AckManager rather
+	// than stalling the watermark.
+	return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+}
+
 func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) func(lc *replication.ListenerContext) {
 	return func(lc *replication.ListenerContext) {
 		defer func() {
@@ -196,139 +339,36 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 			}
 		}()
 
-		mu.Lock()
-		var m protocol.Message
-		var tableName string
+		// buildMessage takes and releases mu internally (deferred Unlock,
+		// so a panic inside cannot strand the lock). Everything below runs
+		// unlocked: triggerFlush and the AckManager calls must never run
+		// while mu is held, since triggerFlush itself takes mu again and
+		// nothing here may block the batch-wait ticker.
+		res := s.buildMessage(lc, mu, msgs, knownTables)
 
-		switch msg := lc.Message.(type) {
-		case *format.Relation:
-			s.oidMu.Lock()
-			s.oidCache[msg.OID] = msg.Name
-			s.oidMu.Unlock()
-			log.Info().Str("table", msg.Name).Uint32("oid", msg.OID).Msg("PostgresSource: Received relation")
-			mu.Unlock()
-			lc.Ack()
-			return
+		switch res.kind {
+		case handlerKindData:
+			triggerFlush()
+			// Register the LSN with the AckManager before waiting for the
+			// downstream pipeline to confirm publication. This guarantees
+			// the watermark can never advance past an LSN the replication
+			// stream has produced but no sink has yet acknowledged,
+			// preserving the at-least-once contract. There is no lc.Ack()
+			// call anywhere in this handler any more: under ManualCommit
+			// the only thing that may advance the slot is
+			// runAckCoordinator's UpdateXLogPos call, fed exclusively by
+			// s.ackChan (see Start/runAckCoordinator).
+			s.ackMgr.Observe(res.lsn)
 
-		case *format.Insert:
-			tableName = msg.TableName
-			if tableName == "" {
-				s.oidMu.RLock()
-				tableName = s.oidCache[msg.OID]
-				s.oidMu.RUnlock()
-			}
-			
-			cleanName := strings.TrimPrefix(tableName, "public.")
-			if tableName == "" || !knownTables[cleanName] {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.Decoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
-
-		case *format.Update:
-			tableName = msg.TableName
-			if tableName == "" {
-				s.oidMu.RLock()
-				tableName = s.oidCache[msg.OID]
-				s.oidMu.RUnlock()
-			}
-
-			cleanName := strings.TrimPrefix(tableName, "public.")
-			if tableName == "" || !knownTables[cleanName] {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.NewDecoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
-
-		case *format.Snapshot:
-			if msg.EventType != format.SnapshotEventTypeData {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			tableName = msg.Table
-			cleanName := strings.TrimPrefix(tableName, "public.")
-			if tableName == "" || !knownTables[cleanName] {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.Data)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: uint64(msg.LSN), UUID: uuid.New().String()}
-
-		case *format.Delete:
-			tableName = msg.TableName
-			if tableName == "" {
-				s.oidMu.RLock()
-				tableName = s.oidCache[msg.OID]
-				s.oidMu.RUnlock()
-			}
-
-			cleanName := strings.TrimPrefix(tableName, "public.")
-			if tableName == "" || !knownTables[cleanName] {
-				mu.Unlock()
-				lc.Ack()
-				return
-			}
-			sani := sanitizePayload(msg.OldDecoded)
-			m = protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
-		}
-
-		if m.SourceID != "" {
-			*msgs = append(*msgs, m)
-			mu.Unlock()
-
+		case handlerKindSnapshot:
+			// Snapshot rows are excluded from the LSN/watermark machinery
+			// entirely (checkpointed by chunk, not by LSN) — no Observe.
 			triggerFlush()
 
-			// Register the LSN with the in-memory checkpoint before
-			// waiting for the downstream pipeline to confirm publication.
-			// This guarantees the watermark can never advance past an LSN
-			// the replication stream has produced but the consumer has
-			// not yet acknowledged, preserving the at-least-once contract.
-			lsn := uint64(lc.LSN)
-			s.ackMgr.Observe(lsn)
-
-			// Hand the observed LSN to the coordinator goroutine for
-			// tracking. Use a non-blocking send: if the coordinator is
-			// temporarily backed up the callback must not stall message
-			// processing, and the AckManager (already updated above) is
-			// the authoritative source of truth for the watermark.
-			select {
-			case s.lsnChan <- lsn:
-			default:
+		case handlerKindFiltered:
+			if res.lsn > 0 {
+				s.ackMgr.ObserveConfirmed(res.lsn)
 			}
-
-			// Non-blocking ack: always advance the replication stream so
-			// the next event is delivered promptly, and let the
-			// watermark coordinator (runAckCoordinator) own the slot
-			// advancement via UpdateXLogPos. The watermark only advances
-			// once the downstream pipeline has confirmed publication, so
-			// the slot never gets told to fast-forward past unconfirmed
-			// events.
-			//
-			// We still drain s.ackChan opportunistically so any signal the
-			// producer managed to publish before our snapshot is consumed
-			// here (otherwise the next event would re-read it and the
-			// coordinator would see a stale watermark).
-			// TODO(WI-4): opportunistic drain of the typed ack channel; WI-4
-			// deletes this entirely once the coordinator owns ackChan
-			// exclusively.
-			select {
-			case <-s.ackChan:
-			default:
-			}
-			lc.Ack()
-		} else {
-			mu.Unlock()
-			select {
-			case <-s.ackChan:
-			default:
-			}
-			lc.Ack()
 		}
 	}
 }
@@ -340,8 +380,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	s.cancel = sourceCancel
 	s.ctx = sourceCtx
 	s.msgChan = make(chan []protocol.Message, 1)
-	s.ackChan = make(chan source.SourceAck, 1000)
-	s.lsnChan = make(chan uint64, 1000)
+	s.ackChan = make(chan source.SourceAck, 1024)
 	// Reset the AckManager so each Start cycle begins with a fresh
 	// watermark, gated on confirmation from every sink ID in ackers. The
 	// watermark is hydrated from the persisted checkpoint before the
@@ -421,15 +460,37 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			Operations: publication.Operations{publication.OperationInsert, publication.OperationUpdate, publication.OperationDelete},
 		},
 		Snapshot: config.SnapshotConfig{
-			Enabled:           checkpoint.IngressLSN == 0,
+			// Critical 11 (source half): Enabled is now unconditional —
+			// no longer keyed on checkpoint.IngressLSN == 0. The vendored
+			// LoadJob (connector.go) is what decides skip/resume/fresh
+			// against the cdc_snapshot_job/cdc_snapshot_chunks state, so
+			// gating it here just prevented resume from ever being tried
+			// after the first snapshot chunk had been published.
+			Enabled:           true,
 			Mode:              config.SnapshotModeInitial,
 			ChunkSize:         8000,
 			ClaimTimeout:      30 * time.Second,
 			HeartbeatInterval: 5 * time.Second,
 		},
 		Metric: config.MetricConfig{Port: s.resolveMetricPort()},
+		// ManualCommit moves position ownership entirely to
+		// runAckCoordinator's UpdateXLogPos call: neither lc.Ack() (a
+		// no-op call site that no longer exists) nor keepalives may
+		// advance the slot any more. This MUST land together with the
+		// coordinator rewrite below — enabling ManualCommit without a
+		// coordinator that actually confirms real SourceAck.SinkID values
+		// freezes the slot on the very first event.
+		ManualCommit: true,
+		// KeepaliveFunc reinstates keepalive-driven advancement for idle
+		// streams (WAL-bloat protection) via the ONLY sanctioned
+		// fast-forward, AckManager.IdleAdvance, which refuses whenever
+		// anything is still pending confirmation.
+		KeepaliveFunc: func(lsn pq.LSN) { s.ackMgr.IdleAdvance(uint64(lsn)) },
 	}
 
+	// WI-7 (not this WI) removes the StartLSN override entirely in favour
+	// of the slot's own confirmed_flush_lsn as the sole resume authority.
+	// Do NOT remove it here.
 	if checkpoint.IngressLSN > 0 {
 		cfg.StartLSN = pq.LSN(checkpoint.IngressLSN)
 	}
@@ -467,8 +528,10 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	}()
 
 	// Spawn the ack coordinator goroutine. It is the SOLE Confirmer of the
-	// AckManager: it receives LSNs handed off by the replication callback
-	// over s.lsnChan and confirms them, allowing the watermark to advance.
+	// AckManager: it receives SourceAcks from the engine over s.ackChan —
+	// each naming the sink that durably wrote a set of LSNs — and confirms
+	// them, allowing the watermark to advance only once every required sink
+	// has reported.
 	// It also periodically flushes the current watermark back to PostgreSQL
 	// via SendStandbyStatusUpdate so the slot LSN stays in sync with the
 	// actual progress. The ticker is a KEEPALIVE ONLY: it must never
@@ -483,21 +546,28 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	return s.msgChan, s.ackChan, nil
 }
 
+// updateXLogPosTimeout bounds the network round trip of the coordinator's
+// UpdateXLogPos call. See the B2 note in plan 01a: the vendored
+// SendStandbyStatusUpdate discards its context argument, so this timeout
+// only bounds how long the coordinator itself waits before moving on to
+// the next tick — it does not abort the underlying socket write, which may
+// still complete afterward.
+const updateXLogPosTimeout = 5 * time.Second
+
 // runAckCoordinator is the long-lived goroutine that owns the AckManager
-// watermark. It does two things, and only two things:
+// watermark, and the ONLY call site that may advance the PostgreSQL
+// replication slot. It does two things, and only two things:
 //
-//  1. Consume LSNs observed by the replication callback from s.lsnChan and
-//     confirm them with the AckManager. Confirming may advance the
+//  1. Consume source.SourceAck values published by the engine (one sink's
+//     durable write of a batch of LSNs) from s.ackChan and Confirm every
+//     LSN in the batch against the AckManager. Confirming may advance the
 //     contiguous watermark; the watermark is the single source of truth
-//     that downstream callers (PostgreSQL SendStandbyStatusUpdate) should
-//     use to advance the replication slot.
+//     for how far it is safe to advance the replication slot.
 //
-//  2. Every 500ms, flush the current watermark back to PostgreSQL via
-//     connector.UpdateXLogPos. This is purely a keepalive / liveness
-//     signal: the ticker MUST NOT auto-advance the watermark on its own.
-//     Auto-advancing the watermark would silently drop any in-flight batch
-//     whose ack has not yet been received from the engine, re-introducing
-//     the data loss bug fixed in T0-1.
+//  2. Every 500ms, if the watermark has advanced since the last flush,
+//     push it to PostgreSQL via connector.UpdateXLogPos. A failed or
+//     timed-out call is retried on the next tick; the watermark itself is
+//     never rolled back, so nothing is lost by retrying.
 func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 	const keepaliveInterval = 500 * time.Millisecond
 	ticker := time.NewTicker(keepaliveInterval)
@@ -514,36 +584,68 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case lsn, ok := <-s.lsnChan:
+		case ack, ok := <-s.ackChan:
 			if !ok {
 				return
 			}
-			// TODO(WI-4): this is the "closed loop" the plan retires — a
-			// bare LSN handed straight back from the replication callback,
-			// with no sinkID, so it only satisfies AckManager.required when
-			// Start was called with no ackers (a vacuous requirement).
-			// WI-4 removes lsnChan and confirms exclusively from s.ackChan
-			// (via SourceAck.SinkID), which is the real downstream signal.
-			s.ackMgr.Confirm(lsn, "")
+			for _, lsn := range ack.LSNs {
+				s.ackMgr.Confirm(lsn, ack.SinkID)
+			}
 		case <-ticker.C:
+			// Export the pending-LSN gauge on every tick regardless of
+			// whether the watermark advanced: a permanently non-zero
+			// value (a "ghost" Confirm for an LSN never Observed, or a
+			// downed sink) is exactly the silently-frozen-slot condition
+			// this metric exists to surface.
+			pendingLSNsGauge.WithLabelValues(s.name).Set(float64(s.ackMgr.PendingCount()))
+
 			wm := s.ackMgr.Watermark()
 			if wm == 0 || wm == lastFlushedWatermark {
 				continue
 			}
+
+			// Snapshot the connector pointer under RLock, then release
+			// the lock BEFORE the network call. Holding s.mu/RLock across
+			// UpdateXLogPos would let a hung standby-status write stall
+			// this goroutine indefinitely, which (once the producer's
+			// ackChan send is blocking, per WI-5) applies backpressure
+			// all the way back through AcksTopic into the consumer.
 			s.mu.RLock()
 			conn := s.connector
 			s.mu.RUnlock()
 			if conn == nil {
 				continue
 			}
-			// T0-2: the vendored UpdateXLogPos now takes a ctx and returns an error.
-			// TODO(WI-4): replace with the bounded, retry-on-next-tick coordinator write
-			// (do not advance lastFlushedWatermark on failure) plus a slot_advance_errors
-			// metric. Kept minimal here so T0-2 lands as a pure signature change.
-			if err := conn.UpdateXLogPos(ctx, pq.LSN(wm)); err != nil {
-				log.Warn().Err(err).Uint64("watermark", wm).Msg("Failed to advance replication slot position")
+
+			cctx, cancel := context.WithTimeout(ctx, updateXLogPosTimeout)
+			err := conn.UpdateXLogPos(cctx, pq.LSN(wm))
+			cancel()
+
+			if err != nil {
+				switch {
+				case errors.Is(err, replication.ErrStreamClosed), errors.Is(err, replication.ErrStandbyWriteInFlight):
+					// EXPECTED, not failures: the monotonic lastXLogPos
+					// store in the vendored stream happens before either
+					// of these conditions is even checked, so the
+					// in-memory position did not fail to advance — only
+					// the wire send was skipped (no live connection yet)
+					// or superseded by another in-flight write. Do not
+					// log as an error and do not count toward a failure
+					// metric; just retry on the next tick.
+				case errors.Is(err, context.DeadlineExceeded):
+					// Abandoned, NOT proven failed: the underlying socket
+					// write may still complete after we gave up waiting
+					// (see updateXLogPosTimeout doc above). This is only
+					// grounds to skip recording lastFlushedWatermark, never
+					// grounds to treat the slot as stuck.
+					log.Debug().Uint64("watermark", wm).Msg("UpdateXLogPos timed out waiting for the standby status write; it may still complete, retrying next tick")
+				default:
+					// A genuine failure worth logging.
+					log.Warn().Err(err).Uint64("watermark", wm).Msg("Failed to advance replication slot position")
+				}
 				continue
 			}
+
 			lastFlushedWatermark = wm
 		}
 	}
