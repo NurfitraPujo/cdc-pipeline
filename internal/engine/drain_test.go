@@ -425,3 +425,94 @@ func TestTransitionTableToCDC_PendingCountError_FailsFastAndReleasesLock(t *test
 	defer p.muTableStates.RUnlock()
 	assert.Equal(t, protocol.TableStateDraining, p.tableStates["t1"])
 }
+
+// Test: transitionTableToCDC must not strand a table in Draining after a
+// single unlucky interleaving where the locked final recheck observes
+// pending != 0 (something landed in the buffer between the unlocked verify
+// and the lock acquisition). Before the bounded retry loop, the first
+// nonzero locked recheck would return (false, nil) immediately and the
+// table would only recover on the next external trigger. This drives the
+// fake PendingCounter to report nonzero on the first locked recheck and
+// zero on a later one, and asserts the transition still succeeds.
+func TestTransitionTableToCDC_RetriesPastOneUnluckyRecheck_ThenSucceeds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	kv := mocks.NewMockKeyValue(ctrl)
+
+	const (
+		pipelineID = "p1"
+		sourceID   = "s1"
+		table      = "t1"
+	)
+	stateKey := protocol.TableStateKey(pipelineID, sourceID, table)
+	kv.EXPECT().Put(stateKey, []byte(protocol.TableStateCDC)).Return(uint64(1), nil)
+
+	p := &Producer{
+		pipelineID:  pipelineID,
+		kv:          kv,
+		tableStates: map[string]string{table: protocol.TableStateDraining},
+	}
+
+	// Every locked recheck call gets the next value off this sequence: the
+	// first attempt's locked recheck observes pending == 1 (unlucky
+	// interleaving); the second attempt's locked recheck observes 0 and the
+	// transition succeeds.
+	pc := &fakePendingCounter{sequence: []uint64{1, 0}}
+
+	verifyCalls := 0
+	transitioned, err := p.transitionTableToCDC(context.Background(), sourceID, table, func() (bool, error) {
+		// The unlocked verify step itself always reports empty; the race is
+		// modeled entirely by the locked recheck's PendingCounter sequence.
+		verifyCalls++
+		return true, nil
+	}, pc)
+
+	require.NoError(t, err)
+	assert.True(t, transitioned, "the bounded retry must recover from a single unlucky nonzero recheck")
+	assert.Equal(t, 2, verifyCalls, "expected exactly one retried unlocked verify after the first unlucky locked recheck")
+	assert.Equal(t, 2, pc.callCount(), "expected exactly two locked recheck calls")
+
+	p.muTableStates.RLock()
+	defer p.muTableStates.RUnlock()
+	assert.Equal(t, protocol.TableStateCDC, p.tableStates[table])
+}
+
+// Test: when every attempt's locked recheck keeps observing pending != 0,
+// transitionTableToCDC must exhaust its bounded retries and return cleanly
+// (false, nil) without leaving the table anywhere but Draining, and without
+// holding the write lock afterward — exactly the exhausted-case contract
+// TestTransitionTableToCDC_PendingCountError_FailsFastAndReleasesLock
+// asserts for the error path.
+func TestTransitionTableToCDC_ExhaustsRetries_LeavesTableDrainingAndReleasesLock(t *testing.T) {
+	p := &Producer{
+		pipelineID:  "p1",
+		kv:          nil, // must not be reached: pending never settles at 0
+		tableStates: map[string]string{"t1": protocol.TableStateDraining},
+	}
+
+	// Always reports nonzero: every attempt's locked recheck fails.
+	pc := &fakePendingCounter{sequence: []uint64{1}}
+
+	transitioned, err := p.transitionTableToCDC(context.Background(), "s1", "t1", func() (bool, error) {
+		return true, nil
+	}, pc)
+
+	require.NoError(t, err)
+	assert.False(t, transitioned)
+	assert.Equal(t, transitionToCDCMaxAttempts, pc.callCount(), "expected exactly transitionToCDCMaxAttempts locked rechecks")
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		p.muTableStates.RLock()
+		defer p.muTableStates.RUnlock()
+		close(lockAcquired)
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("muTableStates write lock was not released after exhausting retries")
+	}
+
+	p.muTableStates.RLock()
+	defer p.muTableStates.RUnlock()
+	assert.Equal(t, protocol.TableStateDraining, p.tableStates["t1"])
+}

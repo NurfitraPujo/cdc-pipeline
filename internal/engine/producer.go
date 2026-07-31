@@ -53,6 +53,15 @@ const (
 	// than blocking forever (plan §7 Risk 5) — this matters most for the
 	// final verification call, which runs under the muTableStates write lock.
 	bufferDrainPendingCheckTimeout = 3 * time.Second
+	// transitionToCDCMaxAttempts bounds how many times transitionTableToCDC
+	// retries the (unlocked verify -> locked recheck) pair before giving up
+	// and leaving the table in Draining for the next trigger. It exists
+	// purely to absorb a single unlucky interleaving where a message lands in
+	// the buffer between the unlocked verify and the locked recheck
+	// acquiring the write lock; it is not a substitute for the existing
+	// recovery path (schema ack / dynamic-table add / recoverEvoStates on
+	// restart), which still fires if every attempt here is raced.
+	transitionToCDCMaxAttempts = 3
 )
 
 var errPublishRetriesExhausted = errors.New("publisher retries exhausted")
@@ -776,6 +785,18 @@ func (p *Producer) drainBufferedUntilIdle(ctx context.Context, table string, msg
 // state flip itself — bounded by bufferDrainPendingCheckTimeout, not an
 // unbounded retry loop, so a NATS outage during exactly this recheck can
 // only stall the flip for a few seconds, not deadlock the producer.
+//
+// A single (unlocked verify -> locked recheck) pass can lose a narrow race:
+// a message can land in the buffer in the gap between verifyEmpty returning
+// true and the write lock being acquired, making the locked recheck observe
+// pending != 0. Historically that stranded the table in Draining until the
+// next external trigger (schema ack / dynamic-table add / recoverEvoStates
+// on restart) even though nothing was lost — the buffer stream still has
+// everything. transitionToCDCMaxAttempts bounds a retry of that whole pass
+// so one unlucky interleaving doesn't have to wait for an external trigger.
+// Every retried verifyEmpty call still runs UNLOCKED; only the final
+// recheck + flip of each attempt runs under the write lock, exactly as
+// before, so the lock discipline above is unchanged by the retry.
 func (p *Producer) transitionTableToCDC(ctx context.Context, sourceID, table string, verifyEmpty func() (bool, error), pc stream.PendingCounter) (bool, error) {
 	p.muTableStates.RLock()
 	draining := p.tableStates[table] == protocol.TableStateDraining
@@ -784,21 +805,62 @@ func (p *Producer) transitionTableToCDC(ctx context.Context, sourceID, table str
 		return false, nil
 	}
 
-	empty, err := verifyEmpty()
-	if err != nil {
-		return false, fmt.Errorf("verifying final buffer state for table %s: %w", table, err)
-	}
-	if !empty {
-		return false, nil
+	for attempt := 1; attempt <= transitionToCDCMaxAttempts; attempt++ {
+		empty, err := verifyEmpty()
+		if err != nil {
+			return false, fmt.Errorf("verifying final buffer state for table %s: %w", table, err)
+		}
+		if !empty {
+			return false, nil
+		}
+
+		transitioned, stillDraining, err := p.recheckAndFlipToCDC(ctx, sourceID, table, pc)
+		if err != nil {
+			return transitioned, err
+		}
+		if transitioned {
+			return true, nil
+		}
+		if !stillDraining {
+			// Raced with something else (e.g. an error path) that already
+			// moved this table out of Draining. Retrying can't help.
+			return false, nil
+		}
+
+		// Something landed in the buffer during the unlocked verify ->
+		// lock-acquisition window (pending != 0 on the locked recheck).
+		// Retry the whole (unlocked verify -> locked recheck) pass, bounded
+		// by transitionToCDCMaxAttempts.
+		if attempt < transitionToCDCMaxAttempts {
+			log.Info().Str("table", table).Int("attempt", attempt).Int("max_attempts", transitionToCDCMaxAttempts).
+				Msg("transitionTableToCDC: buffer non-empty on final recheck, retrying bounded pass")
+		}
 	}
 
+	// Exhausted every attempt. Leave the table in Draining exactly as the
+	// pre-retry code did on a single failed recheck; this optimisation over
+	// the existing recovery path does not replace it — the table will be
+	// retried on the next flushBuffer trigger (schema ack / recovery /
+	// dynamic-table addition).
+	log.Warn().Str("table", table).Int("max_attempts", transitionToCDCMaxAttempts).
+		Msg("transitionTableToCDC: exhausted retry attempts, leaving table in Draining for next trigger")
+	return false, nil
+}
+
+// recheckAndFlipToCDC performs the single locked final recheck + state flip
+// for one transitionTableToCDC attempt. It takes muTableStates.Lock() only
+// for this call — the bounded PendingCount call (bufferDrainPendingCheckTimeout)
+// plus the map/KV write — never for the unlocked verifyEmpty retry loop above.
+// Returns (transitioned, stillDraining, err): stillDraining is false only
+// when the table state changed out from under us (state pointer removed by
+// something other than the pending!=0 race), signalling the caller not to
+// retry.
+func (p *Producer) recheckAndFlipToCDC(ctx context.Context, sourceID, table string, pc stream.PendingCounter) (bool, bool, error) {
 	p.muTableStates.Lock()
 	defer p.muTableStates.Unlock()
 
 	if p.tableStates[table] != protocol.TableStateDraining {
-		// Raced with something else (e.g. an error path) that already moved
-		// this table out of Draining while we verified unlocked above.
-		return false, nil
+		return false, false, nil
 	}
 
 	if pc != nil {
@@ -806,15 +868,10 @@ func (p *Producer) transitionTableToCDC(ctx context.Context, sourceID, table str
 		pending, pcErr := pc.PendingCount(checkCtx)
 		cancel()
 		if pcErr != nil {
-			return false, fmt.Errorf("final pending recheck for table %s: %w", table, pcErr)
+			return false, true, fmt.Errorf("final pending recheck for table %s: %w", table, pcErr)
 		}
 		if pending != 0 {
-			// Something landed in the buffer during the unlocked verify ->
-			// lock-acquisition window. Do not flip; the caller's drain loop
-			// has already exited, so this table will only be retried on the
-			// next flushBuffer trigger (schema ack / recovery / dynamic-table
-			// addition) rather than looping here under the write lock.
-			return false, nil
+			return false, true, nil
 		}
 	}
 
@@ -822,10 +879,10 @@ func (p *Producer) transitionTableToCDC(ctx context.Context, sourceID, table str
 
 	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
 	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateCDC)); err != nil {
-		return true, fmt.Errorf("persisting CDC table state for %s: %w", table, err)
+		return true, true, fmt.Errorf("persisting CDC table state for %s: %w", table, err)
 	}
 
-	return true, nil
+	return true, true, nil
 }
 
 func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff, bool) {

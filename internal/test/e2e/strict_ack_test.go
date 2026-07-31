@@ -150,14 +150,39 @@ func TestSlotNeverAdvancesBeforeSinkAck(t *testing.T) {
 	// the coordinator has real pending LSNs to (not) confirm, not just an
 	// empty/idle window.
 	realGate := waitForGateSink(t, sinkID, 15*time.Second)
+
+	// Gate on a POSITIVE signal that all 20 rows are genuinely in flight --
+	// decoded by the source, Observed by the AckManager, and published --
+	// before asserting anything about the slot.
+	//
+	// The previous gate here polled for `confirmed_flush_lsn > 0` and
+	// admitted, in its own comment, that this was an approximation ("slot
+	// existing and some time having passed"). That is satisfiable long
+	// before the rows are pending: the slot is already non-zero from
+	// creation/the B3 seed. Under load the assertion loop could therefore
+	// start while the AckManager was still empty, at which point IdleAdvance
+	// may legitimately fast-forward toward the WAL end -- and commitLSN was
+	// captured from pg_current_wal_lsn(), so the slot could pass it without
+	// the invariant being violated at all. That is the flake: a real
+	// invariant, asserted in a window where it did not yet apply.
+	//
+	// Counting the ingest stream is the same technique the sibling
+	// TestKeepaliveDoesNotConfirmInflight uses, and it is a fact about the
+	// system rather than about elapsed time.
+	nc, err := go_nats.Connect(env.NatsURL)
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := nc.JetStream()
+	require.NoError(t, err)
+	ingestStream := fmt.Sprintf("cdc_pipeline_%s_ingest", pipelineID)
 	require.Eventually(t, func() bool {
-		// events must have reached the handler / AckMgr; approximate via
-		// slot existing and some time having passed. We assert directly on
-		// the slot staying below commitLSN across several coordinator ticks
-		// below, which is the load-bearing check.
-		lsn, ok := confirmedFlushLSN(t, env, realSlot)
-		return ok && lsn > 0
-	}, 20*time.Second, 500*time.Millisecond, "slot never advanced past its initial position at all (nothing flowing)")
+		si, err := js.StreamInfo(ingestStream)
+		if err != nil {
+			return false
+		}
+		return si.State.Msgs >= 20
+	}, 30*time.Second, 250*time.Millisecond,
+		"ingest stream never carried all 20 rows -- the slot invariant cannot be proven until they are provably pending")
 
 	// The sink is blocked and stays blocked: poll confirmed_flush_lsn across
 	// several coordinator ticks (500ms cadence) and assert it never reaches
