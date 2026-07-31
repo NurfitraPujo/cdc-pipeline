@@ -513,3 +513,155 @@ func TestCrashBetweenPublishAndSinkReplays(t *testing.T) {
 	require.GreaterOrEqual(t, len(seen), rowCount,
 		"only %d distinct rows out of %d reached the sink after crash+restart -- data was lost, not just duplicated", len(seen), rowCount)
 }
+
+// ---------------------------------------------------------------------
+// Test 22: a crash BEFORE the event is even published to NATS -- while it
+// is still sitting in the producer's in-memory batch buffer -- must also
+// replay cleanly. This is the pre-fix loss window: per-event lc.Ack()
+// advanced the slot the instant an event was DECODED, long before it ever
+// reached NATS, let alone a sink. A crash in that window permanently lost
+// the event, because the slot's confirmed_flush_lsn already excluded it
+// from any future replay.
+//
+// Rather than the sink, this test blocks the PUBLISHER side of that window
+// by using a deliberately large BatchWait: the source decodes and Observes
+// every row well before the producer's batch timer ever fires, so at the
+// moment we "crash" (Mgr.Stop), the rows are Observed by the AckManager but
+// still resident only in the producer's in-process buffer -- never
+// published to NATS, and so structurally incapable of having reached a
+// sink. If the slot had already confirmed them, restart would silently
+// drop them; under the fix, the slot cannot have advanced past an LSN with
+// zero RecordAck confirmations, so replay from the slot must reproduce
+// every row.
+func TestCrashBeforePublishReplays(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+	t.Setenv("CDC_STRICT_ACK", "true")
+
+	env := Setup(t)
+	defer env.Cleanup()
+
+	const table = "crash_before_publish_table"
+	const pipelineID = "p_crash_before_publish"
+	const rowCount = 12
+
+	pipeCfg := protocol.PipelineConfig{
+		ID:      pipelineID,
+		Name:    "Crash Before Publish Test",
+		Sources: []string{env.PgConfig.ID},
+		Sinks:   []string{env.DbConfig.ID},
+		Tables:  []string{table},
+		// Deliberately much longer than the time it takes logical
+		// replication to decode and Observe rowCount rows, so every insert
+		// below is guaranteed to still be sitting unpublished in the
+		// producer's in-memory buffer when we crash.
+		BatchSize: 10_000,
+		BatchWait: 10 * time.Second,
+	}
+	require.NoError(t, env.SetPipelineConfig(pipelineID, pipeCfg))
+	env.SeedPostgres(table, 0)
+
+	env.StartWorker()
+	env.EventuallyAssertHeartbeat(pipelineID, "Running", 30*time.Second)
+
+	realSlot := realSlotName(env.PgConfig.SlotName, pipelineID)
+	require.Eventually(t, func() bool {
+		_, ok := confirmedFlushLSN(t, env, realSlot)
+		return ok
+	}, 30*time.Second, 500*time.Millisecond, "replication slot never appeared")
+
+	for i := 1; i <= rowCount; i++ {
+		_, err := env.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age) VALUES ($1,$2)", table), fmt.Sprintf("prepub-%d", i), 20+i)
+		require.NoError(t, err)
+	}
+
+	// Give logical replication time to decode and Observe every row -- this
+	// is comfortably within typical decode latency for a handful of rows,
+	// and still an order of magnitude below the 10s BatchWait, so the
+	// producer cannot have flushed a batch yet.
+	time.Sleep(2 * time.Second)
+
+	// "Crash": stop the worker with the rows still unpublished. Mgr.Stop is
+	// the harness's only kill primitive (no OS process boundary), but it
+	// exercises the same recovery path a real crash would need: an unclean
+	// stop with events the sink has never even seen.
+	env.Mgr.Stop(context.Background())
+	time.Sleep(2 * time.Second)
+
+	// Restart with a normal BatchWait so replay actually flushes promptly.
+	pipeCfg.BatchWait = 100 * time.Millisecond
+	require.NoError(t, env.SetPipelineConfig(pipelineID, pipeCfg))
+	env.StartWorker()
+	env.EventuallyAssertHeartbeat(pipelineID, "Running", 30*time.Second)
+
+	env.EventuallyCountDatabend(table, rowCount, 60*time.Second)
+
+	count, err := env.GetDatabendRowCount(table)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, count, uint64(rowCount),
+		"not every row survived a crash that happened before the event ever reached NATS -- "+
+			"the slot must not have confirmed an LSN with zero downstream involvement")
+}
+
+// ---------------------------------------------------------------------
+// Test 5 (rollout escape hatch): CDC_STRICT_ACK=false must still deliver
+// end to end. This is the path an operator falls back to mid-incident by
+// flipping the flag off, so it must not be a code path that only compiles
+// -- it has to actually move data, restoring the legacy per-event lc.Ack()
+// contract (WI-4 deleted every lc.Ack() call site under the new contract;
+// the flag conditionally restores them, see source.go's strictAck plumbing).
+func TestLegacyAckPath_StillDeliversEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+	// The one test in this file that deliberately does NOT set "true" --
+	// this is the whole point.
+	t.Setenv("CDC_STRICT_ACK", "false")
+
+	env := Setup(t)
+	defer env.Cleanup()
+
+	const table = "legacy_ack_table"
+	const pipelineID = "p_legacy_ack"
+	const rowCount = 15
+
+	pipeCfg := protocol.PipelineConfig{
+		ID:        pipelineID,
+		Name:      "Legacy Ack Path Test",
+		Sources:   []string{env.PgConfig.ID},
+		Sinks:     []string{env.DbConfig.ID},
+		Tables:    []string{table},
+		BatchSize: 5,
+		BatchWait: 100 * time.Millisecond,
+	}
+	require.NoError(t, env.SetPipelineConfig(pipelineID, pipeCfg))
+	env.SeedPostgres(table, 0)
+
+	env.StartWorker()
+	env.EventuallyAssertHeartbeat(pipelineID, "Running", 30*time.Second)
+
+	for i := 1; i <= rowCount; i++ {
+		_, err := env.Postgres.Exec(fmt.Sprintf("INSERT INTO %s (name, age) VALUES ($1,$2)", table), fmt.Sprintf("legacy-%d", i), 20+i)
+		require.NoError(t, err)
+	}
+
+	env.EventuallyCountDatabend(table, rowCount, 30*time.Second)
+
+	count, err := env.GetDatabendRowCount(table)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, count, uint64(rowCount),
+		"CDC_STRICT_ACK=false must still deliver every row -- this is the operator's rollback path mid-incident")
+
+	// The legacy contract also means the slot advances per-event rather
+	// than waiting on a sink confirmation, so it should not lag behind
+	// indefinitely the way it legitimately can under strict_ack=true with a
+	// blocked sink. Not the primary assertion, but worth a sanity check
+	// that the coordinator's HIGH-1 fix (skip the wire write under OFF)
+	// didn't silently stall the slot.
+	realSlot := realSlotName(env.PgConfig.SlotName, pipelineID)
+	require.Eventually(t, func() bool {
+		lsn, ok := confirmedFlushLSN(t, env, realSlot)
+		return ok && lsn > 0
+	}, 30*time.Second, 500*time.Millisecond, "slot never advanced at all under the legacy per-event-ack path")
+}
