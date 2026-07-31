@@ -51,10 +51,59 @@ var sourceRestartTotal = promauto.NewCounter(prometheus.CounterOpts{
 // downstream sink is not confirming, or a "ghost" entry exists (a Confirm
 // for an LSN that was never Observed) which pins the watermark and blocks
 // IdleAdvance forever. Full slot-lag alerting on top of this is WI-5a.
+//
+// WI-5a review fix (Defect 1): the label set is deliberately
+// {"pipeline","source","slot"} -- IDENTICAL to slotLagBytesGauge and
+// ackWatermarkGauge below, not just {"source"}. PromQL's binary `and`
+// matches on the full label set by default; a mismatched set (the original
+// bug here) means `cdc_source_pending_lsns > 0 and delta(cdc_source_ack_watermark[10m]) == 0`
+// can NEVER match any series, so the CDCSourcePendingLSNsStuck alert would
+// silently never fire -- exactly the failure modes ((b) wedged connector,
+// (c) pinned LSN) that do not self-heal and most need alerting. Any future
+// gauge meant to be joined against these two in an alert expression MUST
+// use this same three-label set.
 var pendingLSNsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "cdc_source_pending_lsns",
 	Help: "Number of observed-or-confirmed LSNs not yet folded into the AckManager watermark",
-}, []string{"source"})
+}, []string{"pipeline", "source", "slot"})
+
+// slotLagBytesGauge exports the byte gap between the source primary's
+// current WAL position and the replication slot's confirmed_flush_lsn
+// (WI-5a). Under the ManualCommit contract the slot only advances after
+// every configured sink has durably written an LSN, so a dead/slow sink
+// freezes confirmed_flush_lsn and this gauge grows without bound while
+// PostgreSQL retains WAL on the source primary. This is the correct
+// at-least-once trade (loss -> visible backpressure), but it is only safe
+// to operate with an alert on this metric -- see the WI-5a runbook.
+var slotLagBytesGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "cdc_source_slot_lag_bytes",
+	Help: "Bytes between pg_current_wal_lsn() and the replication slot's confirmed_flush_lsn",
+}, []string{"pipeline", "source", "slot"})
+
+// ackWatermarkGauge exports AckManager.Watermark() (WI-5a, required by the
+// §6 bake period): with strict_ack off this is expected to lag
+// confirmed_flush_lsn by a small, stable gap; a growing gap under
+// production load means the watermark plumbing itself is not keeping up
+// and the flag must not be flipped for that pipeline yet.
+var ackWatermarkGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "cdc_source_ack_watermark",
+	Help: "Current AckManager watermark: the highest LSN confirmed durably written by every required sink",
+}, []string{"pipeline", "source", "slot"})
+
+// slotLagProbeLastSuccessGauge exports the unix timestamp of the last
+// successful querySlotLagBytes call per source (WI-5a review Defect 3).
+// slotLagBytesGauge is a Prometheus gauge: on a probe failure (query error,
+// DB down) runSlotLagProbe deliberately leaves it at its last value rather
+// than clearing it, so a degraded database connection -- the failure most
+// likely to co-occur with a real source-primary problem -- would otherwise
+// scrape as a stale, healthy-looking number forever, silencing both
+// CDCSourceSlotLagWarning and CDCSourceSlotLagCritical during exactly the
+// incident they exist for. This gauge makes that staleness independently
+// observable and alertable (CDCSourceSlotLagProbeStale).
+var slotLagProbeLastSuccessGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "cdc_source_slot_lag_probe_last_success_timestamp_seconds",
+	Help: "Unix timestamp of the last successful slot-lag probe query for this source",
+}, []string{"pipeline", "source", "slot"})
 
 // connectorFactoryFunc is the pluggable factory used by PostgresSource to
 // build a new cdc.Connector. The default implementation calls
@@ -128,6 +177,15 @@ type PostgresSource struct {
 	// never as "seed with zero".
 	slotConfirmedFlushLSN func(ctx context.Context, db *sql.DB, slotName string) (lsn pq.LSN, ok bool)
 
+	// slotLagBytes resolves the current byte gap between
+	// pg_current_wal_lsn() and the slot's confirmed_flush_lsn (WI-5a).
+	// Defaults to querySlotLagBytes (a real, short-lived query against
+	// s.db); tests override it to exercise the probe loop without a live
+	// PostgreSQL connection. ok is false whenever the value could not be
+	// determined (slot does not exist yet, query error, parse error) --
+	// callers treat that as "skip this tick", never as "lag is zero".
+	slotLagBytes func(ctx context.Context, db *sql.DB, slotName string) (bytes int64, ok bool)
+
 	// Internal channels for goroutine communication
 	msgChan chan []protocol.Message
 	// ackChan is the public channel returned from Start. The engine sends
@@ -150,6 +208,7 @@ func NewPostgresSource(name string) *PostgresSource {
 		ackMgr:                NewAckManager(nil),
 		connectorFactory:      defaultConnectorFactory,
 		slotConfirmedFlushLSN: queryConfirmedFlushLSN,
+		slotLagBytes:          querySlotLagBytes,
 	}
 }
 
@@ -190,6 +249,36 @@ func queryConfirmedFlushLSN(ctx context.Context, db *sql.DB, slotName string) (p
 	}
 
 	return lsn, true
+}
+
+// querySlotLagBytes is the real (non-test) implementation of
+// PostgresSource.slotLagBytes (WI-5a): it queries pg_replication_slots for
+// the given slot's byte gap between the primary's current WAL position and
+// its confirmed_flush_lsn. Any error (nil db, no such slot, query error,
+// scan error) reports ok=false; callers treat that as "skip this tick",
+// never as "lag is zero" -- this must never block or crash the probe loop.
+// A missing slot is the expected, common case on a fresh deployment before
+// conn.Start has created it.
+func querySlotLagBytes(ctx context.Context, db *sql.DB, slotName string) (int64, bool) {
+	if db == nil || slotName == "" {
+		return 0, false
+	}
+
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var lagBytes int64
+	err := db.QueryRowContext(qctx,
+		`SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)
+		 FROM pg_replication_slots WHERE slot_name = $1`,
+		slotName,
+	).Scan(&lagBytes)
+	if err != nil {
+		log.Debug().Err(err).Str("slot", slotName).Msg("querySlotLagBytes: failed to read slot lag (slot may not exist yet)")
+		return 0, false
+	}
+
+	return lagBytes, true
 }
 
 // WithMetricPort configures a static Prometheus metrics port for the
@@ -616,10 +705,83 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	s.runWg.Add(1)
 	go func() {
 		defer s.runWg.Done()
-		s.runAckCoordinator(sourceCtx)
+		s.runAckCoordinator(sourceCtx, srcConfig.SlotName)
+	}()
+
+	// WI-5a: periodic slot-lag probe. This is pure observability -- it
+	// never feeds AckManager or gates the slot -- but it is what makes the
+	// ManualCommit trade (freeze the slot rather than lose data) safe to
+	// operate: without it, a dead sink silently retains unbounded WAL on
+	// the source primary with no operator-visible signal.
+	s.runWg.Add(1)
+	go func() {
+		defer s.runWg.Done()
+		s.runSlotLagProbe(sourceCtx, srcConfig.SlotName)
 	}()
 
 	return s.msgChan, s.ackChan, nil
+}
+
+// slotLagProbeInterval is how often runSlotLagProbe re-queries
+// pg_replication_slots for the current WAL-vs-confirmed_flush_lsn gap
+// (WI-5a). A var, not a const, so tests can shrink it to avoid a
+// multi-second sleep; production code never reassigns it.
+var slotLagProbeInterval = 15 * time.Second
+
+// runSlotLagProbe periodically exports cdc_source_slot_lag_bytes and
+// cdc_source_ack_watermark for this source (WI-5a). It is best-effort and
+// deliberately never fatal: a missing slot (fresh deployment, before
+// conn.Start has created it) or a query error is logged at debug level and
+// the loop simply continues to the next tick. It exits promptly on ctx
+// cancellation, mirroring the other s.runWg-registered goroutines above.
+func (s *PostgresSource) runSlotLagProbe(ctx context.Context, slotName string) {
+	ticker := time.NewTicker(slotLagProbeInterval)
+	defer ticker.Stop()
+
+	s.mu.RLock()
+	pipelineID := s.pipelineID
+	s.mu.RUnlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Always export the watermark: it requires no I/O and is
+			// needed by the §6 bake period regardless of whether the lag
+			// query below succeeds.
+			ackWatermarkGauge.WithLabelValues(pipelineID, s.name, slotName).Set(float64(s.ackMgr.Watermark()))
+
+			s.mu.RLock()
+			db := s.db
+			s.mu.RUnlock()
+
+			fn := s.slotLagBytes
+			if fn == nil || db == nil {
+				continue
+			}
+
+			lagBytes, ok := fn(ctx, db, slotName)
+			if !ok {
+				// Non-fatal: a fresh deployment has no slot yet, or the
+				// query hit a transient error. Never crash or spam above
+				// debug -- just skip this tick and retry in 15s.
+				//
+				// Defect 3 fix: deliberately do NOT touch
+				// slotLagProbeLastSuccessGauge here. slotLagBytesGauge keeps
+				// its last value on failure (a Prometheus gauge cannot
+				// distinguish "unchanged" from "stale"), so a degraded DB
+				// connection would otherwise scrape as a stale, healthy-
+				// looking lag number forever and silence both slot-lag
+				// alerts. Leaving the success-timestamp gauge un-updated is
+				// what lets CDCSourceSlotLagProbeStale detect exactly that.
+				continue
+			}
+
+			slotLagBytesGauge.WithLabelValues(pipelineID, s.name, slotName).Set(float64(lagBytes))
+			slotLagProbeLastSuccessGauge.WithLabelValues(pipelineID, s.name, slotName).Set(float64(time.Now().Unix()))
+		}
+	}
 }
 
 // updateXLogPosTimeout bounds the network round trip of the coordinator's
@@ -644,10 +806,19 @@ const updateXLogPosTimeout = 5 * time.Second
 //     push it to PostgreSQL via connector.UpdateXLogPos. A failed or
 //     timed-out call is retried on the next tick; the watermark itself is
 //     never rolled back, so nothing is lost by retrying.
-func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
+func (s *PostgresSource) runAckCoordinator(ctx context.Context, slotName string) {
 	const keepaliveInterval = 500 * time.Millisecond
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
+
+	// pipelineID is captured once, like runSlotLagProbe does, so
+	// pendingLSNsGauge shares an IDENTICAL label set with slotLagBytesGauge
+	// and ackWatermarkGauge (WI-5a review Defect 1) -- required for the
+	// CDCSourcePendingLSNsStuck alert's `and` join across
+	// cdc_source_pending_lsns and cdc_source_ack_watermark to ever match.
+	s.mu.RLock()
+	pipelineID := s.pipelineID
+	s.mu.RUnlock()
 
 	// lastFlushedWatermark remembers the last watermark we successfully
 	// pushed to PostgreSQL so we avoid sending the same standby status
@@ -677,7 +848,7 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 			// value (a "ghost" Confirm for an LSN never Observed, or a
 			// downed sink) is exactly the silently-frozen-slot condition
 			// this metric exists to surface.
-			pendingLSNsGauge.WithLabelValues(s.name).Set(float64(s.ackMgr.PendingCount()))
+			pendingLSNsGauge.WithLabelValues(pipelineID, s.name, slotName).Set(float64(s.ackMgr.PendingCount()))
 
 			wm := s.ackMgr.Watermark()
 
@@ -1029,7 +1200,22 @@ func (s *PostgresSource) Stop() error {
 		if s.db != nil {
 			s.db.Close()
 		}
+		pipelineID, slotName := s.pipelineID, s.config.SlotName
 		s.mu.Unlock()
+
+		// WI-5a: drop this source's gauge series. The process outlives an
+		// individual pipeline (cmd/pipeline starts and stops them from KV
+		// config), so without this a deliberately stopped pipeline leaves
+		// slot_lag_probe_last_success frozen while time() advances —
+		// CDCSourceSlotLagProbeStale then fires forever and never resolves,
+		// and a non-zero pending_lsns at stop latches
+		// CDCSourcePendingLSNsStuck the same way. Alert fatigue on exactly
+		// these alerts would defeat the purpose of shipping them.
+		labels := prometheus.Labels{"pipeline": pipelineID, "source": s.name, "slot": slotName}
+		pendingLSNsGauge.DeletePartialMatch(labels)
+		slotLagBytesGauge.DeletePartialMatch(labels)
+		ackWatermarkGauge.DeletePartialMatch(labels)
+		slotLagProbeLastSuccessGauge.DeletePartialMatch(labels)
 	})
 	return nil
 }

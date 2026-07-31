@@ -118,6 +118,26 @@ api:
 
 worker:
   name: cdc-worker
+  # WI-5a (plan 01a §3): PrometheusRule for cdc_source_slot_lag_bytes and
+  # friends. Requires the prometheus-operator CRDs. Enabled by default in
+  # staging: ManualCommit (the slot-freezing behaviour this covers) is
+  # unconditionally live already (internal/source/postgres/source.go) --
+  # there is no `strict_ack` flag in this codebase yet -- so the alerting
+  # should be on wherever the risk exists. See "Status as of this commit"
+  # in deploy/helm-chart/RUNBOOK.md.
+  alerts:
+    enabled: true
+    ruleSelectorLabels: {}
+    slotLag:
+      warnBytes: 536870912   # 512MiB
+      warnFor: 15m
+      pageBytes: 5368709120  # 5GiB
+      pageFor: 15m
+    pendingStuck:
+      for: 10m
+    probeStale:
+      staleAfterSeconds: 120  # 8x the 15s probe interval
+      for: 2m
   args: ["/app/worker"]
   image:
     repository: swr.ap-southeast-3.myhuaweicloud.com/daya-engineering/cdc-data-pipeline

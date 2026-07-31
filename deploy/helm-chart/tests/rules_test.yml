@@ -1,0 +1,112 @@
+# WI-5a review Defect 1 fix, proved with `promtool test rules`:
+#
+#   docker run --rm -v "$PWD:/rules" -w /rules prom/prometheus:latest \
+#     promtool test rules rules_test.yml
+#
+# Background: PromQL's binary `and` matches on the FULL label set of both
+# sides by default. cdc_source_pending_lsns was originally exported with
+# only {"source"} while cdc_source_ack_watermark carries
+# {"pipeline","source","slot"} -- so `cdc_source_pending_lsns > 0 and
+# delta(cdc_source_ack_watermark[10m]) == 0` could never match any series,
+# and CDCSourcePendingLSNsStuck (the alert covering failure modes (b) and
+# (c), the two that do NOT self-heal) would silently never fire. The Go
+# fix (internal/source/postgres/source.go) makes pendingLSNsGauge share
+# the identical {"pipeline","source","slot"} label set as
+# ackWatermarkGauge and slotLagBytesGauge. This file is the PromQL-side
+# proof: test 1 shows the alert fires when the exported label sets match
+# (the fixed, current behaviour); test 2 shows it correctly stays SILENT
+# when the two series don't share a matching label tuple at all (proving
+# the `and` join is doing real work, not vacuously matching).
+rule_files:
+  - rendered_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Test 1 (the regression test for Defect 1): pending_lsns and
+  # ack_watermark share {pipeline="p1", source="s1", slot="slot1"} and the
+  # watermark is flat for the whole window -- the alert MUST fire.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_pending_lsns{pipeline="p1", source="s1", slot="slot1"}'
+        values: "3x15"
+      - series: 'cdc_source_ack_watermark{pipeline="p1", source="s1", slot="slot1"}'
+        values: "100x15"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CDCSourcePendingLSNsStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pipeline: p1
+              source: s1
+              slot: slot1
+            exp_annotations:
+              summary: "CDC source has pending LSNs that are not draining"
+
+  # Test 2 (proves the join is meaningful, not vacuous): pending_lsns is
+  # exported for slot "slot1" but ack_watermark is only exported for a
+  # DIFFERENT slot "slot2" on the same source -- the label sets never
+  # match on the same series, so `and` correctly finds nothing and the
+  # alert must NOT fire, even though pending_lsns alone would satisfy the
+  # left-hand side.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_pending_lsns{pipeline="p1", source="s1", slot="slot1"}'
+        values: "3x15"
+      - series: 'cdc_source_ack_watermark{pipeline="p1", source="s1", slot="slot2"}'
+        values: "100x15"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CDCSourcePendingLSNsStuck
+        exp_alerts: []
+
+  # Test 3: slot lag growing past the warn threshold for the full `for`
+  # window fires CDCSourceSlotLagWarning.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_slot_lag_bytes{pipeline="p1", source="s1", slot="slot1"}'
+        values: "600000000+10000000x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: CDCSourceSlotLagWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pipeline: p1
+              source: s1
+              slot: slot1
+            exp_annotations:
+              summary: "CDC replication slot lag is growing"
+
+  # Test 4: a flat (non-growing) lag above the warn threshold must NOT
+  # page -- this is the "healthy but currently large" case (e.g. right
+  # after a real burst that has already stabilised), not an active
+  # incident.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_slot_lag_bytes{pipeline="p1", source="s1", slot="slot1"}'
+        values: "600000000x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: CDCSourceSlotLagWarning
+        exp_alerts: []
+
+  # Test 5 (Defect 3 fix): the probe-health alert fires once the
+  # success-timestamp gauge has been stale (not advancing) for longer than
+  # staleAfterSeconds while wall-clock time keeps moving.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_slot_lag_probe_last_success_timestamp_seconds{pipeline="p1", source="s1", slot="slot1"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CDCSourceSlotLagProbeStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pipeline: p1
+              source: s1
+              slot: slot1
+            exp_annotations:
+              summary: "CDC slot-lag probe has not succeeded recently"

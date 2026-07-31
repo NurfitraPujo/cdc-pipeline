@@ -1,0 +1,238 @@
+# CDC source-ack runbook (WI-5a)
+
+## Status as of this commit -- read this first
+
+> **`ManualCommit` is unconditionally ON, in every environment, right now.**
+> `internal/source/postgres/source.go` sets `cfg.ManualCommit: true`
+> unconditionally in `Start` -- there is no flag gating it. The replication
+> slot-freezing behaviour described below is not a future risk that arrives
+> "once `strict_ack` is turned on": **it is live in this branch's `Start` path
+> today**, for every pipeline that uses `PostgresSource`.
+>
+> **There is no `strict_ack` flag in this codebase.** Earlier drafts of this
+> runbook (and of plan `01a_delivery_source_ack`) describe a `strict_ack`
+> flag that can be flipped pipeline-by-pipeline with a same-release rollback.
+> That control does not exist. It is planned as a follow-up commit (approved,
+> not yet landed) that will gate `ManualCommit` behind a real flag and update
+> this document accordingly. **Until that lands, do not describe or rely on a
+> `strict_ack` flag** -- there is nothing to flip, and the "flip it back off"
+> rollback story in a prior version of this file was not actually available.
+> **The only rollback today is a code revert of the ManualCommit change.**
+> Redeploying it re-applies the unbounded-WAL-on-slot-freeze behaviour along
+> with it -- there is no partial/config-only rollback.
+> **The consequence:** production and staging deployments of this branch
+> carry the WAL-retention risk described below unconditionally. The alerting
+> in `deploy/helm-chart/templates/worker/prometheusrule.yaml` is gated by
+> `worker.alerts.enabled` in the values files, which currently defaults to
+> `false` in `values.production.yml` -- meaning **production currently has
+> the risk with the alerting for it turned off.** Setting `worker.alerts.enabled: true`
+> for production is not optional follow-through; treat it as an
+> outstanding, urgent action item of this same change, not a "someday."
+
+## Why this exists
+
+Before this plan, a dead sink silently lost data. Now, with `ManualCommit`
+live, a dead sink **freezes the replication slot**, and PostgreSQL retains WAL
+without bound on the **source primary**. That is the correct at-least-once
+trade -- loss becomes visible backpressure -- but it converts a silent
+data-loss problem into a potential source-database disk-pressure outage. This
+document is the operator-facing half of that trade: how to see it coming, and
+what to do about it.
+
+## Metrics
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `cdc_source_slot_lag_bytes` | `pipeline, source, slot` | `pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)` for the slot, probed every ~15s. Growing = WAL accumulating on the source primary. |
+| `cdc_source_pending_lsns` | `pipeline, source, slot` | Count of LSNs observed-or-confirmed but not yet folded into the AckManager watermark. Non-zero-and-flat is the shared symptom of failure modes (b) and (c) below. Shares the SAME label set as the other two gauges deliberately -- see [Probe health](#probe-health) and the alert rule comments for why that matters. |
+| `cdc_source_ack_watermark` | `pipeline, source, slot` | The AckManager's current watermark -- the highest LSN confirmed durably written by every required sink. Used by the bake-period check below. |
+| `cdc_source_slot_lag_probe_last_success_timestamp_seconds` | `pipeline, source, slot` | Unix timestamp of the last successful slot-lag probe query. See [Probe health](#probe-health) -- this exists because the lag gauge above silently goes stale on a probe failure. |
+
+`Config.Print()` also logs `"manualCommit":true` on every connector construction
+-- a free signal that `ManualCommit` actually took effect for a given process.
+
+## Probe health
+
+`cdc_source_slot_lag_bytes` is a plain Prometheus gauge: when the probe query
+fails (slot missing, or a query/connection error), the code deliberately
+leaves the gauge at its **last successfully-observed value** rather than
+clearing it (see `runSlotLagProbe` in `internal/source/postgres/source.go`).
+That is correct for the "value is real but old" case, but it means a
+**degraded source-DB connection** -- exactly the kind of problem most likely
+to co-occur with a genuine slot-lag incident -- can leave the lag gauge
+reporting a stale, healthy-looking number indefinitely, silently disarming
+`CDCSourceSlotLagWarning`/`CDCSourceSlotLagCritical` during the incident they
+exist for.
+
+`cdc_source_slot_lag_probe_last_success_timestamp_seconds` exists to make
+that staleness independently observable. The `CDCSourceSlotLagProbeStale`
+alert fires when `time() - cdc_source_slot_lag_probe_last_success_timestamp_seconds`
+exceeds `worker.alerts.probeStale.staleAfterSeconds` (default 120s, 8x the
+15s probe interval). **If this alert is firing, do not trust the current
+value of `cdc_source_slot_lag_bytes` -- it may be stale.** Investigate source
+database connectivity directly (can the pipeline process still reach the
+source host? is `s.db` erroring on every query?) rather than reasoning from
+the possibly-frozen lag number.
+
+## Failure modes
+
+There are three distinct failure modes. Do not collapse them -- they have
+different symptoms and different responses.
+
+### (a) Sink down -> WAL growth
+
+**Symptom:** `cdc_source_slot_lag_bytes` growing steadily (the `CDCSourceSlotLagWarning`
+/ `CDCSourceSlotLagCritical` alerts) -- and `CDCSourceSlotLagProbeStale` is
+**not** firing (if it is, see [Probe health](#probe-health) first; the lag
+reading may not be current).
+
+**Cause:** a downstream sink is down, slow, or misconfigured. The replication
+slot's `confirmed_flush_lsn` cannot advance past LSNs that sink has not durably
+written, so PostgreSQL retains the WAL those LSNs live in.
+
+**Response:** fix the sink. Slot lag should start shrinking once it catches up
+or comes back.
+
+**Disaster floor:** set `max_slot_wal_keep_size` on the source database. This is
+the operator-chosen ceiling on how much WAL PostgreSQL will retain for this
+slot; past it, PostgreSQL invalidates the slot rather than filling the primary's
+disk. Recovering from an invalidated slot requires a forced re-snapshot
+(`Resnapshot` config) -- accept that outcome as the deliberate backstop, not a
+bug, when a sink outage runs long enough to hit it.
+
+### (b) Wedged connector needing a process restart
+
+**Symptom:** `cdc_source_pending_lsns > 0` **and the slot position (`cdc_source_ack_watermark`
+/ `confirmed_flush_lsn`) is not moving** -- i.e. `CDCSourcePendingLSNsStuck` fires
+and `cdc_source_slot_lag_bytes` is roughly **flat**, not growing (contrast with
+(a), where it grows because new WAL keeps arriving behind a frozen position; here
+ingestion itself has stalled so there is little or no new WAL either).
+
+**Cause:** if the source ever goes long enough without sending a standby status
+update while LSNs are pending, PostgreSQL's `wal_sender_timeout` kills the
+walsender. The vendored `connector.Start` parks on shutdown with **no
+reconnect** in that case -- ingestion stalls permanently and does **not**
+self-heal even after the sink recovers. WI-7 closed the known trigger (seeding
+`lastXLogPos` from the slot's own `confirmed_flush_lsn` at session start), but
+the residual case -- that seed query failing on both the pre-Start and
+post-`WaitUntilReady` attempts -- remains possible.
+
+**Response:** restart the pipeline process. A restart rebuilds the AckManager
+and replays from the slot's `confirmed_flush_lsn`, which re-establishes the
+standby-status heartbeat.
+
+### (c) Pinned LSN from an unparseable ingest payload
+
+**Symptom:** `cdc_source_pending_lsns` **flat and non-zero** while
+`cdc_source_slot_lag_bytes` **grows** (the inverse of (b): here new WAL keeps
+being generated normally, but one LSN can never be confirmed).
+
+**Cause:** a wmMsg whose payload fails to unmarshal has no recoverable LSN
+anywhere -- not in a message header, not in JetStream redelivery metadata, not
+in the AckManager's own bookkeeping. DLQ-routing that message is the only
+correct thing to do with it, but doing so pins its LSN in `AckManager.pending`
+forever, since nothing will ever confirm it. Reachability is low (the same
+payload must already have parsed once to reach DLQ routing in the first place),
+but it is not zero.
+
+**Response:** restart the pipeline process. Same self-healing mechanism as (b):
+a fresh AckManager and a slot-anchored replay clears the pin.
+
+### Telling (b) and (c) apart from (a)
+
+All three can show `cdc_source_pending_lsns > 0`. The distinguishing signal is
+`cdc_source_slot_lag_bytes`:
+
+- **(a):** lag growing, `pending_lsns` may be low/normal -- a healthy sink
+  gating on a slow one, or fully caught up in-flight but the sink itself is down.
+- **(b)/(c):** lag flat-to-slowly-growing while `pending_lsns` is stuck
+  non-zero and `cdc_source_ack_watermark` has stopped advancing entirely.
+  Distinguish (b) from (c) by checking whether ingestion itself has stalled
+  (no new events flowing at all -> (b)) versus continuing normally around the
+  one pinned LSN (-> (c)); either way the response is the same restart.
+
+`CDCSourcePendingLSNsStuck` (`cdc_source_pending_lsns > 0 and
+delta(cdc_source_ack_watermark[10m]) == 0`) is the alert covering both (b) and
+(c) -- it cannot tell them apart on its own, which is why an operator paged by
+it should read this section, not just the alert text.
+
+## Alert rules
+
+`deploy/helm-chart/templates/worker/prometheusrule.yaml` defines
+`CDCSourceSlotLagWarning`, `CDCSourceSlotLagCritical`,
+`CDCSourcePendingLSNsStuck`, and `CDCSourceSlotLagProbeStale`, gated by
+`worker.alerts.enabled` (see [Status as of this commit](#status-as-of-this-commit----read-this-first)
+for current per-environment state). Thresholds live in `worker.alerts.*` in
+`values.staging.yml` / `values.production.yml`.
+
+`deploy/helm-chart/tests/` contains a `promtool test rules` unit test
+(`rules_test.yml`, evaluated against `rendered_rules.yml`, a hand-kept mirror
+of the templated rule expressions with the staging thresholds substituted
+in) proving:
+
+- `CDCSourcePendingLSNsStuck` fires when `cdc_source_pending_lsns` and
+  `cdc_source_ack_watermark` share a matching `{pipeline, source, slot}`
+  label tuple (the fixed, current exporter behaviour), and
+- it does **not** fire when the two series carry non-matching label tuples
+  (e.g. different `slot` values) -- proving the `and` join is doing real
+  work rather than vacuously matching, which is the exact bug class that
+  originally made this alert dead-on-arrival when `cdc_source_pending_lsns`
+  was exported with only a `{"source"}` label.
+- `CDCSourceSlotLagWarning` fires on sustained growth past its threshold and
+  stays silent on a flat-but-large value.
+- `CDCSourceSlotLagProbeStale` fires when the probe's success timestamp has
+  not advanced.
+
+Run it with:
+
+```sh
+cd deploy/helm-chart/tests
+docker run --rm --entrypoint promtool -v "$PWD:/rules" -w /rules \
+  docker.io/prom/prometheus:latest test rules rules_test.yml
+```
+
+If the templated alert expressions or thresholds in
+`templates/worker/prometheusrule.yaml` change, update `rendered_rules.yml` to
+match by hand and re-run the test -- it is not generated automatically from
+the Helm template.
+
+## Deploy order (aspirational -- depends on the not-yet-landed `strict_ack` flag)
+
+The checklist below describes the intended rollout **once `strict_ack` (or an
+equivalent flag) exists**. It does not apply today: see
+[Status as of this commit](#status-as-of-this-commit----read-this-first). It
+is kept here so the follow-up commit that introduces the flag can wire this
+section up rather than invent it from scratch.
+
+**Preconditions before any prod flag flip (all mandatory):**
+
+- [ ] Fix Sequence 3 (CI) landed and green, running the e2e invariant tests
+      (`TestSlotNeverAdvancesBeforeSinkAck` and siblings). This is not something
+      to verify by hand for a change that can retain unbounded WAL on the
+      source primary.
+- [ ] This WI-5a metric + `PrometheusRule` (`deploy/helm-chart/templates/worker/prometheusrule.yaml`,
+      `worker.alerts.enabled: true`) live for the target pipeline's source,
+      including `CDCSourceSlotLagProbeStale` (so a degraded probe doesn't
+      silently blind the other two alerts).
+- [ ] Bake period completed: `cdc_source_ack_watermark` tracks
+      `confirmed_flush_lsn` closely under production load. Today, with no
+      gating flag, `confirmed_flush_lsn > cdc_source_ack_watermark` is
+      expected; the gap should be small and stable, not growing.
+
+**Then, pipeline by pipeline (once the flag exists):**
+
+1. Release N: flag introduced, off by default in prod, metrics observed
+   (watermark plumbing already live today regardless of the flag).
+2. Release N (config change): once every precondition above is checked for a
+   given pipeline, flip the flag on **for that pipeline only**. Watch
+   `cdc_source_slot_lag_bytes` and sink lag closely after the flip. Stop and
+   investigate any pipeline whose slot lag grows without a corresponding sink
+   outage before proceeding to the next pipeline.
+3. Release N+1: once every pipeline has been flipped and observed healthy,
+   remove legacy ack parsing and make the flag on-by-default; flag removal in
+   N+2.
+
+**Rollback**, once the flag exists, would be flipping it back off. **That
+option does not exist today** -- see the status note at the top of this
+document. Until the flag lands, rolling back the WAL-retention behaviour
+requires reverting the `ManualCommit` change itself.

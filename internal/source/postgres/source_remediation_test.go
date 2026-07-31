@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -791,4 +792,225 @@ func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
 	// AckManager.Hydrate and (on resume) the B3 mitigation in
 	// startConnector, never via cfg.StartLSN.
 	assert.Equal(t, pq.LSN(0), got.StartLSN, "StartLSN must always be 0; the slot's confirmed_flush_lsn is the sole resume authority")
+}
+
+// TestRunSlotLagProbe_EmitsGaugeValues is plan 01a WI-5a: the periodic
+// slot-lag probe must export cdc_source_slot_lag_bytes from the injected
+// slotLagBytes seam, and cdc_source_ack_watermark from the AckManager,
+// without touching a live database.
+func TestRunSlotLagProbe_EmitsGaugeValues(t *testing.T) {
+	s := NewPostgresSource("wi5a-probe-source")
+	s.pipelineID = "pipe-1"
+	s.ackMgr = NewAckManager([]string{"sink-a"})
+	s.ackMgr.Observe(100)
+	s.ackMgr.Confirm(100, "sink-a")
+	require.Equal(t, uint64(100), s.ackMgr.Watermark())
+
+	fakeDB := &sql.DB{}
+	s.db = fakeDB
+	s.slotLagBytes = func(_ context.Context, gotDB *sql.DB, slotName string) (int64, bool) {
+		assert.Same(t, fakeDB, gotDB)
+		assert.Equal(t, "test_slot", slotName)
+		return 4096, true
+	}
+
+	prevInterval := slotLagProbeInterval
+	slotLagProbeInterval = 20 * time.Millisecond
+	defer func() { slotLagProbeInterval = prevInterval }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runSlotLagProbe(ctx, "test_slot")
+	}()
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(slotLagBytesGauge.WithLabelValues("pipe-1", "wi5a-probe-source", "test_slot")) == 4096
+	}, time.Second, 5*time.Millisecond, "cdc_source_slot_lag_bytes must reflect the injected slot lag")
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(ackWatermarkGauge.WithLabelValues("pipe-1", "wi5a-probe-source", "test_slot")) == 100
+	}, time.Second, 5*time.Millisecond, "cdc_source_ack_watermark must reflect the AckManager watermark")
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(slotLagProbeLastSuccessGauge.WithLabelValues("pipe-1", "wi5a-probe-source", "test_slot")) > 0
+	}, time.Second, 5*time.Millisecond, "cdc_source_slot_lag_probe_last_success_timestamp_seconds must be set on a successful probe")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runSlotLagProbe did not exit after ctx cancellation")
+	}
+}
+
+// TestRunSlotLagProbe_StaleOnFailureDoesNotAdvanceSuccessTimestamp is plan
+// 01a WI-5a review Defect 3: slotLagBytesGauge is a plain Prometheus gauge,
+// so on a probe failure (query error, degraded DB) it silently keeps its
+// last-known value forever -- a healthy-looking number during exactly the
+// kind of DB-connection degradation most likely to co-occur with a real
+// source-primary problem, which would otherwise silence both slot-lag
+// alerts. cdc_source_slot_lag_probe_last_success_timestamp_seconds exists
+// to make that staleness independently observable: it must advance on
+// success and MUST NOT advance while the probe is failing, so
+// CDCSourceSlotLagProbeStale can detect the gap.
+func TestRunSlotLagProbe_StaleOnFailureDoesNotAdvanceSuccessTimestamp(t *testing.T) {
+	s := NewPostgresSource("wi5a-stale-probe-source")
+	s.pipelineID = "pipe-stale"
+	s.ackMgr = NewAckManager(nil)
+	s.db = &sql.DB{}
+
+	var succeed atomic.Bool
+	s.slotLagBytes = func(context.Context, *sql.DB, string) (int64, bool) {
+		if succeed.Load() {
+			return 777, true
+		}
+		return 0, false
+	}
+
+	prevInterval := slotLagProbeInterval
+	slotLagProbeInterval = 15 * time.Millisecond
+	defer func() { slotLagProbeInterval = prevInterval }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runSlotLagProbe(ctx, "stale-slot")
+	}()
+
+	// While every probe call fails, the success-timestamp gauge must stay
+	// at its zero value (never initialized) even though several ticks
+	// have elapsed.
+	time.Sleep(80 * time.Millisecond)
+	assert.Equal(t, float64(0),
+		testutil.ToFloat64(slotLagProbeLastSuccessGauge.WithLabelValues("pipe-stale", "wi5a-stale-probe-source", "stale-slot")),
+		"the success-timestamp gauge must not advance while every probe call fails")
+
+	succeed.Store(true)
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(slotLagProbeLastSuccessGauge.WithLabelValues("pipe-stale", "wi5a-stale-probe-source", "stale-slot")) > 0
+	}, time.Second, 5*time.Millisecond, "the success-timestamp gauge must advance once the probe starts succeeding")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runSlotLagProbe did not exit after ctx cancellation")
+	}
+}
+
+// TestWI5aGauges_ShareIdenticalLabelSet is plan 01a WI-5a review Defect 1:
+// cdc_source_pending_lsns, cdc_source_slot_lag_bytes, and
+// cdc_source_ack_watermark MUST share an identical label set, because the
+// CDCSourcePendingLSNsStuck alert joins the first and third with PromQL's
+// `and` operator, which matches on the full label set by default. A
+// mismatched set (the original bug: pendingLSNsGauge had only {"source"})
+// means the join can never match any series and the alert silently never
+// fires. This test exercises the real runAckCoordinator + runSlotLagProbe
+// goroutines together and asserts all three gauges are queryable under the
+// SAME (pipeline, source, slot) label tuple.
+func TestWI5aGauges_ShareIdenticalLabelSet(t *testing.T) {
+	s := NewPostgresSource("wi5a-label-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+	s.pipelineID = "pipe-labels"
+
+	cfg := validSourceConfig()
+	cfg.SlotName = "labels_slot"
+	cfg.Tables = []string{"public.t1"}
+
+	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
+	require.NoError(t, err)
+	defer s.Stop()
+
+	stopDrain := drainMsgChan(msgChan)
+	defer stopDrain()
+
+	handler := factory.Handler()
+	require.NotNil(t, handler)
+	handler(&replication.ListenerContext{
+		Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}},
+		Ack:     func() error { return nil },
+		LSN:     pq.LSN(1),
+	})
+	ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{1}}
+
+	// pendingLSNsGauge only updates on runAckCoordinator's 500ms ticker;
+	// give it a couple of ticks.
+	require.Eventually(t, func() bool {
+		g, err := pendingLSNsGauge.GetMetricWithLabelValues("pipe-labels", "wi5a-label-source", "labels_slot")
+		return err == nil && g != nil
+	}, 3*time.Second, 20*time.Millisecond, "cdc_source_pending_lsns must be observable under {pipeline, source, slot}")
+
+	_, err = ackWatermarkGauge.GetMetricWithLabelValues("pipe-labels", "wi5a-label-source", "labels_slot")
+	assert.NoError(t, err, "cdc_source_ack_watermark must share the same label set")
+
+	_, err = slotLagBytesGauge.GetMetricWithLabelValues("pipe-labels", "wi5a-label-source", "labels_slot")
+	assert.NoError(t, err, "cdc_source_slot_lag_bytes must share the same label set")
+}
+
+// TestRunSlotLagProbe_MissingSlotIsNonFatal is plan 01a WI-5a: on a fresh
+// deployment the replication slot does not exist yet (conn.Start has not
+// created it), so slotLagBytes reports ok=false. The probe must not crash,
+// must not spam, and must still update the watermark gauge (which needs no
+// DB) and keep running until ctx is cancelled.
+func TestRunSlotLagProbe_MissingSlotIsNonFatal(t *testing.T) {
+	s := NewPostgresSource("wi5a-missing-slot-source")
+	s.ackMgr = NewAckManager(nil)
+	s.db = &sql.DB{}
+
+	prevInterval := slotLagProbeInterval
+	slotLagProbeInterval = 20 * time.Millisecond
+	defer func() { slotLagProbeInterval = prevInterval }()
+
+	var calls int32
+	s.slotLagBytes = func(context.Context, *sql.DB, string) (int64, bool) {
+		atomic.AddInt32(&calls, 1)
+		return 0, false // simulates "slot does not exist yet" / query error
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Should not panic despite every probe call reporting ok=false.
+		s.runSlotLagProbe(ctx, "not-yet-created-slot")
+	}()
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&calls) >= 1
+	}, 2*time.Second, 5*time.Millisecond, "the probe must still attempt the query on a missing slot")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runSlotLagProbe did not exit after ctx cancellation on the missing-slot path")
+	}
+}
+
+// TestRunSlotLagProbe_ExitsOnCtxCancel is plan 01a WI-5a: the probe
+// goroutine must be a well-behaved s.runWg member -- it exits promptly on
+// ctx cancellation and never leaks, even when slotLagBytes is nil (e.g. a
+// test-constructed PostgresSource that never called NewPostgresSource).
+func TestRunSlotLagProbe_ExitsOnCtxCancel(t *testing.T) {
+	s := &PostgresSource{name: "wi5a-nil-seam-source", ackMgr: NewAckManager(nil)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runSlotLagProbe(ctx, "some-slot")
+	}()
+
+	cancel()
+	require.NoError(t, waitWithTimeout(&wg, time.Second),
+		"runSlotLagProbe must exit promptly on ctx cancellation, even with a nil slotLagBytes seam")
 }

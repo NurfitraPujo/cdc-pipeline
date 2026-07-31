@@ -1,0 +1,125 @@
+{{- if .Values.worker.alerts.enabled }}
+# WI-5a (plan 01a §3): slot-lag observability. Under ManualCommit -- which
+# is UNCONDITIONALLY ENABLED as of this commit (internal/source/postgres/source.go,
+# cfg.ManualCommit: true in Start) -- the replication slot only advances
+# after every configured sink has durably written an LSN, so a dead/slow
+# sink freezes confirmed_flush_lsn and PostgreSQL retains WAL without bound
+# on the SOURCE primary, RIGHT NOW, in every environment where this chart
+# is deployed. That is the correct at-least-once trade (loss -> visible
+# backpressure), but it is only safe to operate with these alerts live --
+# and until worker.alerts.enabled is true here, it is NOT visible.
+#
+# See deploy/helm-chart/RUNBOOK.md for the full risk statement, the
+# deploy-order checklist, and the three distinct failure modes these
+# alerts and their siblings cover.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Values.worker.name }}-slot-lag
+  labels:
+    app.kubernetes.io/name: {{ .Values.worker.name }}
+    app.kubernetes.io/environment: {{ .Values.environment }}
+    {{- with .Values.worker.alerts.ruleSelectorLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: cdc-source-slot-lag
+      rules:
+        # (a) Sink down -> WAL growth (the headline risk this WI exists
+        # for). Fires when slot lag has been non-trivially large AND
+        # growing for a sustained window, so a normal burst of write
+        # traffic followed by a healthy catch-up does not page anyone.
+        - alert: CDCSourceSlotLagWarning
+          expr: |
+            cdc_source_slot_lag_bytes > {{ .Values.worker.alerts.slotLag.warnBytes }}
+            and
+            delta(cdc_source_slot_lag_bytes[15m]) > 0
+          for: {{ .Values.worker.alerts.slotLag.warnFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC replication slot lag is growing for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_bytes for slot {{ "{{" }} $labels.slot {{ "}}" }} is
+              {{ "{{" }} $value | humanize1024 {{ "}}" }}B and rising. This means the
+              replication slot's confirmed_flush_lsn is not advancing as fast as the
+              source primary is generating WAL -- almost always a downstream sink
+              that is down, slow, or misconfigured. WAL is being retained without
+              bound on the SOURCE primary until this resolves. See runbook
+              failure mode (a) in deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#a-sink-down--wal-growth"
+        - alert: CDCSourceSlotLagCritical
+          expr: |
+            cdc_source_slot_lag_bytes > {{ .Values.worker.alerts.slotLag.pageBytes }}
+            and
+            delta(cdc_source_slot_lag_bytes[15m]) > 0
+          for: {{ .Values.worker.alerts.slotLag.pageFor }}
+          labels:
+            severity: page
+          annotations:
+            summary: "CDC replication slot lag threatens source primary disk for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_bytes for slot {{ "{{" }} $labels.slot {{ "}}" }} is
+              {{ "{{" }} $value | humanize1024 {{ "}}" }}B and still growing. This is
+              approaching a source-primary disk-pressure outage. Page on-call. See
+              runbook failure mode (a) in deploy/helm-chart/RUNBOOK.md -- the
+              disaster floor is max_slot_wal_keep_size on the source DB, which
+              accepts slot invalidation and a forced re-snapshot rather than
+              filling the primary's disk.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#a-sink-down--wal-growth"
+
+        # (b) Wedged connector needing a process restart. pending_lsns is
+        # stuck non-zero, but distinguishing (b) from (c) requires an
+        # operator to also look at cdc_source_slot_lag_bytes (flat here,
+        # growing in (c)) -- both share this trigger and the runbook
+        # documents how to tell them apart.
+        - alert: CDCSourcePendingLSNsStuck
+          expr: |
+            cdc_source_pending_lsns > 0
+            and
+            delta(cdc_source_ack_watermark[10m]) == 0
+          for: {{ .Values.worker.alerts.pendingStuck.for }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC source has pending LSNs that are not draining for {{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_pending_lsns has been non-zero and
+              cdc_source_ack_watermark has not moved for at least
+              {{ .Values.worker.alerts.pendingStuck.for }}. This is either a
+              wedged connector needing a process restart (failure mode (b)) or
+              a pinned LSN from an unparseable ingest payload (failure mode
+              (c)) -- check cdc_source_slot_lag_bytes to tell them apart.
+              Response either way: restart the pipeline. See
+              deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#telling-b-and-c-apart-from-a"
+
+        # Probe-health alert (WI-5a review Defect 3). slotLagBytesGauge is a
+        # plain gauge: on a probe failure it silently keeps its LAST value
+        # rather than clearing it, so a degraded source-DB connection --
+        # exactly the kind of problem most likely to co-occur with a real
+        # slot-lag incident -- would otherwise scrape as a stale, healthy-
+        # looking number and silence CDCSourceSlotLagWarning/Critical during
+        # the incident they exist for. This alert fires on staleness itself,
+        # independent of whatever the last-reported lag value was.
+        - alert: CDCSourceSlotLagProbeStale
+          expr: |
+            time() - cdc_source_slot_lag_probe_last_success_timestamp_seconds > {{ .Values.worker.alerts.probeStale.staleAfterSeconds }}
+          for: {{ .Values.worker.alerts.probeStale.for }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "CDC slot-lag probe has not succeeded recently for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_slot_lag_probe_last_success_timestamp_seconds for
+              slot {{ "{{" }} $labels.slot {{ "}}" }} has not advanced in over
+              {{ .Values.worker.alerts.probeStale.staleAfterSeconds }}s. The
+              probe queries pg_replication_slots over the same DB connection
+              used for replication -- treat this as a signal that either the
+              source DB connection or the probe itself is degraded, and that
+              cdc_source_slot_lag_bytes may be reporting a stale, out-of-date
+              value rather than the current one. Do not trust the lag alerts
+              while this is firing; investigate DB connectivity directly.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#probe-health"
+{{- end }}
