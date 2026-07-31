@@ -13,11 +13,20 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 )
 
-const retryCleanupInterval = 5 * time.Minute
+const (
+	retryCleanupInterval = 5 * time.Minute
+
+	// recordAckMaxAttempts/recordAckRetryBackoff bound the RecordAck publish
+	// retry before the flush gives up and Nacks the batch for JetStream
+	// redelivery (plan §3.WI-5: "publish failure must not proceed silently").
+	recordAckMaxAttempts  = 3
+	recordAckRetryBackoff = 100 * time.Millisecond
+)
 
 type ConfiguredTransformer struct {
 	Transformer    transformer.Transformer
@@ -283,7 +292,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			for i := range batchFromNats {
 				m := &batchFromNats[i]
-				if m.Op == "drain_marker" {
+				if m.Op == protocol.OpDrainMarker {
 					c.mu.RLock()
 					isDraining := c.isDraining
 					c.mu.RUnlock()
@@ -423,6 +432,19 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 		return
 	}
 	if len(toUpload) == 0 {
+		// Every message in batch was terminally decided by transformer
+		// filtering (processMessages can drop rows, e.g. via a transformer's
+		// keep=false at :184-186) — nothing will ever be written for those
+		// LSNs by anyone. That IS the durability decision, so it must be
+		// confirmed the same as a successful sink write, or the source's
+		// AckManager waits for a RecordAck that will never come and the
+		// watermark — and the replication slot behind it — freezes forever.
+		if !c.publishRecordAck(ctx, batch) {
+			for _, m := range wmMsgs {
+				m.Nack()
+			}
+			return
+		}
 		for _, m := range wmMsgs {
 			m.Ack()
 			c.retryMu.Lock()
@@ -438,6 +460,30 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 	}
 	log.Debug().Int("count", len(toUpload)).Str("pipeline_id", c.pipelineID).Msg("Consumer: Batch upload successful")
 
+	// Ordering (crash-window fix, plan §3.WI-5): publish the RecordAck BEFORE
+	// acking the wmMsgs, not after. A crash between BatchUpload and this point
+	// has no JetStream redelivery to regenerate the ack once wmMsgs are acked,
+	// which would silently stall the watermark. Publishing first means a crash
+	// before the wmMsg ack simply causes JetStream to redeliver the batch; the
+	// re-emitted RecordAck is harmless because AckManager.Confirm(lsn <=
+	// watermark) is a no-op.
+	//
+	// The LSN set comes from `batch` (the full terminally-handled input), not
+	// `toUpload` (the post-transformer-filter subset): any row a transformer
+	// dropped from toUpload was still terminally decided — it will never be
+	// written — so its LSN must still be confirmed, or that LSN is stuck in
+	// the source's AckManager.pending forever even though the wmMsg carrying
+	// it gets acked below.
+	if !c.publishRecordAck(ctx, batch) {
+		// Publish failed after bounded retries: never proceed silently (a lost
+		// ack would permanently stall the watermark). Nack so the whole flush
+		// re-runs on redelivery.
+		for _, m := range wmMsgs {
+			m.Nack()
+		}
+		return
+	}
+
 	for _, m := range wmMsgs {
 		m.Ack()
 		c.retryMu.Lock()
@@ -445,30 +491,92 @@ func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs [
 		c.retryMu.Unlock()
 	}
 
-	// NEW: Publish acks back to the producer topic for ALL uploaded messages
-	// This ensures the source only advances its LSN when the data is in the sink.
-	ackTopic := protocol.AcksTopic(c.pipelineID)
-	for _, m := range toUpload {
-		if m.Op == "drain_marker" || m.Op == protocol.OpSchemaChangeAck {
-			continue
-		}
-		ack := protocol.Message{
-			Op:       "ack",
-			SourceID: m.SourceID,
-			Table:    m.Table,
-			LSN:      m.LSN,
-		}
-		ackData, _ := ack.MarshalMsg(nil)
-		if err := c.publisher.Publish(ackTopic, message.NewMessage(m.UUID, ackData)); err != nil {
-			log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to publish record ack")
-		}
-	}
-
 	c.updateStats(toUpload)
 	if time.Since(c.lastCleanupTime) > retryCleanupInterval {
 		c.cleanupOldRetries()
 		c.lastCleanupTime = time.Now()
 	}
+}
+
+// publishRecordAck publishes a single protocol.RecordAck envelope on
+// AcksTopic covering every LSN in msgs whose fate is terminally decided
+// (excluding OpSnapshot and LSN-0 messages, whose durability story is
+// JetStream + chunk-job state, not the LSN watermark; and OpDrainMarker/
+// OpSchemaChangeAck, which never carry a replication LSN). Callers must pass
+// the full set of messages whose disposition is now final — durably
+// written, deliberately filtered by a transformer, or routed to DLQ/isolated
+// as poison are all terminal and must be confirmed, since the source is
+// waiting to learn the LSN will never need replaying. If msgs carries no
+// LSNs worth acking, this is a no-op success. Retries a bounded number of
+// times on publish failure; returns false only once retries are exhausted,
+// signalling the caller to Nack rather than silently stalling the watermark.
+func (c *Consumer) publishRecordAck(ctx context.Context, msgs []protocol.Message) bool {
+	var lsns []uint64
+	var sourceID string
+	for _, m := range msgs {
+		if m.Op == protocol.OpDrainMarker || m.Op == protocol.OpSchemaChangeAck {
+			continue
+		}
+		if sourceID == "" {
+			sourceID = m.SourceID
+		}
+		if m.Op == protocol.OpSnapshot || m.LSN == 0 {
+			continue
+		}
+		lsns = append(lsns, m.LSN)
+	}
+	if len(lsns) == 0 {
+		return true
+	}
+
+	recordAck := protocol.RecordAck{
+		PipelineID: c.pipelineID,
+		SourceID:   sourceID,
+		SinkID:     c.sinkID,
+		LSNs:       lsns,
+		Timestamp:  time.Now(),
+	}
+	payload, err := recordAck.MarshalMsg(nil)
+	if err != nil {
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to marshal RecordAck")
+		return false
+	}
+	envelope := protocol.Message{
+		Op:        protocol.OpRecordAck,
+		SourceID:  sourceID,
+		SinkID:    c.sinkID,
+		Payload:   payload,
+		Timestamp: time.Now(),
+	}
+	envData, err := envelope.MarshalMsg(nil)
+	if err != nil {
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to marshal RecordAck envelope")
+		return false
+	}
+
+	ackTopic := protocol.AcksTopic(c.pipelineID)
+	var lastErr error
+	for attempt := 1; attempt <= recordAckMaxAttempts; attempt++ {
+		pubErr := c.publisher.Publish(ackTopic, message.NewMessage(uuid.New().String(), envData))
+		if pubErr == nil {
+			return true
+		}
+		lastErr = pubErr
+
+		if attempt == recordAckMaxAttempts {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			attempt = recordAckMaxAttempts // stop retrying; ctx is dead
+		case <-time.After(recordAckRetryBackoff):
+		}
+	}
+
+	log.Error().Err(lastErr).Str("pipeline_id", c.pipelineID).Msg("RecordAck publish exhausted retries; Nacking batch for JetStream redelivery")
+	return false
 }
 
 // T0-2: flushWithFilter flushes batch while using acksFilter to decide which wmMsgs to ack.
@@ -484,6 +592,17 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 		return
 	}
 	if len(toUpload) == 0 {
+		// Same terminal-decision reasoning as flush's len(toUpload)==0 branch:
+		// transformer-filtered rows in batch will never be written by anyone,
+		// so their LSNs must still be confirmed before acking.
+		if !c.publishRecordAck(ctx, batch) {
+			for _, m := range wmMsgs {
+				if acksFilter == nil || acksFilter(m) {
+					m.Nack()
+				}
+			}
+			return
+		}
 		for _, m := range wmMsgs {
 			if acksFilter == nil || acksFilter(m) {
 				m.Ack()
@@ -501,6 +620,19 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 	}
 	log.Debug().Int("count", len(toUpload)).Str("pipeline_id", c.pipelineID).Msg("Consumer: Batch upload successful")
 
+	// Same publish-before-ack ordering as flush (see its comment), and the
+	// same batch-not-toUpload LSN-set reasoning: any row a transformer
+	// dropped from toUpload was still terminally decided and must still be
+	// confirmed.
+	if !c.publishRecordAck(ctx, batch) {
+		for _, m := range wmMsgs {
+			if acksFilter == nil || acksFilter(m) {
+				m.Nack()
+			}
+		}
+		return
+	}
+
 	for _, m := range wmMsgs {
 		if acksFilter == nil || acksFilter(m) {
 			m.Ack()
@@ -508,24 +640,6 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 		c.retryMu.Lock()
 		delete(c.retries, m.UUID)
 		c.retryMu.Unlock()
-	}
-
-	// Publish acks back to the producer topic for ALL uploaded messages
-	ackTopic := protocol.AcksTopic(c.pipelineID)
-	for _, m := range toUpload {
-		if m.Op == "drain_marker" || m.Op == protocol.OpSchemaChangeAck {
-			continue
-		}
-		ack := protocol.Message{
-			Op:       "ack",
-			SourceID: m.SourceID,
-			Table:    m.Table,
-			LSN:      m.LSN,
-		}
-		ackData, _ := ack.MarshalMsg(nil)
-		if err := c.publisher.Publish(ackTopic, message.NewMessage(m.UUID, ackData)); err != nil {
-			log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to publish record ack")
-		}
 	}
 
 	c.updateStats(toUpload)
@@ -630,17 +744,23 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 
 	now := time.Now()
 	for key, m := range latestByTable {
-		checkpoint := protocol.Checkpoint{
-			EgressLSN: m.LSN,
-			LastPK:    m.PK,
-			Status:    "ACTIVE",
-			UpdatedAt: now,
-		}
-		cpData, err := checkpoint.MarshalMsg(nil)
-		if err == nil {
-			cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
-			if _, err := c.kv.Put(cpKey, cpData); err != nil {
-				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
+		// Snapshot rows carry no meaningful LSN (Critical 11's second half):
+		// writing EgressLSN from them would poison the pipeline's resume floor
+		// (pipeline.go min-EgressLSN scan) with a value that has nothing to do
+		// with replication progress.
+		if m.Op != protocol.OpSnapshot {
+			checkpoint := protocol.Checkpoint{
+				EgressLSN: m.LSN,
+				LastPK:    m.PK,
+				Status:    "ACTIVE",
+				UpdatedAt: now,
+			}
+			cpData, err := checkpoint.MarshalMsg(nil)
+			if err == nil {
+				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+				if _, err := c.kv.Put(cpKey, cpData); err != nil {
+					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
+				}
 			}
 		}
 
@@ -695,6 +815,11 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 	for _, wmMsg := range wmMsgs {
 		var msgs []protocol.Message
 		if _, err := protocol.UnmarshalMessageBatch(wmMsg.Payload, &msgs); err != nil {
+			// The payload can't be parsed, so the LSNs it carried are
+			// unrecoverable here — there is nothing to confirm. This gap
+			// predates WI-5 (an unparseable payload was already unrecoverable
+			// data) and is out of this WI's scope; routing to DLQ is still the
+			// right terminal action for the message itself.
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Failed to unmarshal message for isolation, routing to DLQ")
 			c.routeToDLQ(wmMsg)
 			continue
@@ -703,10 +828,16 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 		toUpload, err := c.processMessages(ctx, msgs)
 		if err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Transformation failed in isolation, routing to DLQ")
-			c.routeToDLQ(wmMsg)
+			c.routeToDLQWithAck(ctx, wmMsg, msgs)
 			continue
 		}
 		if len(toUpload) == 0 {
+			// Every message in msgs was filtered out by a transformer — a
+			// terminal decision identical to flush's len(toUpload)==0 branch.
+			if !c.publishRecordAck(ctx, msgs) {
+				wmMsg.Nack()
+				continue
+			}
 			wmMsg.Ack()
 			c.retryMu.Lock()
 			delete(c.retries, wmMsg.UUID)
@@ -724,17 +855,38 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 
 			if attempts >= c.retryConfig.MaxRetries && c.retryConfig.EnableDLQ {
 				log.Warn().Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Message exceeded MaxRetries, routing to DLQ")
-				c.routeToDLQ(wmMsg)
+				c.routeToDLQWithAck(ctx, wmMsg, msgs)
 			} else {
 				wmMsg.Nack()
 			}
 		} else {
+			// Durable write succeeded in isolation mode — the same terminal
+			// decision as the main flush path, and it must be confirmed the
+			// same way, or a moderately long transient sink outage (enough to
+			// exceed MaxRetries, no optional feature required) freezes the
+			// slot even though every row landed in the sink.
+			if !c.publishRecordAck(ctx, msgs) {
+				wmMsg.Nack()
+				continue
+			}
 			wmMsg.Ack()
 			c.retryMu.Lock()
 			delete(c.retries, wmMsg.UUID)
 			c.retryMu.Unlock()
 		}
 	}
+}
+
+// routeToDLQWithAck emits a RecordAck for msgs' LSNs before routing wmMsg to
+// the DLQ. Routing to DLQ is itself a terminal durability decision — the row
+// will never be written by anyone — so the source must be told the LSN will
+// never need replaying, exactly as if it had been durably written.
+func (c *Consumer) routeToDLQWithAck(ctx context.Context, wmMsg *message.Message, msgs []protocol.Message) {
+	if !c.publishRecordAck(ctx, msgs) {
+		wmMsg.Nack()
+		return
+	}
+	c.routeToDLQ(wmMsg)
 }
 
 func (c *Consumer) routeToDLQ(msg *message.Message) {

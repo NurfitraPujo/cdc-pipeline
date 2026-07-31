@@ -144,11 +144,12 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	// 0. Recovery: Check KV for frozen tables and restore state
 	p.recoverEvoStates(ctx)
 
-	// TODO(WI-5): ackers should be derived from the sinks actually wired
-	// into this pipeline's consumers (p.config.Sinks), gating the source's
-	// AckManager on every one of them. Passed through as-is for now; WI-5
-	// is where the engine starts forwarding typed, LSN-carrying acks that
-	// make this parameter meaningful.
+	// ackers is the set of sink IDs whose confirmation is required before the
+	// source's AckManager may advance the watermark past an LSN. It must match,
+	// string-for-string, the SinkID a consumer puts on RecordAck (see
+	// Consumer.publishRecordAck / c.sinkID, sourced from the same
+	// p.config.Sinks list via factory.go) — a mismatch here can never be
+	// satisfied and permanently freezes the replication slot.
 	p.mu.RLock()
 	ackers := append([]string(nil), p.config.Sinks...)
 	p.mu.RUnlock()
@@ -187,20 +188,54 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 			if ack.Op == protocol.OpSchemaChangeAck {
 				p.handleSchemaAck(ctx, ack)
 				ackMsg.Ack()
-			} else if ack.Op == "ack" {
-				// TODO(WI-5): this is still the legacy anonymous-ack path;
-				// it carries no LSN or sink identity. WI-5 replaces it with
-				// decoding protocol.OpRecordAck into a source.SourceAck
-				// (with the real SinkID and LSNs) and a blocking, ctx-bound
-				// send (deleting the `default:` drop below). Kept as a
-				// best-effort forward here purely so the interface change
-				// compiles.
+			} else if ack.Op == protocol.OpRecordAck {
+				var recordAck protocol.RecordAck
+				if _, err := recordAck.UnmarshalMsg(ack.Payload); err != nil {
+					log.Error().Err(err).Msg("Failed to unmarshal RecordAck payload")
+					ackMsg.Nack()
+					continue
+				}
+				// Blocking, ctx-guarded send: the source's ack coordinator is
+				// the only thing that can advance the replication slot, so a
+				// dropped ack here permanently freezes it. Ack the NATS
+				// message only after the forward succeeds.
 				select {
-				case ackChan <- source.SourceAck{}:
+				case ackChan <- source.SourceAck{SinkID: recordAck.SinkID, LSNs: recordAck.LSNs}:
 				case <-ctx.Done():
-					return lastLSN, nil
-				default:
-					// No one waiting, fine
+					return lastLSN, ctx.Err()
+				}
+				ackMsg.Ack()
+			} else if ack.Op == "ack" {
+				// Legacy single-LSN shape, accepted during rollout (plan §6):
+				// producer and consumers deploy together in one binary, but a
+				// rolling deploy shares the durable, so an older (pre-WI-5)
+				// consumer may still emit this shape for a window. That
+				// consumer never set a SinkID (it didn't exist yet), so
+				// forwarding it as-is would produce SourceAck{SinkID: ""},
+				// which can never satisfy AckManager.required and would pin
+				// the watermark until every worker restarts onto the new
+				// binary. Pre-WI-5 there was no multi-sink gating at all, so
+				// deliberately treat a legacy ack as confirming ALL required
+				// sinks — that restores the old (weaker) semantics for the
+				// mixed-version window rather than inventing a new guarantee,
+				// and is strictly better than freezing the slot. This branch
+				// is deleted one release later along with the rest of the
+				// legacy-ack path (plan §6 step 3).
+				var lsns []uint64
+				if ack.LSN > 0 {
+					lsns = []uint64{ack.LSN}
+				}
+				if len(lsns) > 0 {
+					p.mu.RLock()
+					sinks := append([]string(nil), p.config.Sinks...)
+					p.mu.RUnlock()
+					for _, sinkID := range sinks {
+						select {
+						case ackChan <- source.SourceAck{SinkID: sinkID, LSNs: lsns}:
+						case <-ctx.Done():
+							return lastLSN, ctx.Err()
+						}
+					}
 				}
 				ackMsg.Ack()
 			}
@@ -210,7 +245,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 
 			if !ok {
 				marker := protocol.Message{
-					Op:        "drain_marker",
+					Op:        protocol.OpDrainMarker,
 					Timestamp: time.Now(),
 				}
 				batch := protocol.MessageBatch{marker}
@@ -317,6 +352,12 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				for _, m := range mainBatch {
 					if m.LSN > lastLSN {
 						lastLSN = m.LSN
+					}
+					// Snapshot rows are checkpointed by chunk, not by LSN (Critical
+					// 11's second half): their LSN is meaningless/zero and must not
+					// poison the ingress checkpoint used as a resume floor.
+					if m.Op == protocol.OpSnapshot || m.LSN == 0 {
+						continue
 					}
 					latestByTable[m.SourceID+"."+m.Table] = m
 				}
