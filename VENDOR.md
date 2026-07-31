@@ -78,6 +78,25 @@ a partial re-apply **fails to compile**, which is intentional — it is loud rat
 Re-apply the interface changes first, then the implementations, then the call sites listed in
 the PATCHES.md T0-2 entry. This patch is a strong argument for the fork approach below.
 
+**T0-3** closes a shipping-blocker data-loss bug found in T0-1's own design: under
+`ManualCommit`, `handleKeepalive` called `Config.KeepaliveFunc` inline on the `sink` goroutine,
+bypassing the `messageCH` queue (and the one-message look-ahead in `messageBuffer`) that actually
+feeds `Observe` via `process`/`listenerFunc`. On a fresh start with a WAL replay backlog, the
+first keepalive's `ServerWALEnd` typically already sits past every buffered commit, so an
+embedder's "nothing pending" idle-advance logic (this repo's `AckManager.IdleAdvance`) could
+fast-forward its watermark past an entire backlog before a single row of it had reached `Observe`
+— silent, unrecoverable data loss with a healthy-looking pending-count metric throughout. T0-3
+fixes this by enqueuing the keepalive as an in-band marker on `messageCH` itself (after flushing
+`messageBuffer`'s look-ahead), so `KeepaliveFunc` only fires once every previously decoded message
+has already reached `Observe`. Like T0-1, it is flag-guarded (`ManualCommit`-only) and additive to
+the `Message`/`process` shapes, so it should re-apply cleanly via the diff/rsync/patch workflow —
+but re-verify `handleKeepalive`'s new `buf *messageBuffer` parameter and `process()`'s
+`keepaliveMarker` type-switch branch by hand, for the same reason as T0-1 (`stream.go` is the file
+most likely to shift underneath a line-based patch). See the PATCHES.md T0-3 entry for the full
+reasoning on the flush-ordering guarantee and the full-channel drop decision, and
+`internal/source/postgres/ack.go`'s `AckManager.IdleAdvance` (`highestSeen`/`idleTrusted`) for the
+application-side defence-in-depth added alongside it.
+
 ## **Recommended Alternative: Use a Fork**
 
 If you find yourself frequently updating this dependency, the most sustainable approach is to:

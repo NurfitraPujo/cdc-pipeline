@@ -3,6 +3,8 @@ package postgres
 import (
 	"sort"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // ackEntry tracks the confirmation state of a single observed LSN.
@@ -14,13 +16,24 @@ import (
 //   - confirms maps sinkID -> number of times that sink has durably
 //     written this LSN. A sink's confirms must reach `observed` before its
 //     vote counts toward the watermark.
-//   - selfAcked marks LSNs that never leave the source (filtered/relation
-//     events observed via ObserveConfirmed): they are fully confirmed the
-//     moment they are observed and never wait on any sink.
+//   - selfAcked counts how many of those observations never leave the source
+//     (filtered/relation events observed via ObserveConfirmed): each is
+//     confirmed the moment it is observed and never waits on any sink.
+//
+// selfAcked is a COUNTER, not a flag, and this is load-bearing. An LSN can
+// carry both a filtered event and a data event — the vendored library
+// rewrites the last message of a transaction to the commit LSN, so a
+// transaction touching both a tracked and an untracked table collides on it.
+// While selfAcked was a bool, one filtered observation flipped the whole
+// entry to "fully confirmed" and the watermark sailed past a data row no
+// sink had written: the replication slot advanced past unacknowledged data,
+// which is the exact loss this plan exists to prevent. Caught by
+// TestKeepaliveDoesNotConfirmInflight once real WAL churn on an untracked
+// table was running alongside a blocked sink.
 type ackEntry struct {
 	observed  int
 	confirms  map[string]int
-	selfAcked bool
+	selfAcked int
 }
 
 // AckManager tracks the lifecycle of CDC events flowing from the PostgreSQL
@@ -58,6 +71,44 @@ type AckManager struct {
 	pending   map[uint64]*ackEntry
 	lsns      []uint64 // sorted slice of observed-or-confirmed, not-yet-watermarked LSNs
 	watermark uint64
+
+	// highestSeen is the maximum LSN ever passed to Observe or ObserveConfirmed,
+	// and hasSeenData is whether that has ever happened at least once. Together
+	// they are IdleAdvance's defence-in-depth guard against fast-forwarding past
+	// a replay backlog that has not actually reached Observe yet - see IdleAdvance.
+	highestSeen uint64
+	hasSeenData bool
+	// idleTrusted gates how strictly IdleAdvance enforces the highestSeen check.
+	// It starts false and is re-armed (set back to false) every time a new LSN
+	// becomes pending (len(lsns) goes 0 -> >0) -- i.e. every time real backlog
+	// shows up that could, under a regression of the T0-3 in-band-keepalive
+	// ordering fix, race a keepalive past undelivered data.
+	//
+	// The first IdleAdvance attempted after such backlog fully drains is
+	// checked against highestSeen: if it lands within range, it succeeds and
+	// idleTrusted latches true directly. If instead it asks to jump past
+	// highestSeen, that single attempt is refused and logged loudly as a
+	// canary -- exactly the signal a T0-3 ordering regression would trip --
+	// but idleTrusted ALSO latches true at that point, so it is a one-time
+	// warning, not a standing block. This is deliberate: nothing in
+	// AckManager can distinguish "a keepalive is racing ahead of decoded,
+	// not-yet-Observed data" (dangerous - the T0-3 bug shape) from "WAL is
+	// advancing on an untracked table whose transactions never produce an
+	// Observe/ObserveConfirmed call at all" (safe, and exactly what
+	// IdleAdvance exists to fast-forward past for WAL-bloat protection) --
+	// only the *ordering guarantee* T0-3 provides tells them apart, and that
+	// guarantee, once true, holds for every subsequent call. Latching after
+	// one logged refusal keeps the guard from permanently defeating
+	// legitimate WAL-bloat protection on a fully-acked, idle pipeline while
+	// still surfacing a regression the moment it (re)appears.
+	idleTrusted bool
+
+	// belowWatermarkDrops counts Observe calls for an lsn <= watermark. In a
+	// correct system this is unreachable: it means the replication slot has
+	// already durably confirmed an LSN whose data event is only now arriving,
+	// i.e. data that should have been protected by the watermark was not. See
+	// Observe.
+	belowWatermarkDrops uint64
 }
 
 // NewAckManager returns an AckManager ready to track observed LSNs, gated
@@ -88,6 +139,12 @@ func (a *AckManager) entryLocked(lsn uint64) *ackEntry {
 // insertSortedLocked inserts lsn into the sorted a.lsns slice if it is not
 // already present. Callers must hold a.mu.
 func (a *AckManager) insertSortedLocked(lsn uint64) {
+	if len(a.lsns) == 0 {
+		// New backlog just appeared: re-arm the idle-advance guard so the
+		// first IdleAdvance attempted once this drains again must fall
+		// within [watermark, highestSeen]. See idleTrusted's doc comment.
+		a.idleTrusted = false
+	}
 	n := len(a.lsns)
 	if n == 0 || lsn > a.lsns[n-1] {
 		a.lsns = append(a.lsns, lsn)
@@ -103,20 +160,29 @@ func (a *AckManager) insertSortedLocked(lsn uint64) {
 }
 
 // fullyConfirmedLocked reports whether entry e is eligible for the
-// watermark: it must have been observed at least once, and (either it is
-// self-acked, or every required sink has confirmed it at least `observed`
-// times). Callers must hold a.mu.
+// watermark. Each observation of an LSN is accounted for exactly once:
+// selfAcked covers the filtered ones (which never reach a sink), and the
+// remainder must be confirmed by EVERY required sink.
+//
+// Deliberately not a short-circuit on selfAcked: a single filtered event
+// sharing an LSN with a data event must not vouch for the data event.
+// Callers must hold a.mu.
 func (a *AckManager) fullyConfirmedLocked(e *ackEntry) bool {
 	if e.observed == 0 {
 		// Confirmed only by ghosts (no matching Observe yet); never
 		// eligible until the event is actually produced.
 		return false
 	}
-	if e.selfAcked {
+	// Observations still awaiting a downstream write. Filtered events are
+	// already accounted for by selfAcked and are subtracted out.
+	needed := e.observed - e.selfAcked
+	if needed <= 0 {
+		// Every observation of this LSN was filtered at the source, so no
+		// sink will ever see it.
 		return true
 	}
 	for _, sink := range a.required {
-		if e.confirms[sink] < e.observed {
+		if e.confirms[sink] < needed {
 			return false
 		}
 	}
@@ -148,7 +214,24 @@ func (a *AckManager) advanceLocked() {
 func (a *AckManager) Observe(lsn uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.hasSeenData = true
+	if lsn > a.highestSeen {
+		a.highestSeen = lsn
+	}
 	if lsn <= a.watermark {
+		// Unreachable in a correct system: an Observe below the watermark means
+		// the slot already told PostgreSQL this LSN (and everything before it)
+		// is durably confirmed, yet its data event is only now arriving - i.e.
+		// unacknowledged data was reported acknowledged. This branch being loud
+		// is precisely what would have surfaced the IdleAdvance-past-backlog bug
+		// (T0-3) instead of it hiding behind a healthy-looking pending-count
+		// metric. Do not silence this without addressing why it fired.
+		a.belowWatermarkDrops++
+		log.Error().
+			Uint64("lsn", lsn).
+			Uint64("watermark", a.watermark).
+			Uint64("belowWatermarkDrops", a.belowWatermarkDrops).
+			Msg("AckManager.Observe: dropped an LSN at or below the watermark - data may have been lost")
 		return
 	}
 	e := a.entryLocked(lsn)
@@ -163,12 +246,22 @@ func (a *AckManager) Observe(lsn uint64) {
 func (a *AckManager) ObserveConfirmed(lsn uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.hasSeenData = true
+	if lsn > a.highestSeen {
+		a.highestSeen = lsn
+	}
 	if lsn <= a.watermark {
+		// Benign and left quiet: filtered/relation events legitimately arrive
+		// below the watermark (e.g. replayed after a restart). Unlike Observe's
+		// equivalent branch, this is not evidence of lost data.
 		return
 	}
 	e := a.entryLocked(lsn)
 	e.observed++
-	e.selfAcked = true
+	// Count this observation as self-acked rather than flagging the whole
+	// entry: a data event may share this LSN and must still wait on its
+	// sinks. See the ackEntry doc comment.
+	e.selfAcked++
 	a.advanceLocked()
 }
 
@@ -228,7 +321,46 @@ func (a *AckManager) IdleAdvance(serverWALEnd uint64) bool {
 	if serverWALEnd <= a.watermark {
 		return false
 	}
+	// Defence-in-depth against T0-3: len(a.lsns) == 0 is only a true statement
+	// about "nothing in flight" if the stream delivers keepalives strictly
+	// after every preceding decoded message has reached Observe (guaranteed by
+	// the T0-3 vendored patch). If some future change to the vendored stream
+	// regresses that ordering, len(a.lsns) == 0 can once again mean "the
+	// replay backlog hasn't reached Observe yet" rather than "there is no
+	// backlog" - and IdleAdvance would silently fast-forward past it exactly
+	// as it did before T0-3.
+	//
+	// Once any data has ever flowed (hasSeenData), refuse to advance past the
+	// highest LSN actually Observe()'d: serverWALEnd > highestSeen means the
+	// primary claims WAL exists beyond anything this process has seen through
+	// Observe, which is precisely the unsafe fast-forward-past-backlog shape.
+	//
+	// A slot that has NEVER seen any traffic (hasSeenData == false) is exempt:
+	// refusing to advance there would defeat the whole point of IdleAdvance -
+	// WAL-bloat protection on a genuinely idle slot with nothing to lose.
+	if a.hasSeenData && !a.idleTrusted && serverWALEnd > a.highestSeen {
+		log.Error().
+			Uint64("serverWALEnd", serverWALEnd).
+			Uint64("highestSeen", a.highestSeen).
+			Uint64("watermark", a.watermark).
+			Msg("AckManager.IdleAdvance: refusing to fast-forward past the highest Observe()'d LSN " +
+				"(first attempt after backlog drained) - retrying on the next keepalive")
+		// Latch trust now, even though THIS call is refused: the point of the
+		// guard is to prove, once, that a keepalive-driven jump beyond
+		// highestSeen was actually observed happening (the canary a future
+		// T0-3 ordering regression would trip), not to block forever - see
+		// idleTrusted's doc comment. Blocking every call would starve
+		// WAL-bloat protection on a legitimately idle pipeline whose ongoing
+		// WAL activity (e.g. an untracked table) never produces an Observe.
+		a.idleTrusted = true
+		return false
+	}
 	a.watermark = serverWALEnd
+	// Latch trust: this call landed at or below highestSeen (or hasSeenData
+	// was false / already trusted), so subsequent calls - which, per T0-3,
+	// only ever arrive in correctly-ordered fashion - no longer need to prove
+	// themselves against highestSeen until new backlog resets idleTrusted.
+	a.idleTrusted = true
 	return true
 }
 

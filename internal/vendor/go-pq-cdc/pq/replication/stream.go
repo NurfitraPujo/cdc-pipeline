@@ -54,6 +54,12 @@ type Message struct {
 	walStart int64
 }
 
+// vendored-patch: T0-3 - keepaliveMarker is a distinguishable payload type enqueued onto
+// messageCH so a keepalive-driven WAL-end advance is delivered to KeepaliveFunc strictly
+// after every preceding decoded message has already passed through listenerFunc/Observe.
+// process() recognizes this type and must never let it reach listenerFunc.
+type keepaliveMarker struct{}
+
 type Streamer interface {
 	Connect(ctx context.Context) error
 	Open(ctx context.Context) error
@@ -278,7 +284,7 @@ func (s *stream) sinkLoop(ctx context.Context, buf *messageBuffer) (corrupted bo
 
 		switch copyData.Data[0] {
 		case message.PrimaryKeepaliveMessageByteID:
-			if err := s.handleKeepalive(ctx, copyData.Data[1:]); err != nil {
+			if err := s.handleKeepalive(ctx, copyData.Data[1:], buf); err != nil {
 				return true
 			}
 		case message.XLogDataByteID:
@@ -309,7 +315,7 @@ func (s *stream) extractCopyData(rawMsg pgproto3.BackendMessage) (*pgproto3.Copy
 // handleKeepalive processes a primary keepalive message, updating the WAL
 // position and responding with a standby status update when requested.
 // A non-nil return signals a corrupted connection.
-func (s *stream) handleKeepalive(ctx context.Context, data []byte) error {
+func (s *stream) handleKeepalive(ctx context.Context, data []byte, buf *messageBuffer) error {
 	pkm, err := format.NewPrimaryKeepaliveMessage(data)
 	if err != nil {
 		logger.Error("decode primary keepalive message", "error", err)
@@ -321,7 +327,53 @@ func (s *stream) handleKeepalive(ctx context.Context, data []byte) error {
 		// embedder's KeepaliveFunc instead of fast-forwarding lastXLogPos ourselves.
 		if s.config.ManualCommit {
 			if s.config.KeepaliveFunc != nil {
-				s.config.KeepaliveFunc(pkm.ServerWALEnd)
+				// vendored-patch: T0-3 - deliver the keepalive IN BAND through messageCH
+				// instead of calling KeepaliveFunc inline on the sink goroutine.
+				//
+				// Why this matters: KeepaliveFunc ultimately drives AckManager.IdleAdvance,
+				// whose soundness depends entirely on "nothing pending" meaning "nothing
+				// has been Observe()'d that isn't yet accounted for". But Observe() only
+				// happens inside process()'s call to listenerFunc, reached by draining
+				// messageCH. Calling KeepaliveFunc directly here - on the sink goroutine -
+				// races that queue: a decoded message can be sitting in messageCH (or still
+				// held in buf's one-message look-ahead) when the keepalive fires, so
+				// IdleAdvance sees an empty backlog and fast-forwards the watermark past
+				// data that hasn't been Observe()'d yet. On a fresh start where WAL already
+				// has a replay backlog, this happens on essentially the first keepalive and
+				// silently drops the entire backlog.
+				//
+				// The fix: flush buf's look-ahead message first (the same flush() used at
+				// STREAM STOP boundaries - it emits the pending message with its original,
+				// not yet commit-rewritten, LSN, which is fine: it is at worst conservative,
+				// never wrong, and it must not be silently discarded), then enqueue a
+				// keepaliveMarker carrying pkm.ServerWALEnd onto s.messageCH itself, in the
+				// same position in the queue any decoded message would occupy. Because
+				// messageCH is single-consumer FIFO (process() is the only reader) and buf
+				// is only ever written to by this same sink goroutine, every message that
+				// was decoded before this keepalive was received is *already* enqueued
+				// ahead of the marker by the time we push it. process() then calls
+				// KeepaliveFunc only once every prior message has been through
+				// listenerFunc/Observe, which is exactly the ordering IdleAdvance's
+				// len(a.lsns)==0 guard assumes.
+				buf.flush()
+				marker := &Message{message: &keepaliveMarker{}, walStart: int64(pkm.ServerWALEnd)}
+				select {
+				case s.messageCH <- marker:
+				default:
+					// messageCH (cap 1000) is full. Do NOT block: this goroutine is also
+					// the only reader of the replication socket, and a keepalive still
+					// needs `pkm.ReplyRequested` handled below to keep the standby-status
+					// heartbeat alive - blocking here risks a wal_receiver_timeout
+					// disconnect, which is strictly worse than a delayed idle-advance.
+					// Dropping the marker only means this particular idle-advance
+					// opportunity is skipped; the *next* keepalive (they arrive on a
+					// steady timer) retries it once the backlog has drained under
+					// process()'s own pace. Silently losing an IdleAdvance is always
+					// safe - the failure mode this patch closes is exactly the reverse
+					// (advancing too eagerly), so erring toward "advance later" here is
+					// deliberate, not an oversight.
+					logger.Warn("keepalive marker dropped: messageCH full", "serverWALEnd", pkm.ServerWALEnd.String())
+				}
 			}
 		} else {
 			// vendored-patch: T0-2 - log rather than propagate: a failed keepalive-driven
@@ -436,6 +488,17 @@ func (s *stream) process(ctx context.Context) {
 			if !ok {
 				return
 			}
+		}
+
+		// vendored-patch: T0-3 - a keepaliveMarker carries a WAL-end position enqueued in
+		// band by handleKeepalive; it must be invisible to the application. Invoke
+		// KeepaliveFunc here, after every message ahead of it has already gone through
+		// listenerFunc, and skip building a ListenerContext entirely.
+		if _, ok := msg.message.(*keepaliveMarker); ok {
+			if s.config.KeepaliveFunc != nil {
+				s.config.KeepaliveFunc(pq.LSN(msg.walStart))
+			}
+			continue
 		}
 
 		lCtx := &ListenerContext{

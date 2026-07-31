@@ -232,6 +232,73 @@ wedged socket belongs with the e2e invariant suite. Operationally, repeated
 
 ---
 
+## T0-3: Deliver Keepalive-Driven WAL-End In Band, Not Inline On the Sink Goroutine
+
+**Upstream Issue**: N/A (internal requirement, tracked internally as plan `01a_delivery_source_ack.md`,
+follow-up to T0-1/T0-2 -- a shipping-blocker data-loss bug found in the T0-1 `ManualCommit` design)
+
+**Files Modified**:
+- `pq/replication/stream.go` (`Message`/new `keepaliveMarker` type, `handleKeepalive` signature
+  and body, `sinkLoop`'s call site, `process()`)
+
+**Problem**: Under `ManualCommit` (T0-1), `handleKeepalive` called `Config.KeepaliveFunc(pkm.ServerWALEnd)`
+directly, inline, on the `sink` goroutine. But `sink` is also the sole producer onto `messageCH`
+(the queue `process` drains to invoke `listenerFunc`, which is what actually calls the embedder's
+`Observe`), and `messageBuffer` additionally holds back the last DML message of each transaction
+in a one-message look-ahead (`buf.pending`) until the transaction's commit LSN is known. Calling
+`KeepaliveFunc` inline therefore raced ahead of both: a decoded message could be sitting in
+`messageCH`, or worse still unflushed in `buf.pending`, at the exact moment a keepalive fired, and
+the embedder's ack-tracking (which only learns about an LSN once it reaches `Observe`, itself only
+reachable via `listenerFunc`) had no way to know. On a fresh start where WAL already contains a
+replay backlog between the slot's start LSN and the primary's current WAL end, the *first*
+keepalive typically carries a `ServerWALEnd` already past every buffered commit -- so the
+embedder's "nothing pending, safe to fast-forward" watermark logic (`AckManager.IdleAdvance`)
+fast-forwarded past the **entire backlog** before a single row of it had been `Observe()`'d. Every
+subsequent `Observe` call for that backlog then landed below the now-advanced watermark and was
+silently dropped -- a replication-slot-confirmed, application-never-saw-it data loss with no
+error, no failed test, and a healthy-looking `PendingCount() == 0` throughout. See
+`internal/test/e2e/strict_ack_test.go`'s `TestKeepaliveDoesNotConfirmInflight` for the repro this
+patch fixes, and `internal/source/postgres/ack.go`'s `AckManager.IdleAdvance` for the
+defence-in-depth added on the application side (`highestSeen`/`idleTrusted`) in case this ordering
+guarantee ever regresses again.
+
+**Fix** (guarded by `Config.ManualCommit`; flag off is untouched):
+- Added an unexported `keepaliveMarker struct{}` payload type. A `*Message{message: &keepaliveMarker{},
+  walStart: int64(pkm.ServerWALEnd)}` is enqueued onto `s.messageCH` in place of calling
+  `KeepaliveFunc` directly.
+- `handleKeepalive` gained a `buf *messageBuffer` parameter (threaded from `sinkLoop`, which
+  already owns `buf`). Before enqueuing the marker it calls `buf.flush()` -- the same method used
+  at `STREAM STOP` boundaries -- so any DML message being held in the one-message look-ahead is
+  pushed onto `messageCH` *ahead of* the marker, not left behind it. `sink` and `handleKeepalive`
+  both run exclusively on the sink goroutine, and `messageCH` is a single-consumer FIFO read only
+  by `process`, so everything decoded before this keepalive was received is guaranteed to already
+  be enqueued ahead of the marker once this call returns.
+- `process()` type-switches on `msg.message`: a `*keepaliveMarker` calls `Config.KeepaliveFunc`
+  with the marker's `walStart` and `continue`s immediately, **without** building a
+  `ListenerContext` or invoking `listenerFunc` -- a marker must never reach the application
+  handler.
+- Full-channel handling: `messageCH` (capacity 1000) is written to with a non-blocking `select`
+  (`case s.messageCH <- marker: / default:`). If full, the marker is **dropped**, not blocked on.
+  This is a deliberate asymmetric choice: `sink` is also the only reader of the replication
+  socket, so blocking it risks a `wal_receiver_timeout` disconnect -- strictly worse than skipping
+  one idle-advance opportunity. A dropped marker only delays that particular `IdleAdvance` call;
+  the next keepalive (they arrive on a steady timer) retries once the backlog has drained under
+  `process`'s own pace. Silently *losing* an idle-advance is always safe -- the failure mode this
+  patch exists to close is the opposite (advancing too eagerly) -- so erring toward "advance
+  later" here is intentional, not an oversight. Logged at `Warn`.
+
+**Backward Compatibility**: `ManualCommit` defaults to `false`; with it unset, `handleKeepalive`'s
+legacy branch (`UpdateXLogPos`, unchanged) is untouched, `keepaliveMarker` values are never
+constructed, and `process()`'s new type-switch branch is simply never taken. This patch is
+**behaviour-changing under `ManualCommit == true` only**: a keepalive-driven WAL-end update no
+longer reaches `KeepaliveFunc` synchronously with the keepalive's arrival -- it is now delayed
+until every previously decoded message has drained through `process`/`listenerFunc`. For an
+embedder using `KeepaliveFunc` to drive idle-advance logic (as this repo's `AckManager.IdleAdvance`
+does), that delay is the entire point: it is what makes "nothing pending" a sound statement about
+stream order.
+
+---
+
 ## Applying Patches
 
 When merging upstream changes, search for `// vendored-patch:` markers to identify patched locations.

@@ -256,13 +256,71 @@ func TestAckManager_IdleAdvance(t *testing.T) {
 	m.Confirm(100, "a")
 	assert.Equal(t, uint64(100), m.Watermark())
 
-	assert.True(t, m.IdleAdvance(500), "nothing pending: must fast-forward to serverWALEnd")
+	// serverWALEnd (500) is beyond the highest LSN ever Observe()'d (100), so
+	// this first post-drain attempt is refused and logged as a canary: see
+	// TestAckManager_IdleAdvance_RefusesPastHighestSeen and idleTrusted's doc
+	// comment for the T0-3 defence-in-depth this guards against.
+	assert.False(t, m.IdleAdvance(500), "first post-drain attempt past highestSeen is refused")
+	assert.Equal(t, uint64(100), m.Watermark())
+
+	// That single refusal latches idleTrusted, so subsequent calls are no
+	// longer checked against highestSeen - see idleTrusted's doc comment for
+	// why permanently blocking here would defeat WAL-bloat protection.
+	assert.True(t, m.IdleAdvance(500), "trusted after the one-time canary refusal: must fast-forward")
 	assert.Equal(t, uint64(500), m.Watermark())
 
 	assert.False(t, m.IdleAdvance(300), "must never regress the watermark")
 	assert.Equal(t, uint64(500), m.Watermark())
 
 	assert.False(t, m.IdleAdvance(500), "advancing to the same value again reports no advance")
+}
+
+// TestAckManager_IdleAdvance_RefusesPastHighestSeen is the defence-in-depth
+// guard added alongside T0-3: even with the vendored stream fixed to deliver
+// keepalives strictly after every preceding decoded message reaches Observe,
+// IdleAdvance itself must refuse a fast-forward beyond anything it has
+// actually seen once data has ever flowed, while still allowing WAL-bloat
+// protection to fast-forward a slot that has never seen any traffic at all.
+func TestAckManager_IdleAdvance_RefusesPastHighestSeen(t *testing.T) {
+	t.Run("refuses to advance past highestSeen once data has flowed", func(t *testing.T) {
+		m := NewAckManager([]string{"a"})
+
+		m.Observe(100)
+		m.Confirm(100, "a")
+		assert.Equal(t, uint64(100), m.Watermark())
+		assert.Equal(t, 0, m.PendingCount(), "nothing pending per the (unsound-in-isolation) len(lsns)==0 guard")
+
+		// A keepalive claiming WAL exists far beyond anything Observe()'d must
+		// be refused on its first occurrence after backlog drains: this is
+		// the exact shape of the T0-3 data-loss bug (IdleAdvance
+		// fast-forwarding past an un-Observe()'d replay backlog).
+		assert.False(t, m.IdleAdvance(999_999), "must refuse: serverWALEnd is beyond highestSeen")
+		assert.Equal(t, uint64(100), m.Watermark(), "watermark must not have moved")
+
+		// New backlog arriving re-arms the guard for the next drain.
+		m.Observe(200)
+		assert.False(t, m.IdleAdvance(999_999), "must refuse: an LSN is pending again")
+		m.Confirm(200, "a")
+		assert.Equal(t, uint64(200), m.Watermark())
+
+		// This time the ask (999_999) is still beyond the new highestSeen
+		// (200), so it is refused once more - the guard re-checks every time
+		// fresh backlog appears and drains, it is not a single lifetime grant.
+		assert.False(t, m.IdleAdvance(999_999), "must refuse again: re-armed after new backlog drained")
+		assert.Equal(t, uint64(200), m.Watermark())
+
+		// And, per the one-time-canary latch, the very next call is trusted.
+		assert.True(t, m.IdleAdvance(999_999), "trusted after the second canary refusal")
+		assert.Equal(t, uint64(999_999), m.Watermark())
+	})
+
+	t.Run("still advances a genuinely idle slot that has seen nothing", func(t *testing.T) {
+		m := NewAckManager([]string{"a"})
+
+		assert.Equal(t, 0, m.PendingCount())
+		assert.True(t, m.IdleAdvance(12345), "a slot with no traffic at all must still get WAL-bloat protection")
+		assert.Equal(t, uint64(12345), m.Watermark())
+	})
 }
 
 // Test 5: Confirm idempotency below the watermark models AcksTopic
