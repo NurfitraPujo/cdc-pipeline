@@ -57,3 +57,11 @@ groups:
           severity: warning
         annotations:
           summary: "CDC slot-lag probe has not succeeded recently"
+
+      - alert: CDCSourceIdleAdvanceRefused
+        expr: |
+          increase(cdc_source_idle_advance_refused_total[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "CDC IdleAdvance refused an unsafe fast-forward"

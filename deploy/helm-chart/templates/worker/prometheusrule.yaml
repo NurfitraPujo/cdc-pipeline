@@ -125,4 +125,41 @@ spec:
               value rather than the current one. Do not trust the lag alerts
               while this is firing; investigate DB connectivity directly.
             runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#probe-health"
+
+        # OPS-2 (holistic review, 03_IMPLEMENTATION_REVIEW.md): T0-3
+        # (commit f192fe3) fixed a data-loss bug where IdleAdvance could
+        # fast-forward the watermark past a replay backlog that had never
+        # been re-Observe()d, while cdc_source_pending_lsns read a healthy
+        # 0 throughout -- no existing metric moved. The guard T0-3 added
+        # alongside the fix is log-only and latching (one Error line, then
+        # `idleTrusted = true` and it stops checking), so a regression of
+        # that exact ordering bug would once again be invisible to every
+        # dashboard and alert in this file. cdc_source_idle_advance_refused_total
+        # is the counter that makes it visible. Any increase at all is
+        # itself the signal -- there is no "acceptable rate" of a data-loss
+        # class this alert exists to catch, so it fires on the first
+        # occurrence rather than waiting for a sustained rate, and is
+        # rated `page` (not `warning`) because the failure mode is a silent
+        # correctness regression, not a recoverable operational condition.
+        - alert: CDCSourceIdleAdvanceRefused
+          expr: |
+            increase(cdc_source_idle_advance_refused_total[15m]) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "CDC IdleAdvance refused an unsafe fast-forward for {{ "{{" }} $labels.pipeline {{ "}}" }}/{{ "{{" }} $labels.source {{ "}}" }}"
+            description: >
+              cdc_source_idle_advance_refused_total for slot {{ "{{" }} $labels.slot {{ "}}" }}
+              increased in the last 15m. This means the AckManager's
+              IdleAdvance guard refused to fast-forward the watermark past a
+              replay backlog that had not been re-observed -- the exact
+              stream-ordering hazard fixed in commit f192fe3 (T0-3) may have
+              regressed upstream of the guard. Because cdc_source_pending_lsns
+              reads 0 and the watermark keeps moving "healthily" throughout
+              this failure mode, this counter and this alert are the ONLY
+              signal that exists for it -- do not wait for corroborating
+              symptoms on the other gauges in this file. Page on-call and
+              treat as a possible silent data-loss regression. See runbook
+              section on OPS-2 in deploy/helm-chart/RUNBOOK.md.
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#ops-2-idle-advance-refused-t0-3-regression-canary"
 {{- end }}

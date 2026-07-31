@@ -379,7 +379,11 @@ func (s *stream) handleKeepalive(ctx context.Context, data []byte, buf *messageB
 			// vendored-patch: T0-2 - log rather than propagate: a failed keepalive-driven
 			// advance is not fatal to the stream loop (the next keepalive retries), and
 			// returning here would tear down replication on a transient write error.
-			if err := s.UpdateXLogPos(ctx, pkm.ServerWALEnd); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+			// vendored-patch: T0-2 - also skip context.Canceled: T0-2 made this write
+			// abandonable via ctx, so a legacy-mode caller can now observe ctx.Err() during
+			// shutdown where upstream always blocked to completion. That is expected
+			// shutdown noise, not a real advance failure.
+			if err := s.UpdateXLogPos(ctx, pkm.ServerWALEnd); err != nil && !goerrors.Is(err, ErrStreamClosed) && !goerrors.Is(err, context.Canceled) {
 				logger.Warn("keepalive xlog position update failed", "error", err, "serverWALEnd", pkm.ServerWALEnd.String())
 			}
 			logger.Debug("updated xlog position from keepalive", "serverWALEnd", pkm.ServerWALEnd.String())
@@ -427,7 +431,10 @@ func (s *stream) handleXLogData(data []byte, buf *messageBuffer) {
 			// upstream behavior: threading a bounded ctx here would *introduce* a write
 			// deadline where upstream had none. Error is logged, not propagated (this
 			// function returns nothing and an undecodable message is already non-fatal).
-			if err := s.UpdateXLogPos(context.Background(), xld.WALStart); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+			// vendored-patch: T0-2 - also skip context.Canceled (see the identical note at
+			// the keepalive call site above) for consistency, even though this site passes
+			// context.Background() and so cannot itself observe cancellation today.
+			if err := s.UpdateXLogPos(context.Background(), xld.WALStart); err != nil && !goerrors.Is(err, ErrStreamClosed) && !goerrors.Is(err, context.Canceled) {
 				logger.Warn("xlog position update failed for undecodable message", "error", err, "walStart", xld.WALStart.String())
 			}
 		}
@@ -516,7 +523,9 @@ func (s *stream) process(ctx context.Context) {
 				// its upstream contract (the explicit send below is the value it returns).
 				// Note the redundant double-send is pre-existing upstream behavior, retained
 				// here deliberately: this branch is unreachable under ManualCommit.
-				if err := s.UpdateXLogPos(ctx, pos); err != nil && !goerrors.Is(err, ErrStreamClosed) {
+				// vendored-patch: T0-2 - also skip context.Canceled (see the identical note
+				// at the keepalive call site above).
+				if err := s.UpdateXLogPos(ctx, pos); err != nil && !goerrors.Is(err, ErrStreamClosed) && !goerrors.Is(err, context.Canceled) {
 					logger.Warn("ack xlog position update failed", "error", err, "lsn", pos.String())
 				}
 				logger.Debug("send stand by status update", "xLogPos", s.LoadXLogPos().String())

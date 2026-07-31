@@ -302,11 +302,13 @@ func TestStop_WaitsForBackgroundGoroutines(t *testing.T) {
 	var mu sync.Mutex
 	var msgs []protocol.Message
 	knownTables := map[string]bool{"public.t1": true}
+	var flushWg sync.WaitGroup
+	var flushClosed bool
 
 	s.runWg.Add(1)
 	go func() {
 		defer s.runWg.Done()
-		s.startConnector(conn, s.ctx, protocol.Checkpoint{}, &mu, &msgs, knownTables, func() {}, s.config.BatchWait, s.config.DiscoveryInterval, s.config)
+		s.startConnector(conn, s.ctx, protocol.Checkpoint{}, &mu, &msgs, knownTables, func() {}, s.config.BatchWait, s.config.DiscoveryInterval, s.config, &flushWg, &flushClosed)
 	}()
 
 	// Let the tickers run for a few iterations.
@@ -317,17 +319,17 @@ func TestStop_WaitsForBackgroundGoroutines(t *testing.T) {
 	// for the goroutines to observe ctx.Done and unwind.
 	stopStart := time.Now()
 	require.NoError(t, s.Stop())
-	stopElapsed := time.Since(stopStart)
+	_ = time.Since(stopStart)
 
-	// After Stop returns, runWg MUST be drained: any subsequent
-	// WaitGroup call must see a zero counter.
-	require.NoError(t, waitWithTimeout(&s.runWg, time.Second),
-		"runWg must be drained after Stop returns")
-
-	// We don't assert on stopElapsed directly, but a 0-duration stop
-	// is a strong signal the bug regressed.
-	assert.Greater(t, stopElapsed, time.Microsecond,
-		"Stop must have actually waited for background goroutines to drain")
+	// The only assertion that actually distinguishes "Stop blocked until
+	// drained" from "Stop returned early and the goroutines happened to
+	// exit a moment later" is that runWg is ALREADY at zero the instant
+	// Stop returns -- not merely within some generous timeout. Use a
+	// near-zero timeout so a regression to the old detached-goroutine
+	// behaviour (where Stop returns immediately while tickers are still
+	// unwinding) fails this test instead of slipping through.
+	require.NoError(t, waitWithTimeout(&s.runWg, time.Millisecond),
+		"runWg must already be drained immediately after Stop returns, not merely eventually")
 }
 
 // waitWithTimeout waits for the WaitGroup to drain, returning nil on
@@ -1036,4 +1038,117 @@ func TestRunAckCoordinator_SkipsWireWriteUnderStrictAckOff(t *testing.T) {
 		cancel()
 		require.NoError(t, waitWithTimeout(&s.runWg, time.Second))
 	})
+}
+
+// TestR9_TriggerFlushDoesNotRaceChannelClose is the regression test for R9:
+// the cleanup goroutine spawned by Start used to do
+// triggerFlush() -> time.Sleep(100ms) -> close(msgChan), a fixed sleep that
+// is not synchronisation. A sender parked in triggerFlush's
+// `select { case s.msgChan <- mCopy: ...; case <-sourceCtx.Done(): }` can
+// still pick the send case after close(msgChan) runs, which panics (send on
+// closed channel) and kills the process.
+//
+// This test drives many concurrent handler invocations (each of which calls
+// triggerFlush synchronously for data events, see createHandler) against a
+// session that is torn down mid-flight, under -race, without draining
+// msgChan as fast as it fills -- maximising the odds that a sender is still
+// in-flight exactly when Stop cancels the context and the cleanup goroutine
+// closes the channel. Before the fix (flushWg/flushClosed), this reliably
+// panics within a handful of iterations under `go test -race`.
+func TestR9_TriggerFlushDoesNotRaceChannelClose(t *testing.T) {
+	for iter := 0; iter < 20; iter++ {
+		s := NewPostgresSource("r9-source")
+		factory := newStubFactory()
+		s.SetConnectorFactory(factory.Build)
+
+		cfg := validSourceConfig()
+		cfg.Tables = []string{"public.t1"}
+
+		msgChan, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+		require.NoError(t, err)
+
+		handler := factory.Handler()
+		require.NotNil(t, handler)
+
+		// Drain msgChan lazily (slower than production) so the buffered
+		// channel and the ctx.Done() select cases both stay live/ready
+		// concurrently, which is exactly the window R9 needs to race.
+		drainDone := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for range msgChan {
+			}
+		}()
+
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		for w := 0; w < 8; w++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				lsn := uint64(id + 1)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					handler(&replication.ListenerContext{
+						Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": id}},
+						Ack:     func() error { return nil },
+						LSN:     pq.LSN(lsn),
+					})
+					lsn += 8
+				}
+			}(w)
+		}
+
+		// Let senders build up contention, then tear the session down
+		// concurrently with them still hammering triggerFlush.
+		time.Sleep(5 * time.Millisecond)
+		require.NoError(t, s.Stop())
+		close(stop)
+		wg.Wait()
+
+		// msgChan being closed and drained to completion (drainDone
+		// closes only once the range loop observes the close) proves no
+		// panic occurred anywhere in this iteration.
+		<-drainDone
+	}
+}
+
+// TestIdleAdvanceRefusedCounter_IncrementsViaHook is OPS-2: a T0-3 regression
+// must be ALERTABLE, not merely loggable. The AckManager guard latches after a
+// single refusal, so without this counter a recurrence would present exactly
+// as the original bug did -- pending_lsns healthy, watermark advancing, one
+// Error line buried in the log stream.
+//
+// This asserts the full chain: refusal -> hook -> Prometheus counter.
+func TestIdleAdvanceRefusedCounter_IncrementsViaHook(t *testing.T) {
+	const pipeline, srcName, slot = "p-canary", "src-canary", "slot-canary"
+	idleAdvanceRefusedCounter.DeleteLabelValues(pipeline, srcName, slot)
+
+	m := NewAckManager([]string{"sinkA"})
+	m.SetIdleAdvanceRefusedHook(func() {
+		idleAdvanceRefusedCounter.WithLabelValues(pipeline, srcName, slot).Inc()
+	})
+
+	// Establish data flow, then drain it, so the next IdleAdvance is the
+	// first-after-backlog call the canary inspects.
+	m.Observe(100)
+	m.Confirm(100, "sinkA")
+	require.Equal(t, uint64(100), m.Watermark())
+	require.Equal(t, 0, m.PendingCount())
+
+	before := testutil.ToFloat64(idleAdvanceRefusedCounter.WithLabelValues(pipeline, srcName, slot))
+
+	// serverWALEnd far beyond anything ever Observed: precisely the
+	// fast-forward-past-un-Observed-backlog shape T0-3 was about.
+	advanced := m.IdleAdvance(999999)
+
+	assert.False(t, advanced, "IdleAdvance must refuse to jump past highestSeen on the first post-drain call")
+	after := testutil.ToFloat64(idleAdvanceRefusedCounter.WithLabelValues(pipeline, srcName, slot))
+	assert.Equal(t, before+1, after,
+		"the refusal must increment cdc_source_idle_advance_refused_total -- otherwise a T0-3 regression is invisible again")
+	assert.Equal(t, uint64(1), m.IdleAdvanceRefusedCount())
 }

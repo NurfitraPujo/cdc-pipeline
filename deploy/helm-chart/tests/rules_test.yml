@@ -110,3 +110,36 @@ tests:
               slot: slot1
             exp_annotations:
               summary: "CDC slot-lag probe has not succeeded recently"
+
+  # Test 6 (OPS-2, holistic review): CDCSourceIdleAdvanceRefused MUST fire
+  # when cdc_source_idle_advance_refused_total increases at all within the
+  # 15m window. This is the canary for a T0-3 (commit f192fe3) regression --
+  # the counter increasing by even 1 is itself the signal, so the alert has
+  # no "for" delay and no rate threshold beyond > 0.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_idle_advance_refused_total{pipeline="p1", source="s1", slot="slot1"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CDCSourceIdleAdvanceRefused
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              pipeline: p1
+              source: s1
+              slot: slot1
+            exp_annotations:
+              summary: "CDC IdleAdvance refused an unsafe fast-forward"
+
+  # Test 7 (OPS-2, proves the alert is not vacuously-firing): the counter
+  # stays at a constant value (no refusals occurred) for the whole window --
+  # increase() is 0 and the alert MUST stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'cdc_source_idle_advance_refused_total{pipeline="p1", source="s1", slot="slot1"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CDCSourceIdleAdvanceRefused
+        exp_alerts: []

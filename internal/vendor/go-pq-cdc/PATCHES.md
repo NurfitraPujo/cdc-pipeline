@@ -219,10 +219,13 @@ which was. The legacy-mode deltas, all of which flow from bounding the write:
    (`handleKeepalive`'s fast-forward, `handleXLogData`'s undecodable path, and the `process` Ack
    closure) go through it, where upstream wrote inline on the calling goroutine.
 2. **A legacy caller can now receive `ctx.Err()`** where upstream blocked to completion. In
-   practice this surfaces during shutdown as a `keepalive xlog position update failed` or
-   `ack xlog position update failed` warning, because the call sites skip only `ErrStreamClosed`,
-   not `context.Canceled`. Non-blocking noise; adding `context.Canceled` to those filters is a
-   reasonable follow-up.
+   practice this could surface during shutdown as a `keepalive xlog position update failed`,
+   `xlog position update failed for undecodable message`, or `ack xlog position update failed`
+   warning. **Fixed**: all three internal `UpdateXLogPos` call sites in `stream.go` (the
+   keepalive fast-forward, the undecodable-message path, and the `process` Ack closure) now also
+   skip `context.Canceled` via `goerrors.Is(err, context.Canceled)`, marked
+   `// vendored-patch: T0-2`, alongside the pre-existing `ErrStreamClosed` skip. This was
+   previously tracked here as an open follow-up; it is no longer open.
 3. **`ErrStandbyWriteInFlight` can be returned in legacy mode**, skipping a keepalive-driven
    send that upstream would have performed. Harmless — the next keepalive retries — but it is a
    behavioral difference.

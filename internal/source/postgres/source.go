@@ -97,6 +97,26 @@ var slotLagProbeLastSuccessGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "Unix timestamp of the last successful slot-lag probe query for this source",
 }, []string{"pipeline", "source", "slot"})
 
+// idleAdvanceRefusedCounter is the OPS-2 canary for a T0-3 regression.
+//
+// T0-3 (f192fe3) fixed a data-loss bug where IdleAdvance fast-forwarded the
+// watermark past a replay backlog that had not yet reached Observe(), because
+// the keepalive was delivered inline on the sink goroutine and bypassed the
+// messageCH queue. The defining nastiness of that bug was that NOTHING moved:
+// cdc_source_pending_lsns read a healthy 0 for the entire loss window, so no
+// alert could fire and it took a full e2e investigation to find.
+//
+// AckManager's highestSeen/idleTrusted guard is the application-side backstop,
+// but it is deliberately latching -- it refuses once, logs, then trusts. That
+// makes it useless as a monitoring signal on its own. This counter turns each
+// refusal into something alertable (CDCSourceIdleAdvanceRefused), so a
+// recurrence is loud rather than silent. Labels match the four gauges above so
+// it joins them in PromQL.
+var idleAdvanceRefusedCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "cdc_source_idle_advance_refused_total",
+	Help: "Times IdleAdvance refused to fast-forward past the highest observed LSN (T0-3 regression canary)",
+}, []string{"pipeline", "source", "slot"})
+
 // strictAckEnvVar is the env var that gates the strict_ack feature flag
 // (plan 01a §6). It is source-scoped in name only -- every PostgresSource
 // in this process reads the same process-wide env var, matching how every
@@ -175,6 +195,20 @@ type PostgresSource struct {
 	dsn            string
 	db             *sql.DB
 	lastCheckpoint protocol.Checkpoint
+
+	// startMu serialises entire Start() invocations end-to-end (HIGH-2 part
+	// 2). The re-entry guard at the top of Start cancels and awaits a
+	// PREVIOUS session before mutating shared fields, but that guard alone
+	// does not stop two CONCURRENT Start() calls from both reading the same
+	// prevCancel/prevDB/prevConnector, both proceeding past the guard, and
+	// racing each other's writes to s.db/s.connector/s.msgChan/s.ackChan --
+	// each such race can leak a *sql.DB/connector or hand a caller a
+	// channel that a losing goroutine still holds a reference to. Locking
+	// startMu for the whole method body makes Start calls strictly
+	// sequential, so by the time a second call's re-entry guard runs, the
+	// first call's session is fully constructed (or fully failed) with no
+	// window for concurrent mutation.
+	startMu sync.Mutex
 
 	// mu protects the config and connector during restarts
 	mu       sync.RWMutex
@@ -610,6 +644,16 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	// function's writes, leaks the previous *sql.DB/connector, and lets
 	// the previous session's closures keep writing to fields this call
 	// reassigns out from under them.
+	//
+	// startMu covers the whole method body, not just the snapshot below:
+	// the teardown-then-rebuild sequence is only safe if it is atomic with
+	// respect to another Start. Two concurrent callers would otherwise both
+	// snapshot prevCancel (possibly nil) and both proceed to build a
+	// session, which is exactly the double-live-session state this guard
+	// exists to make impossible.
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+
 	s.mu.Lock()
 	prevCancel := s.cancel
 	prevDB := s.db
@@ -645,6 +689,16 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	// coordinator observes any new LSNs so resumes continue from the
 	// last durable position.
 	s.ackMgr = NewAckManager(ackers)
+	// OPS-2: make an IdleAdvance refusal alertable, not just loggable. The
+	// AckManager's guard latches after one refusal, so without this counter a
+	// T0-3 regression would look exactly as it did before the fix: every
+	// metric healthy, one Error line in the log. Labels are captured here so
+	// they match the gauges; slot name comes from the config being started.
+	pipelineIDForCanary, slotForCanary := s.pipelineID, srcConfig.SlotName
+	sourceForCanary := s.name
+	s.ackMgr.SetIdleAdvanceRefusedHook(func() {
+		idleAdvanceRefusedCounter.WithLabelValues(pipelineIDForCanary, sourceForCanary, slotForCanary).Inc()
+	})
 	s.lastCheckpoint = checkpoint
 	if checkpoint.IngressLSN > 0 {
 		// Hydrate fast-forwards the watermark past the persisted
@@ -682,6 +736,18 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	var mu sync.Mutex
 	var msgs []protocol.Message
+	// R9: flushWg tracks in-flight triggerFlush senders that are between
+	// releasing mu and completing their send on s.msgChan. flushClosed,
+	// guarded by the same mu, is set by the cleanup goroutine below before
+	// it closes msgChan; every triggerFlush call checks it while still
+	// holding mu, so once it flips no new sender can be admitted. The
+	// cleanup goroutine then waits on flushWg to drain any senders that
+	// were already admitted, guaranteeing none of them can still be
+	// sitting in the msgChan-send case of their select when close() runs
+	// -- without this, a sender parked in that select could pick the send
+	// case after close(msgChan), which panics (send on closed channel).
+	var flushWg sync.WaitGroup
+	var flushClosed bool
 	knownTables := make(map[string]bool)
 	for _, t := range srcConfig.Tables {
 		cleanTable := strings.TrimPrefix(t, "public.")
@@ -691,14 +757,16 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 
 	triggerFlush := func() {
 		mu.Lock()
-		if len(msgs) == 0 {
+		if flushClosed || len(msgs) == 0 {
 			mu.Unlock()
 			return
 		}
 		mCopy := make([]protocol.Message, len(msgs))
 		copy(mCopy, msgs)
 		msgs = msgs[:0]
+		flushWg.Add(1)
 		mu.Unlock()
+		defer flushWg.Done()
 
 		select {
 		case s.msgChan <- mCopy:
@@ -800,7 +868,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	s.runWg.Add(1)
 	go func() {
 		defer s.runWg.Done()
-		s.startConnector(conn, sourceCtx, checkpoint, &mu, &msgs, knownTables, triggerFlush, batchWait, discoveryInterval, srcConfig)
+		s.startConnector(conn, sourceCtx, checkpoint, &mu, &msgs, knownTables, triggerFlush, batchWait, discoveryInterval, srcConfig, &flushWg, &flushClosed)
 	}()
 
 	// Spawn the ack coordinator goroutine. It is the SOLE Confirmer of the
@@ -1080,7 +1148,7 @@ func (s *PostgresSource) persistWatermark(wm uint64) {
 	}
 }
 
-func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Context, checkpoint protocol.Checkpoint, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func(), batchWait time.Duration, discoveryInterval time.Duration, srcConfig protocol.SourceConfig) {
+func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Context, checkpoint protocol.Checkpoint, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func(), batchWait time.Duration, discoveryInterval time.Duration, srcConfig protocol.SourceConfig, flushWg *sync.WaitGroup, flushClosed *bool) {
 	log.Info().Uint64("lsn", checkpoint.IngressLSN).Msg("Starting connector loop")
 
 	if batchWait == 0 {
@@ -1296,7 +1364,15 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 		<-sourceCtx.Done()
 		log.Info().Str("source", s.name).Msg("PostgresSource: Context canceled, closing message channel")
 		triggerFlush()
-		time.Sleep(100 * time.Millisecond)
+		// R9: block any further triggerFlush calls from being admitted,
+		// then wait for whatever was already admitted (including the
+		// final flush just above) to finish its send before closing. See
+		// the flushWg/flushClosed comment above for why the old
+		// time.Sleep(100ms) band-aid was not actually sufficient.
+		mu.Lock()
+		*flushClosed = true
+		mu.Unlock()
+		flushWg.Wait()
 		close(msgChan)
 	}()
 }

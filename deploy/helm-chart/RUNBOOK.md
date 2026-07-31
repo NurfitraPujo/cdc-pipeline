@@ -185,6 +185,62 @@ but it is not zero.
 **Response:** restart the pipeline process. Same self-healing mechanism as (b):
 a fresh AckManager and a slot-anchored replay clears the pin.
 
+### OPS-2: IdleAdvance-refused (T0-3 regression canary)
+
+**Symptom:** `CDCSourceIdleAdvanceRefused` fires. Every other gauge in
+[Metrics](#metrics) can look completely healthy while this fires:
+`cdc_source_pending_lsns` reads 0, `cdc_source_ack_watermark` is advancing,
+`cdc_source_slot_lag_bytes` is flat or low. **This alert is the only signal
+for this failure mode** -- do not wait for, or expect, corroborating symptoms
+elsewhere before treating it as real.
+
+**Cause:** commit `f192fe3` (T0-3) fixed a bug where `IdleAdvance` could
+fast-forward the AckManager's watermark past a replay backlog that had been
+handed to a sink but never re-`Observe()`d -- i.e. the watermark moved past
+data that was never actually confirmed, and nothing detected it: the same
+0-pending-LSNs, healthily-moving-watermark signature described above. The fix
+added an ordering guarantee (`sink` is the sole writer of `messageCH`,
+`process` the sole reader, and `buf.flush()` is required to precede the
+marker enqueue -- see the vendored-patch notes in
+`internal/vendor/go-pq-cdc/PATCHES.md`, entry T0-3) plus a guard in the
+AckManager that refuses an `IdleAdvance` call it cannot prove safe.
+
+That guard is intentionally **log-only and latching**: it logs one Error the
+first time it refuses, then sets an internal `idleTrusted` flag and stops
+re-checking for the lifetime of that AckManager. This keeps the guard cheap
+and non-blocking, but it also means: (1) a single refusal is not a fluke to
+shrug off -- the guard does not refuse repeatedly to "confirm" the problem,
+it fires once and goes quiet, so treat one occurrence with full severity; and
+(2) `cdc_source_idle_advance_refused_total` (incremented via the
+`SetIdleAdvanceRefusedHook` callback wired from `internal/source/postgres`)
+is the only way this refusal becomes visible outside the log stream. Without
+this counter and this alert, the exact invisible-data-loss signature T0-3 was
+written to eliminate would simply reappear, unnoticed, if the vendored
+ordering guarantee it depends on (the `buf.flush()`-before-marker-enqueue
+line -- see the re-sync risk callout in `PATCHES.md`) ever regressed during a
+future upstream re-sync.
+
+**Response:**
+1. Treat as a possible active data-loss regression, not routine noise. Page
+   on-call immediately (this is why the alert is `severity: page`, unlike
+   the `warning`-level gauges above).
+2. Do not restart the pipeline as a first response the way you would for
+   failure modes (b)/(c) -- a restart clears the AckManager's `idleTrusted`
+   latch and log line, destroying the only evidence of what happened,
+   without fixing anything if the root cause is the vendored ordering
+   guarantee.
+3. Pull the AckManager/source logs around the refusal timestamp for the
+   `IdleAdvance refused` Error line (see `internal/source/postgres/ack.go`)
+   to get the specific LSNs involved.
+4. Check whether `internal/vendor/go-pq-cdc/pq/replication/stream.go`'s
+   `buf.flush()`-before-marker-enqueue ordering (T0-3) is intact -- especially
+   if this fired shortly after a vendored dependency re-sync. If that
+   ordering has regressed, this counter is confirming exactly the class of
+   bug commit `f192fe3` fixed.
+5. Escalate to whoever owns the vendored `go-pq-cdc` patches
+   (`internal/vendor/go-pq-cdc/PATCHES.md`) before resuming normal operation
+   on the affected pipeline.
+
 ### Telling (b) and (c) apart from (a)
 
 All three can show `cdc_source_pending_lsns > 0`. The distinguishing signal is
@@ -207,7 +263,10 @@ it should read this section, not just the alert text.
 
 `deploy/helm-chart/templates/worker/prometheusrule.yaml` defines
 `CDCSourceSlotLagWarning`, `CDCSourceSlotLagCritical`,
-`CDCSourcePendingLSNsStuck`, and `CDCSourceSlotLagProbeStale`, gated by
+`CDCSourcePendingLSNsStuck`, `CDCSourceSlotLagProbeStale`, and
+`CDCSourceIdleAdvanceRefused` (see
+[OPS-2: IdleAdvance-refused](#ops-2-idle-advance-refused-t0-3-regression-canary)),
+gated by
 `worker.alerts.enabled` (see [Status as of this commit](#status-as-of-this-commit----read-this-first)
 for current per-environment state). Thresholds live in `worker.alerts.*` in
 `values.staging.yml` / `values.production.yml`.
@@ -229,6 +288,8 @@ in) proving:
   stays silent on a flat-but-large value.
 - `CDCSourceSlotLagProbeStale` fires when the probe's success timestamp has
   not advanced.
+- `CDCSourceIdleAdvanceRefused` fires when `cdc_source_idle_advance_refused_total`
+  increases at all in a 15m window, and stays silent when it does not.
 
 Run it with:
 
