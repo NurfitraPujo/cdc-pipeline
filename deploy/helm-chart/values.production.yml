@@ -118,14 +118,15 @@ worker:
   #
   # IMPORTANT -- read deploy/helm-chart/RUNBOOK.md's "Status as of this
   # commit" section: ManualCommit (the slot-freezing behaviour these alerts
-  # cover) is UNCONDITIONALLY ENABLED in internal/source/postgres/source.go,
-  # not gated by any flag. There is no `strict_ack` toggle in this
-  # codebase yet. That means `enabled: false` here is NOT "the risk hasn't
-  # started yet" -- production already carries the WAL-retention risk with
-  # this alerting turned off. Flipping this to `true` (once the
-  # prometheus-operator CRDs and alert routing are confirmed for this
-  # cluster) is an urgent, outstanding follow-up to this change, not a
-  # someday-optional gate on a future flag flip.
+  # cover) is gated by the `strict_ack` flag (CDC_STRICT_ACK,
+  # internal/source/postgres/source.go: resolveStrictAck), which defaults
+  # OFF here since no CDC_STRICT_ACK is set and this is a production
+  # environment -- production does NOT yet carry the WAL-retention risk.
+  # `enabled: false` here is therefore correct FOR NOW, but it is a
+  # precondition, not a follow-up: per the RUNBOOK's "Deploy order", this
+  # MUST be flipped to `true` (once the prometheus-operator CRDs and alert
+  # routing are confirmed for this cluster) BEFORE CDC_STRICT_ACK is ever
+  # set to true for any pipeline in this environment.
   alerts:
     enabled: false
     ruleSelectorLabels: {}

@@ -2,32 +2,79 @@
 
 ## Status as of this commit -- read this first
 
-> **`ManualCommit` is unconditionally ON, in every environment, right now.**
-> `internal/source/postgres/source.go` sets `cfg.ManualCommit: true`
-> unconditionally in `Start` -- there is no flag gating it. The replication
-> slot-freezing behaviour described below is not a future risk that arrives
-> "once `strict_ack` is turned on": **it is live in this branch's `Start` path
-> today**, for every pipeline that uses `PostgresSource`.
+> **The `strict_ack` flag exists and gates `ManualCommit`.**
+> `internal/source/postgres/source.go` (`resolveStrictAck`, used from `Start`
+> and `Restart`) reads `CDC_STRICT_ACK` and sets
+> `cfg.ManualCommit` from it, together with the handler's ack behaviour (see
+> below). This is exactly the flag plan `01a_delivery_source_ack` §6
+> describes; an earlier revision of this document said it did not exist --
+> that is no longer true.
 >
-> **There is no `strict_ack` flag in this codebase.** Earlier drafts of this
-> runbook (and of plan `01a_delivery_source_ack`) describe a `strict_ack`
-> flag that can be flipped pipeline-by-pipeline with a same-release rollback.
-> That control does not exist. It is planned as a follow-up commit (approved,
-> not yet landed) that will gate `ManualCommit` behind a real flag and update
-> this document accordingly. **Until that lands, do not describe or rely on a
-> `strict_ack` flag** -- there is nothing to flip, and the "flip it back off"
-> rollback story in a prior version of this file was not actually available.
-> **The only rollback today is a code revert of the ManualCommit change.**
-> Redeploying it re-applies the unbounded-WAL-on-slot-freeze behaviour along
-> with it -- there is no partial/config-only rollback.
-> **The consequence:** production and staging deployments of this branch
-> carry the WAL-retention risk described below unconditionally. The alerting
-> in `deploy/helm-chart/templates/worker/prometheusrule.yaml` is gated by
-> `worker.alerts.enabled` in the values files, which currently defaults to
-> `false` in `values.production.yml` -- meaning **production currently has
-> the risk with the alerting for it turned off.** Setting `worker.alerts.enabled: true`
-> for production is not optional follow-through; treat it as an
-> outstanding, urgent action item of this same change, not a "someday."
+> **Default, absent an explicit `CDC_STRICT_ACK`:**
+>
+> | `ENV` | strict_ack default | meaning |
+> |---|---|---|
+> | `production` | **OFF** | legacy per-event `lc.Ack` |
+> | `staging` | **ON** | the new contract |
+> | unset / anything else (dev, test) | **ON** | the new contract |
+>
+> An explicit `CDC_STRICT_ACK=true`/`false` always overrides the default in
+> either direction, on top of whatever `ENV` is set to.
+>
+> Staging is deliberately grouped with dev, **not** with production: it is the
+> intended bake environment and ships with these alerts enabled. Note this is
+> *not* the same split `logger.Init` uses -- that one groups staging with
+> production. The two encode different intents; do not "align" them.
+>
+> - **`CDC_STRICT_ACK=true` (or the dev/test default): the new contract.**
+>   The handler never calls `lc.Ack()`; `runAckCoordinator` is the sole
+>   slot-advancer, gated on every configured sink durably writing each LSN.
+>   This is the slot-freezing behaviour described below.
+> - **`CDC_STRICT_ACK=false` (or the prod default today): the legacy
+>   contract.** `cfg.ManualCommit` is `false`, and the handler calls
+>   `lc.Ack()` per event again, exactly as before this plan -- the vendored
+>   library advances the slot itself, per event, regardless of whether any
+>   sink has durably written it yet.
+>
+> **Rollback at any step is flipping `CDC_STRICT_ACK` to `false` (a config
+> change, no code revert, no data-format change to unwind).** Be precise
+> about what that buys you: it is an **availability** escape hatch, not a
+> **correctness** one. Flipping it off un-freezes the slot and stops WAL
+> retention, but it also **re-opens the data-loss window this plan closed**
+> -- a dead or slow sink can silently lose events again, exactly as it could
+> before plan `01a_delivery_source_ack`. Use it to relieve WAL-retention
+> pressure on the source primary, not as a routine toggle.
+>
+> The AckManager/coordinator/`runSlotLagProbe` plumbing (and therefore every
+> metric in this document) stays live in **both** modes -- see
+> [Metrics](#metrics). Under `strict_ack=false` the coordinator's
+> `UpdateXLogPos` calls are redundant with the legacy `lc.Ack()` calls, not
+> harmful: the vendored `stream.UpdateXLogPos` (`pq/replication/stream.go`)
+> only ever *stores* `max(lsn, lastXLogPos)` and always *reports* that same
+> monotonic value back to PostgreSQL, so a coordinator call carrying a
+> same-or-lower LSN than what `lc.Ack()` already advanced to is a verified
+> no-op, never a regression. This is what makes it safe to keep
+> `cdc_source_ack_watermark` observable *before* the flag is ever flipped --
+> the whole point of the bake period below.
+>
+> **Current per-environment state:**
+>
+> - **Staging (`ENV=staging`, `values.staging.yml`): `strict_ack` defaults ON.**
+>   The new contract, and therefore the WAL-retention risk described below, is
+>   **live in staging today**. This is intended -- staging is the bake
+>   environment and has `worker.alerts.enabled: true`. If you are paged on
+>   staging WAL growth, do **not** assume strict_ack is off; it is on.
+> - **Production (`ENV=production`, `values.production.yml`): `strict_ack`
+>   defaults OFF.** Production still runs legacy per-event acking, so the
+>   WAL-retention risk is not yet live there -- but neither is the data-loss
+>   fix. Deploying this branch to production does **not** enable the fix;
+>   someone must set `CDC_STRICT_ACK=true`. See
+>   [Deploy order](#deploy-order). The alerting in
+> `deploy/helm-chart/templates/worker/prometheusrule.yaml` is gated by
+> `worker.alerts.enabled`, which currently defaults to `false` in
+> `values.production.yml`. Per the deploy order below, `worker.alerts.enabled: true`
+> for production is a **precondition** for flipping `strict_ack` on there,
+> not something to defer until after.
 
 ## Why this exists
 
@@ -196,13 +243,12 @@ If the templated alert expressions or thresholds in
 match by hand and re-run the test -- it is not generated automatically from
 the Helm template.
 
-## Deploy order (aspirational -- depends on the not-yet-landed `strict_ack` flag)
+## Deploy order
 
-The checklist below describes the intended rollout **once `strict_ack` (or an
-equivalent flag) exists**. It does not apply today: see
-[Status as of this commit](#status-as-of-this-commit----read-this-first). It
-is kept here so the follow-up commit that introduces the flag can wire this
-section up rather than invent it from scratch.
+The `strict_ack` flag (`CDC_STRICT_ACK`, see
+[Status as of this commit](#status-as-of-this-commit----read-this-first))
+exists and is live today. This section describes the actual rollout
+procedure for turning it on in production, pipeline by pipeline.
 
 **Preconditions before any prod flag flip (all mandatory):**
 
@@ -213,26 +259,39 @@ section up rather than invent it from scratch.
 - [ ] This WI-5a metric + `PrometheusRule` (`deploy/helm-chart/templates/worker/prometheusrule.yaml`,
       `worker.alerts.enabled: true`) live for the target pipeline's source,
       including `CDCSourceSlotLagProbeStale` (so a degraded probe doesn't
-      silently blind the other two alerts).
+      silently blind the other two alerts). This means flipping
+      `worker.alerts.enabled` to `true` in `values.production.yml` before
+      the first production `CDC_STRICT_ACK=true` flip -- it currently
+      defaults to `false` there.
 - [ ] Bake period completed: `cdc_source_ack_watermark` tracks
-      `confirmed_flush_lsn` closely under production load. Today, with no
-      gating flag, `confirmed_flush_lsn > cdc_source_ack_watermark` is
-      expected; the gap should be small and stable, not growing.
+      `confirmed_flush_lsn` closely under production load with the flag
+      still off. With `strict_ack=false`, `confirmed_flush_lsn >
+      cdc_source_ack_watermark` is expected (the legacy `lc.Ack()` path
+      advances the slot without waiting for the watermark); the gap should
+      be small and stable, not growing. The AckManager/coordinator/metrics
+      plumbing runs regardless of the flag (see the status note above), so
+      this bake period needs no code change to start -- only time and
+      observation.
 
-**Then, pipeline by pipeline (once the flag exists):**
+**Then, pipeline by pipeline:**
 
-1. Release N: flag introduced, off by default in prod, metrics observed
-   (watermark plumbing already live today regardless of the flag).
+1. Release N: all WIs shipped, `strict_ack` off in prod (today's state),
+   metrics observed (watermark plumbing already live regardless of the
+   flag).
 2. Release N (config change): once every precondition above is checked for a
-   given pipeline, flip the flag on **for that pipeline only**. Watch
-   `cdc_source_slot_lag_bytes` and sink lag closely after the flip. Stop and
-   investigate any pipeline whose slot lag grows without a corresponding sink
-   outage before proceeding to the next pipeline.
+   given pipeline, set `CDC_STRICT_ACK=true` for that pipeline's worker
+   process only. Watch `cdc_source_slot_lag_bytes` and sink lag closely
+   after the flip. Stop and investigate any pipeline whose slot lag grows
+   without a corresponding sink outage before proceeding to the next
+   pipeline.
 3. Release N+1: once every pipeline has been flipped and observed healthy,
-   remove legacy ack parsing and make the flag on-by-default; flag removal in
-   N+2.
+   remove legacy ack parsing (the dual-read described in plan 01a §6) and
+   make `strict_ack` on-by-default; flag removal in N+2.
 
-**Rollback**, once the flag exists, would be flipping it back off. **That
-option does not exist today** -- see the status note at the top of this
-document. Until the flag lands, rolling back the WAL-retention behaviour
-requires reverting the `ManualCommit` change itself.
+**Rollback at any step:** set `CDC_STRICT_ACK=false` for the affected
+pipeline (a config change, redeploy the worker; no code revert, no
+data-format change to unwind). This is an **availability** escape hatch,
+not a **correctness** one -- it un-freezes the slot and stops WAL retention,
+but it also re-opens the data-loss window this plan closed (a dead/slow sink
+can silently lose events again, exactly as before plan `01a_delivery_source_ack`).
+Use it to relieve WAL-retention pressure, not as a routine toggle.

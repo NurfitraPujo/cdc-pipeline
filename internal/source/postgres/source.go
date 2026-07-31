@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,6 +106,50 @@ var slotLagProbeLastSuccessGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "cdc_source_slot_lag_probe_last_success_timestamp_seconds",
 	Help: "Unix timestamp of the last successful slot-lag probe query for this source",
 }, []string{"pipeline", "source", "slot"})
+
+// strictAckEnvVar is the env var that gates the strict_ack feature flag
+// (plan 01a §6). It is source-scoped in name only -- every PostgresSource
+// in this process reads the same process-wide env var, matching how every
+// other env-driven switch in this repo works (see logger.Init's "ENV" read
+// and cmd/pipeline/main.go's POSTGRES_*/DATABEND_* overrides). Read directly
+// in PostgresSource.Start rather than plumbed through protocol.SourceConfig
+// because SourceConfig is msgp-serialized and persisted in KV per source --
+// turning a temporary, release-scoped rollout switch into persisted deploy
+// state would survive past the flag's own removal (§6 step 3) and require a
+// migration to clean up. A plain env var needs neither.
+const strictAckEnvVar = "CDC_STRICT_ACK"
+
+// resolveStrictAck resolves the strict_ack flag (§6): an explicit
+// CDC_STRICT_ACK=<bool> always wins, in either direction. With no (or an
+// unparseable) value the default is by ENV:
+//
+//	ENV=production          => OFF (legacy per-event lc.Ack)
+//	ENV=staging             => ON  (the new contract)
+//	anything else / unset   => ON  (dev, test)
+//
+// Staging is deliberately grouped with dev, NOT with production: it is the
+// intended bake environment for this flag and ships with the WI-5a alerts
+// enabled, so it is where the new contract should be exercised first.
+//
+// Note this is deliberately NOT the same split logger.Init uses -- that one
+// groups staging WITH production (logger.go: `env != "production" && env !=
+// "staging"`). Do not "align" the two on the assumption they should match;
+// they encode different intents.
+//
+// ON is the new no-lc.Ack() contract (the whole point of plan 01a); OFF is
+// the legacy per-event ack this flag exists to fall back to, which re-opens
+// the data-loss window -- an availability escape hatch, not a correctness
+// one.
+func resolveStrictAck() bool {
+	if raw := os.Getenv(strictAckEnvVar); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err == nil {
+			return v
+		}
+		log.Warn().Str(strictAckEnvVar, raw).Msg("PostgresSource: unrecognized CDC_STRICT_ACK value, falling back to the ENV-based default")
+	}
+	return os.Getenv("ENV") != "production"
+}
 
 // connectorFactoryFunc is the pluggable factory used by PostgresSource to
 // build a new cdc.Connector. The default implementation calls
@@ -493,7 +539,23 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 	return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 }
 
-func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) func(lc *replication.ListenerContext) {
+// createHandler builds the replication callback. strictAck is the
+// resolved §6 feature flag, snapshotted once per Start call (a mid-session
+// flip is not supported -- see the flag doc on resolveStrictAck):
+//
+//   - ON (current contract): no lc.Ack() call anywhere below. The only
+//     thing that may advance the slot is runAckCoordinator's UpdateXLogPos,
+//     fed exclusively by s.ackChan.
+//   - OFF (legacy escape hatch, §6): every one of WI-4's 8 deleted lc.Ack()
+//     call sites is restored, one per handlerKind branch below, exactly
+//     mirroring the pre-WI-4 handler (see commit 0dbb895). Because
+//     cfg.ManualCommit is false in this mode, the vendored stream.Ack
+//     itself advances lastXLogPos and sends the standby status update --
+//     runAckCoordinator's own UpdateXLogPos calls keep running (metrics
+//     stay live for the §6 bake period) but are harmless no-ops here
+//     because they can only ever report vendored stream.go's monotonic
+//     max(lastXLogPos, lsn), never regress it.
+func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func(), strictAck bool) func(lc *replication.ListenerContext) {
 	return func(lc *replication.ListenerContext) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -515,21 +577,32 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 			// downstream pipeline to confirm publication. This guarantees
 			// the watermark can never advance past an LSN the replication
 			// stream has produced but no sink has yet acknowledged,
-			// preserving the at-least-once contract. There is no lc.Ack()
-			// call anywhere in this handler any more: under ManualCommit
-			// the only thing that may advance the slot is
-			// runAckCoordinator's UpdateXLogPos call, fed exclusively by
-			// s.ackChan (see Start/runAckCoordinator).
+			// preserving the at-least-once contract. Kept live in BOTH
+			// modes: the §6 bake period requires cdc_source_ack_watermark
+			// to be observable before the flag is ever flipped.
 			s.ackMgr.Observe(res.lsn)
+			if !strictAck {
+				// §6 OFF: legacy per-event ack. cfg.ManualCommit is false
+				// in this mode, so the vendored stream.Ack advances the
+				// slot straight to this event's LSN itself.
+				lc.Ack() //nolint:errcheck // matches pre-WI-4 behaviour: return value was never checked
+			}
 
 		case handlerKindSnapshot:
 			// Snapshot rows are excluded from the LSN/watermark machinery
-			// entirely (checkpointed by chunk, not by LSN) — no Observe.
+			// entirely (checkpointed by chunk, not by LSN) — no Observe,
+			// in both modes.
 			triggerFlush()
+			if !strictAck {
+				lc.Ack() //nolint:errcheck // matches pre-WI-4 behaviour: return value was never checked
+			}
 
 		case handlerKindFiltered:
 			if res.lsn > 0 {
 				s.ackMgr.ObserveConfirmed(res.lsn)
+			}
+			if !strictAck {
+				lc.Ack() //nolint:errcheck // matches pre-WI-4 behaviour: return value was never checked
 			}
 		}
 	}
@@ -614,6 +687,12 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		pubTables[i] = publication.Table{Name: t, ReplicaIdentity: "DEFAULT"}
 	}
 
+	// strictAck resolves the §6 feature flag once per Start call. See
+	// resolveStrictAck for the CDC_STRICT_ACK / dev-vs-prod default
+	// resolution; it is snapshotted here rather than re-read per event so a
+	// single replication session never straddles both handler behaviours.
+	strictAck := resolveStrictAck()
+
 	cfg := config.Config{
 		Host: srcConfig.Host, Port: srcConfig.Port, Username: srcConfig.User, Password: srcConfig.PassEncrypted, Database: srcConfig.Database,
 		Slot: slot.Config{Name: srcConfig.SlotName, CreateIfNotExists: true},
@@ -635,18 +714,25 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			HeartbeatInterval: 5 * time.Second,
 		},
 		Metric: config.MetricConfig{Port: s.resolveMetricPort()},
-		// ManualCommit moves position ownership entirely to
-		// runAckCoordinator's UpdateXLogPos call: neither lc.Ack() (a
-		// no-op call site that no longer exists) nor keepalives may
-		// advance the slot any more. This MUST land together with the
-		// coordinator rewrite below — enabling ManualCommit without a
-		// coordinator that actually confirms real SourceAck.SinkID values
-		// freezes the slot on the very first event.
-		ManualCommit: true,
+		// ManualCommit is gated by the §6 strict_ack flag (CDC_STRICT_ACK,
+		// see resolveStrictAck). ON: position ownership moves entirely to
+		// runAckCoordinator's UpdateXLogPos call -- neither lc.Ack() (a
+		// no-op call site under ManualCommit) nor keepalives may advance
+		// the slot. This MUST land together with the coordinator rewrite
+		// below — enabling ManualCommit without a coordinator that
+		// actually confirms real SourceAck.SinkID values freezes the slot
+		// on the very first event. OFF (§6 rollback path): the vendored
+		// library reverts to advancing the slot per-event via lc.Ack(),
+		// exactly as before plan 01a -- see createHandler.
+		ManualCommit: strictAck,
 		// KeepaliveFunc reinstates keepalive-driven advancement for idle
 		// streams (WAL-bloat protection) via the ONLY sanctioned
 		// fast-forward, AckManager.IdleAdvance, which refuses whenever
-		// anything is still pending confirmation.
+		// anything is still pending confirmation. Left wired even when
+		// strictAck is false: the vendored stream only ever invokes it
+		// when config.ManualCommit is true (pq/replication/stream.go), so
+		// it is simply unreachable, harmless dead wiring under the legacy
+		// path rather than a second behaviour to maintain.
 		KeepaliveFunc: func(lsn pq.LSN) { s.ackMgr.IdleAdvance(uint64(lsn)) },
 	}
 
@@ -660,7 +746,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	// applies the KV watermark as a floor so the coordinator's first
 	// UpdateXLogPos call can never regress below what KV already knows.
 
-	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush)
+	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush, strictAck)
 
 	var connectorErr error
 	s.mu.Lock()
@@ -1280,6 +1366,11 @@ func (s *PostgresSource) Restart(ctx context.Context, newTables []string) (<-cha
 		pubTables[i] = publication.Table{Name: t, ReplicaIdentity: "DEFAULT"}
 	}
 
+	// strictAck: same §6 resolution as Start, re-read per restart so a hot
+	// restart picks up a flag flip rather than being pinned to whatever was
+	// resolved at the original Start call.
+	strictAck := resolveStrictAck()
+
 	cfg := config.Config{
 		Host: s.config.Host, Port: s.config.Port, Username: s.config.User, Password: s.config.PassEncrypted, Database: s.config.Database,
 		Slot: slot.Config{Name: s.config.SlotName, CreateIfNotExists: true},
@@ -1295,6 +1386,11 @@ func (s *PostgresSource) Restart(ctx context.Context, newTables []string) (<-cha
 		// the same address across hot-restarts. When unset (0), fall
 		// back to the package-level dynamic counter.
 		Metric: config.MetricConfig{Port: s.resolveMetricPort()},
+		// ManualCommit gated by the same §6 strict_ack flag as Start (see
+		// the doc there); kept consistent so a hot restart never straddles
+		// the two handler behaviours.
+		ManualCommit:  strictAck,
+		KeepaliveFunc: func(lsn pq.LSN) { s.ackMgr.IdleAdvance(uint64(lsn)) },
 	}
 
 	// T1-3: Allocate a fresh msgChan for the new session. The cleanup
@@ -1329,7 +1425,7 @@ func (s *PostgresSource) Restart(ctx context.Context, newTables []string) (<-cha
 		}
 	}
 
-	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush)
+	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush, strictAck)
 
 	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelSetup()

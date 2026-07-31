@@ -100,7 +100,7 @@ func (s *stubConnector) WaitUntilReady(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *stubConnector) Close()                                 { s.closeCount.Add(1) }
+func (s *stubConnector) Close() { s.closeCount.Add(1) }
 func (s *stubConnector) UpdateXLogPos(_ context.Context, lsn pq.LSN) error {
 	s.firstUpdateNano.CompareAndSwap(0, time.Now().UnixNano())
 	s.updateCount.Add(1)
@@ -602,6 +602,7 @@ func drainMsgChan(ch <-chan []protocol.Message) (stop func()) {
 // slot must never advance until runAckCoordinator receives a matching
 // SourceAck from every required sink.
 func TestHandler_NeverAcksOrAdvances_UntilCoordinatorConfirmed(t *testing.T) {
+	t.Setenv(strictAckEnvVar, "true") // pin strict_ack ON regardless of the ambient ENV default
 	s := NewPostgresSource("wi4-handler-source")
 	factory := newStubFactory()
 	s.SetConnectorFactory(factory.Build)
@@ -770,6 +771,7 @@ func TestCoordinator_AckIngestion_NoLossUnderBurst(t *testing.T) {
 // comparable (it holds a func field), so this asserts individual captured
 // fields rather than whole-struct equality.
 func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
+	t.Setenv(strictAckEnvVar, "true") // pin strict_ack ON regardless of the ambient ENV default
 	s := NewPostgresSource("wi4-snapshot-source")
 	factory := newStubFactory()
 	s.SetConnectorFactory(factory.Build)
@@ -1013,4 +1015,110 @@ func TestRunSlotLagProbe_ExitsOnCtxCancel(t *testing.T) {
 	cancel()
 	require.NoError(t, waitWithTimeout(&wg, time.Second),
 		"runSlotLagProbe must exit promptly on ctx cancellation, even with a nil slotLagBytes seam")
+}
+
+// TestResolveStrictAck_DefaultsAndOverride is plan 01a §6: the strict_ack
+// flag must default ON in dev/test and OFF in prod (both keyed off the same
+// "ENV" var logger.Init already reads), and an explicit CDC_STRICT_ACK must
+// win over that default in both directions.
+func TestResolveStrictAck_DefaultsAndOverride(t *testing.T) {
+	t.Run("dev/test default is ON", func(t *testing.T) {
+		t.Setenv(strictAckEnvVar, "")
+		t.Setenv("ENV", "")
+		assert.True(t, resolveStrictAck())
+	})
+
+	t.Run("ENV=production default is OFF", func(t *testing.T) {
+		t.Setenv(strictAckEnvVar, "")
+		t.Setenv("ENV", "production")
+		assert.False(t, resolveStrictAck())
+	})
+
+	t.Run("explicit false wins even in dev", func(t *testing.T) {
+		t.Setenv(strictAckEnvVar, "false")
+		t.Setenv("ENV", "")
+		assert.False(t, resolveStrictAck())
+	})
+
+	t.Run("explicit true wins even in prod", func(t *testing.T) {
+		t.Setenv(strictAckEnvVar, "true")
+		t.Setenv("ENV", "production")
+		assert.True(t, resolveStrictAck())
+	})
+
+	t.Run("unparseable value falls back to the ENV default", func(t *testing.T) {
+		t.Setenv(strictAckEnvVar, "not-a-bool")
+		t.Setenv("ENV", "production")
+		assert.False(t, resolveStrictAck())
+	})
+}
+
+// TestHandler_StrictAckOff_RestoresLegacyPerEventAck is plan 01a §6: with
+// the flag OFF, cfg.ManualCommit must be false and every one of WI-4's 8
+// deleted lc.Ack() call sites must fire again -- for both filtered and data
+// events -- restoring the pre-WI-4 legacy per-event ack contract exactly
+// (commit 0dbb895). The AckManager/coordinator/metrics plumbing must still
+// run underneath, since keeping it live under OFF is the whole point of the
+// §6 bake period.
+func TestHandler_StrictAckOff_RestoresLegacyPerEventAck(t *testing.T) {
+	t.Setenv(strictAckEnvVar, "false")
+
+	s := NewPostgresSource("strict-ack-off-source")
+	factory := newStubFactory()
+	s.SetConnectorFactory(factory.Build)
+
+	cfg := validSourceConfig()
+	cfg.Tables = []string{"public.t1"}
+
+	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
+	require.NoError(t, err)
+	defer s.Stop()
+	_ = ackChan
+
+	stopDrain := drainMsgChan(msgChan)
+	defer stopDrain()
+
+	got := factory.LastConfig()
+	assert.False(t, got.ManualCommit, "strict_ack off must leave ManualCommit false, restoring the legacy per-event slot advance")
+
+	handler := factory.Handler()
+	require.NotNil(t, handler)
+
+	var ackCalls atomic.Int32
+	countingAck := func() error { ackCalls.Add(1); return nil }
+
+	// Filtered event (unknown table): must still ack, same as pre-WI-4.
+	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 50})
+	require.Eventually(t, func() bool { return ackCalls.Load() == 1 }, time.Second, 5*time.Millisecond,
+		"a filtered event must call lc.Ack under strict_ack off")
+
+	// Data event against the known table: must also ack immediately,
+	// without waiting for any SourceAck from the engine -- that is
+	// precisely the legacy (pre-plan-01a) contract this flag restores.
+	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
+	require.Eventually(t, func() bool { return ackCalls.Load() == 2 }, time.Second, 5*time.Millisecond,
+		"a data event must call lc.Ack under strict_ack off, without waiting for a SourceAck")
+
+	// Snapshot data event: also acks under strict_ack off. This branch is
+	// asserted explicitly because the WI-4 refactor collapsed pre-WI-4's 8
+	// lc.Ack() sites into 3 (one per handlerKind), and handlerKindSnapshot
+	// is one of the two collapse points where a site could be silently
+	// dropped -- without this case, deleting that ack would leave the test
+	// green while the escape hatch was quietly broken for snapshot rows.
+	handler(&replication.ListenerContext{
+		Message: &format.Snapshot{EventType: format.SnapshotEventTypeData, Table: "public.t1", Data: map[string]any{"a": 1}},
+		Ack:     countingAck,
+		LSN:     150,
+	})
+	require.Eventually(t, func() bool { return ackCalls.Load() == 3 }, time.Second, 5*time.Millisecond,
+		"a snapshot data event must call lc.Ack under strict_ack off")
+
+	// The AckManager bookkeeping must still be running underneath (the §6
+	// bake-period requirement): the data event's LSN was Observed, so the
+	// watermark advances once the engine's SourceAck arrives, exactly as
+	// under strict_ack on -- it is simply redundant with the legacy ack
+	// above, not disabled.
+	ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{100}}
+	require.Eventually(t, func() bool { return s.ackMgr.Watermark() == 100 }, time.Second, 5*time.Millisecond,
+		"AckManager/coordinator bookkeeping must keep running under strict_ack off so cdc_source_ack_watermark stays observable")
 }

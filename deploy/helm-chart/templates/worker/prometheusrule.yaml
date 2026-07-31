@@ -1,13 +1,16 @@
 {{- if .Values.worker.alerts.enabled }}
-# WI-5a (plan 01a §3): slot-lag observability. Under ManualCommit -- which
-# is UNCONDITIONALLY ENABLED as of this commit (internal/source/postgres/source.go,
-# cfg.ManualCommit: true in Start) -- the replication slot only advances
-# after every configured sink has durably written an LSN, so a dead/slow
-# sink freezes confirmed_flush_lsn and PostgreSQL retains WAL without bound
-# on the SOURCE primary, RIGHT NOW, in every environment where this chart
-# is deployed. That is the correct at-least-once trade (loss -> visible
-# backpressure), but it is only safe to operate with these alerts live --
-# and until worker.alerts.enabled is true here, it is NOT visible.
+# WI-5a (plan 01a §3): slot-lag observability. Under ManualCommit -- gated by
+# the `strict_ack` flag (CDC_STRICT_ACK, internal/source/postgres/source.go:
+# resolveStrictAck, defaults ON in dev/test and OFF in prod) -- the
+# replication slot only advances after every configured sink has durably
+# written an LSN, so a dead/slow sink freezes confirmed_flush_lsn and
+# PostgreSQL retains WAL without bound on the SOURCE primary, for any
+# pipeline that has strict_ack turned on. That is the correct at-least-once
+# trade (loss -> visible backpressure), but it is only safe to operate with
+# these alerts live -- and until worker.alerts.enabled is true here, it is
+# NOT visible. Per the RUNBOOK's deploy order, worker.alerts.enabled: true
+# is a precondition for flipping strict_ack on for any pipeline in this
+# environment, not a follow-up.
 #
 # See deploy/helm-chart/RUNBOOK.md for the full risk statement, the
 # deploy-order checklist, and the three distinct failure modes these
