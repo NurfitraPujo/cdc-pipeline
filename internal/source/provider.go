@@ -8,7 +8,7 @@ import (
 
 // SourceAck tells the source that one sink has durably written a set of
 // LSNs. It is the typed payload the engine forwards on the ack channel
-// returned by Start/Restart, replacing the old anonymous struct{}{} signal
+// returned by Start, replacing the old anonymous struct{}{} signal
 // that carried no LSN or sink identity.
 type SourceAck struct {
 	SinkID string
@@ -24,9 +24,5 @@ type Source interface {
 	Start(ctx context.Context, config protocol.SourceConfig, checkpoint protocol.Checkpoint, ackers []string) (msgChan <-chan []protocol.Message, ackChan chan<- SourceAck, err error)
 	Stop() error
 	AlterPublication(ctx context.Context, tableName string) error
-	// Restart tears down the current replication session and starts a new
-	// one with the merged table set, returning fresh channels. Replaces
-	// the broken in-place RestartWithNewTables.
-	Restart(ctx context.Context, newTables []string) (<-chan []protocol.Message, chan<- SourceAck, error)
 	UpdateXLogPos(ctx context.Context, lsn uint64) error
 }

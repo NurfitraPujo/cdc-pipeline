@@ -70,22 +70,6 @@ func (mr *MockSourceMockRecorder) Name() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Name", reflect.TypeOf((*MockSource)(nil).Name))
 }
 
-// Restart mocks base method.
-func (m *MockSource) Restart(ctx context.Context, newTables []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Restart", ctx, newTables)
-	ret0, _ := ret[0].(<-chan []protocol.Message)
-	ret1, _ := ret[1].(chan<- source.SourceAck)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// Restart indicates an expected call of Restart.
-func (mr *MockSourceMockRecorder) Restart(ctx, newTables any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Restart", reflect.TypeOf((*MockSource)(nil).Restart), ctx, newTables)
-}
-
 // Start mocks base method.
 func (m *MockSource) Start(ctx context.Context, config protocol.SourceConfig, checkpoint protocol.Checkpoint, ackers []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
 	m.ctrl.T.Helper()
