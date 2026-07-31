@@ -23,6 +23,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
@@ -109,6 +110,24 @@ type PostgresSource struct {
 	// to avoid the real PostgreSQL connection path.
 	connectorFactory connectorFactoryFunc
 
+	// kv and pipelineID are optional observability plumbing for
+	// persistWatermark (WI-7 §3): when kv is non-nil, runAckCoordinator
+	// best-effort writes the current watermark to
+	// protocol.SourceWatermarkKey(pipelineID, s.config.ID), rate-limited
+	// to once per second. Neither is required for correctness -- when kv
+	// is nil (the default), persistWatermark is a no-op. Set via WithKV.
+	kv         nats.KeyValue
+	pipelineID string
+
+	// slotConfirmedFlushLSN resolves the given slot's confirmed_flush_lsn
+	// (WI-7 B3 seed). Defaults to queryConfirmedFlushLSN (a real,
+	// short-lived query against s.db); tests override it to exercise the
+	// seed logic without a live PostgreSQL connection. ok is false
+	// whenever the value could not be determined (no rows yet, query
+	// error, parse error) -- callers treat that as "leave unseeded",
+	// never as "seed with zero".
+	slotConfirmedFlushLSN func(ctx context.Context, db *sql.DB, slotName string) (lsn pq.LSN, ok bool)
+
 	// Internal channels for goroutine communication
 	msgChan chan []protocol.Message
 	// ackChan is the public channel returned from Start. The engine sends
@@ -126,11 +145,51 @@ type PostgresSource struct {
 
 func NewPostgresSource(name string) *PostgresSource {
 	return &PostgresSource{
-		name:             name,
-		oidCache:         make(map[uint32]string),
-		ackMgr:           NewAckManager(nil),
-		connectorFactory: defaultConnectorFactory,
+		name:                  name,
+		oidCache:              make(map[uint32]string),
+		ackMgr:                NewAckManager(nil),
+		connectorFactory:      defaultConnectorFactory,
+		slotConfirmedFlushLSN: queryConfirmedFlushLSN,
 	}
+}
+
+// queryConfirmedFlushLSN is the real (non-test) implementation of
+// PostgresSource.slotConfirmedFlushLSN: it queries pg_replication_slots
+// for the given slot's confirmed_flush_lsn over an existing *sql.DB. It
+// is used both by the pre-Start fast path (slot already existed from a
+// prior process) and by the post-WaitUntilReady path (freshly-created
+// slot, WI-7 B3). Any error (nil db, query, scan, parse, or a
+// zero/unparseable LSN) reports ok=false; callers treat that as "leave
+// unseeded", since seeding 0 would be a no-op and this must never block
+// or fail startup.
+func queryConfirmedFlushLSN(ctx context.Context, db *sql.DB, slotName string) (pq.LSN, bool) {
+	if db == nil || slotName == "" {
+		return 0, false
+	}
+
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var confirmedFlushLSN string
+	err := db.QueryRowContext(qctx,
+		`SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1`,
+		slotName,
+	).Scan(&confirmedFlushLSN)
+	if err != nil {
+		log.Debug().Err(err).Str("slot", slotName).Msg("queryConfirmedFlushLSN: failed to read confirmed_flush_lsn")
+		return 0, false
+	}
+
+	lsn, err := pq.ParseLSN(confirmedFlushLSN)
+	if err != nil {
+		log.Debug().Err(err).Str("confirmed_flush_lsn", confirmedFlushLSN).Msg("queryConfirmedFlushLSN: failed to parse confirmed_flush_lsn")
+		return 0, false
+	}
+	if lsn == 0 {
+		return 0, false
+	}
+
+	return lsn, true
 }
 
 // WithMetricPort configures a static Prometheus metrics port for the
@@ -159,6 +218,20 @@ func (s *PostgresSource) SetConnectorFactory(factory connectorFactoryFunc) {
 		return
 	}
 	s.connectorFactory = factory
+}
+
+// WithKV configures the NATS KV bucket and pipeline ID used by
+// persistWatermark (WI-7 §3) to write a best-effort observability record
+// of the current watermark. It is optional: callers that never invoke
+// WithKV get the pre-WI-7 behaviour (no watermark KV write). Intended to
+// be called before the source is shared with other goroutines, matching
+// WithMetricPort's usage contract.
+func (s *PostgresSource) WithKV(pipelineID string, kv nats.KeyValue) *PostgresSource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pipelineID = pipelineID
+	s.kv = kv
+	return s
 }
 
 // resolveMetricPort returns the port that the underlying connector
@@ -488,12 +561,15 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		KeepaliveFunc: func(lsn pq.LSN) { s.ackMgr.IdleAdvance(uint64(lsn)) },
 	}
 
-	// WI-7 (not this WI) removes the StartLSN override entirely in favour
-	// of the slot's own confirmed_flush_lsn as the sole resume authority.
-	// Do NOT remove it here.
-	if checkpoint.IngressLSN > 0 {
-		cfg.StartLSN = pq.LSN(checkpoint.IngressLSN)
-	}
+	// WI-7: cfg.StartLSN is deliberately left at its zero value. The
+	// PostgreSQL replication slot's own confirmed_flush_lsn is now the
+	// sole resume authority (vendored stream.go: lastXLogPos==0 means
+	// "start from confirmed_flush_lsn"). By construction the slot only
+	// advances after every configured sink has durably written the LSN
+	// (WI-4/WI-5), so it is always <= every sink's durable position and
+	// safe to trust directly. Hydrate(checkpoint.IngressLSN) above still
+	// applies the KV watermark as a floor so the coordinator's first
+	// UpdateXLogPos call can never regress below what KV already knows.
 
 	handler := s.createHandler(&mu, &msgs, knownTables, triggerFlush)
 
@@ -580,6 +656,10 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 	// trip and clutters the postgres log).
 	var lastFlushedWatermark uint64
 
+	// lastPersistedAt rate-limits persistWatermark (observability only,
+	// never correctness) to once per second.
+	var lastPersistedAt time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -600,6 +680,12 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 			pendingLSNsGauge.WithLabelValues(s.name).Set(float64(s.ackMgr.PendingCount()))
 
 			wm := s.ackMgr.Watermark()
+
+			if now := time.Now(); wm > 0 && now.Sub(lastPersistedAt) >= time.Second {
+				s.persistWatermark(wm)
+				lastPersistedAt = now
+			}
+
 			if wm == 0 || wm == lastFlushedWatermark {
 				continue
 			}
@@ -648,6 +734,35 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context) {
 
 			lastFlushedWatermark = wm
 		}
+	}
+}
+
+// persistWatermark is a best-effort, non-blocking KV write of the current
+// AckManager watermark for dashboards/operators (WI-7 §3). It is NEVER on
+// the correctness path: the replication slot's own confirmed_flush_lsn
+// (advanced exclusively via UpdateXLogPos above) is what actually gates
+// resume safety. Any failure here is logged and otherwise ignored.
+func (s *PostgresSource) persistWatermark(wm uint64) {
+	s.mu.RLock()
+	kv := s.kv
+	pipelineID := s.pipelineID
+	sourceID := s.config.ID
+	s.mu.RUnlock()
+
+	if kv == nil || pipelineID == "" || sourceID == "" {
+		return
+	}
+
+	cp := protocol.Checkpoint{IngressLSN: wm, Status: "ACTIVE", UpdatedAt: time.Now().UTC()}
+	data, err := cp.MarshalMsg(nil)
+	if err != nil {
+		log.Debug().Err(err).Msg("persistWatermark: failed to marshal checkpoint")
+		return
+	}
+
+	key := protocol.SourceWatermarkKey(pipelineID, sourceID)
+	if _, err := kv.Put(key, data); err != nil {
+		log.Debug().Err(err).Str("key", key).Msg("persistWatermark: failed to write watermark to KV")
 	}
 }
 
@@ -730,17 +845,122 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 		}
 	}()
 
-	if checkpoint.IngressLSN > 0 {
-		// T0-2: signature now carries ctx + error. WI-7 deletes this seed entirely (the
-		// slot's own confirmed_flush_lsn becomes the resume authority), so this is
-		// deliberately just made to compile and be non-silent.
-		//
-		// ErrStreamClosed is EXPECTED and deliberately not logged: this runs before
-		// conn.Start below, so the stream has no socket yet. The in-memory position is
-		// still stored, so the seed succeeded; only the pre-connect send was skipped.
-		if err := conn.UpdateXLogPos(sourceCtx, pq.LSN(checkpoint.IngressLSN)); err != nil &&
+	// WI-7 / B3: cfg.StartLSN no longer seeds the vendored stream's
+	// lastXLogPos, so both keepalive reply paths (LoadXLogPos() > 0
+	// guarded) stay silent until the coordinator's first flush. On a
+	// resume (hydrated watermark > 0) that would reopen a window WI-4
+	// closed: a fresh session whose downstream sink is down from the very
+	// first event would send NO standby status update at all while data
+	// LSNs are pending (IdleAdvance correctly refuses), risking
+	// wal_sender_timeout on the primary.
+	//
+	// Mitigation: seed lastXLogPos once, here, from the AckManager's
+	// hydrated watermark -- NOT from checkpoint.IngressLSN directly, so
+	// this stays in sync with the same floor Hydrate() applied in Start.
+	// This is deliberately scoped to the resume case only (watermark > 0).
+	// A genuinely fresh slot (watermark == 0, no prior checkpoint) is not
+	// seeded: seeding 0 would be a no-op anyway (lastXLogPos already
+	// starts at 0, meaning "use confirmed_flush_lsn"), and a fresh slot
+	// with a sink down from event one is exactly the condition the WI-5a
+	// slot-lag alert (cdc_source_pending_lsns / replication-slot lag
+	// metrics) exists to catch -- an operator is expected to act on that
+	// alert before wal_sender_timeout fires, rather than this code path
+	// silently working around it.
+	if wm := s.ackMgr.Watermark(); wm > 0 {
+		// ErrStreamClosed is EXPECTED and deliberately not logged: this runs
+		// before conn.Start below, so the stream has no socket yet. The
+		// in-memory position is still stored, so the seed succeeded; only
+		// the pre-connect send was skipped.
+		if err := conn.UpdateXLogPos(sourceCtx, pq.LSN(wm)); err != nil &&
 			!errors.Is(err, replication.ErrStreamClosed) {
-			log.Warn().Err(err).Uint64("lsn", checkpoint.IngressLSN).Msg("Failed to seed xlog position from checkpoint")
+			log.Warn().Err(err).Uint64("lsn", wm).Msg("Failed to seed xlog position from hydrated watermark")
+		}
+	} else {
+		// B3, fully closed rather than left to the WI-5a alert: on a
+		// genuinely fresh slot (hydrated watermark == 0) the vendored
+		// lastXLogPos stays 0 until the coordinator's first flush, which
+		// means both LoadXLogPos()>0-guarded keepalive reply paths stay
+		// silent. If the downstream sink is down from event one, that is
+		// not merely a slow reconnect: NO standby status update is ever
+		// sent while data LSNs are pending (IdleAdvance correctly
+		// refuses), wal_sender_timeout (default 60s) kills the walsender,
+		// and the vendored connector's Start loop parks on cancelCh with
+		// no reconnect -- ingestion stalls permanently until a human
+		// restarts the pipeline, even after the sink recovers. No data is
+		// lost (the slot never advanced), but it does not self-heal.
+		//
+		// Close it by querying the slot's OWN confirmed_flush_lsn and
+		// seeding lastXLogPos with it. Semantically this is a no-op
+		// position -- it is exactly where replication is about to start
+		// from anyway -- but it makes lastXLogPos non-zero, which is all
+		// either keepalive reply path checks.
+		//
+		// TWO attempts, because the slot may not exist yet at this point:
+		// on a genuinely first-ever deployment the slot is created INSIDE
+		// conn.Start (slot.Config{CreateIfNotExists: true}, materialised
+		// by the vendored connector's prepareSnapshotAndSlot/slot.Create),
+		// so a query issued here, before Start, would just get
+		// sql.ErrNoRows and leave lastXLogPos unseeded -- exactly the
+		// hole B3 describes, unmitigated.
+		//
+		//  1. Fast path, right here, pre-Start: correctly handles the
+		//     slot-already-exists case (a prior process created it, this
+		//     is a restart of a fresh-watermark session against it).
+		//  2. Fallback, spawned below as a goroutine gated on
+		//     conn.WaitUntilReady (which the vendored connector only
+		//     unblocks after slot.Connect/stream.Connect/stream.Open have
+		//     all succeeded, i.e. strictly after the slot exists): re-
+		//     checks the watermark is still 0 (nothing else seeded it in
+		//     the meantime) and retries the same query/seed.
+		//
+		// Deliberately NOT falling back to pg_current_wal_lsn(): that
+		// reports a position ahead of delivery and would genuinely
+		// advance the slot past undelivered data -- the exact bug this
+		// whole plan exists to eliminate. Every path here only ever seeds
+		// from confirmed_flush_lsn.
+		if s.slotConfirmedFlushLSN != nil {
+			if lsn, ok := s.slotConfirmedFlushLSN(sourceCtx, s.db, srcConfig.SlotName); ok {
+				// Same ErrStreamClosed rationale as the resume-path seed above.
+				if err := conn.UpdateXLogPos(sourceCtx, lsn); err != nil &&
+					!errors.Is(err, replication.ErrStreamClosed) {
+					log.Warn().Err(err).Str("lsn", lsn.String()).Msg("B3: failed to seed lastXLogPos from fresh-slot confirmed_flush_lsn (fast path)")
+				}
+			} else {
+				log.Debug().Str("slot", srcConfig.SlotName).Msg("B3: confirmed_flush_lsn not available before conn.Start (slot likely does not exist yet); deferring to the post-WaitUntilReady seed")
+			}
+
+			s.runWg.Add(1)
+			go func() {
+				defer s.runWg.Done()
+				// WaitUntilReady blocks until the connector's internal
+				// slot/publication/stream setup has completed, or returns
+				// early with an error if sourceCtx is cancelled first
+				// (shutdown) or setup itself fails. Either way this
+				// goroutine exits promptly and is drained by s.runWg --
+				// it never blocks Stop()/Restart() from proceeding.
+				if err := conn.WaitUntilReady(sourceCtx); err != nil {
+					log.Debug().Err(err).Msg("B3: WaitUntilReady did not succeed; skipping post-ready fresh-slot seed")
+					return
+				}
+				// Re-check: the resume-path branch above cannot run
+				// concurrently with this goroutine (they are mutually
+				// exclusive on wm==0 at spawn time), but another source
+				// of truth could have advanced the watermark by now (a
+				// real event was observed and confirmed before setup
+				// finished). Only seed if it is STILL the fresh-slot case.
+				if s.ackMgr.Watermark() != 0 {
+					return
+				}
+				lsn, ok := s.slotConfirmedFlushLSN(sourceCtx, s.db, srcConfig.SlotName)
+				if !ok {
+					log.Debug().Str("slot", srcConfig.SlotName).Msg("B3: confirmed_flush_lsn still not available after WaitUntilReady; leaving lastXLogPos unseeded, relying on WI-5a slot-lag alerting")
+					return
+				}
+				if err := conn.UpdateXLogPos(sourceCtx, lsn); err != nil &&
+					!errors.Is(err, replication.ErrStreamClosed) {
+					log.Warn().Err(err).Str("lsn", lsn.String()).Msg("B3: failed to seed lastXLogPos from fresh-slot confirmed_flush_lsn (post-ready path)")
+				}
+			}()
 		}
 	}
 

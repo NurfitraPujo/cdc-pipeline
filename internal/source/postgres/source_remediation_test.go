@@ -37,7 +37,42 @@ type stubConnector struct {
 	updateCount   atomic.Int32
 	lastUpdateLSN atomic.Uint64
 	updateErr     atomic.Pointer[error]
+
+	// WI-7 B3: firstStartNano/firstUpdateNano record the wall-clock time
+	// (UnixNano, 0 == not yet occurred) of the FIRST call to Start /
+	// UpdateXLogPos respectively, so tests can assert ordering (the B3
+	// pre-Start seed must happen strictly before conn.Start) rather than
+	// just eventually observing a value that a later periodic coordinator
+	// flush could equally have produced.
+	firstStartNano  atomic.Int64
+	firstUpdateNano atomic.Int64
+
+	// WI-7 B3 post-ready path: readyGate, when non-nil, makes
+	// WaitUntilReady block until the gate is closed (simulating the
+	// vendored connector not becoming ready until slot/publication/stream
+	// setup completes) or ctx is cancelled first (shutdown), whichever
+	// comes first. readyErr, when non-nil, is returned once the gate
+	// unblocks (or immediately, if readyGate is nil). By default (both
+	// nil) WaitUntilReady returns immediately with a nil error, matching
+	// pre-B3 stub behaviour for every other test in this file.
+	readyGate atomic.Pointer[chan struct{}]
+	readyErr  atomic.Pointer[error]
 }
+
+// gateReady installs a fresh, closed-by-caller gate for WaitUntilReady and
+// returns the release func. Tests that want to observe "seed happens only
+// after WaitUntilReady unblocks" call this before Start, then call the
+// returned release func once they want WaitUntilReady to return.
+func (s *stubConnector) gateReady() (release func()) {
+	gate := make(chan struct{})
+	s.readyGate.Store(&gate)
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
+// failReadyWith makes WaitUntilReady return err once it unblocks (immediately
+// if no gate was installed via gateReady).
+func (s *stubConnector) failReadyWith(err error) { s.readyErr.Store(&err) }
 
 func newStubConnector() *stubConnector { return &stubConnector{} }
 
@@ -45,14 +80,28 @@ func newStubConnector() *stubConnector { return &stubConnector{} }
 func (s *stubConnector) failUpdatesWith(err error) { s.updateErr.Store(&err) }
 
 func (s *stubConnector) Start(ctx context.Context) {
+	s.firstStartNano.CompareAndSwap(0, time.Now().UnixNano())
 	s.startCount.Add(1)
 	s.lastCtx.Store(&ctx)
 	<-ctx.Done()
 }
 
-func (s *stubConnector) WaitUntilReady(_ context.Context) error { return nil }
+func (s *stubConnector) WaitUntilReady(ctx context.Context) error {
+	if gatep := s.readyGate.Load(); gatep != nil {
+		select {
+		case <-*gatep:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if errp := s.readyErr.Load(); errp != nil {
+		return *errp
+	}
+	return nil
+}
 func (s *stubConnector) Close()                                 { s.closeCount.Add(1) }
 func (s *stubConnector) UpdateXLogPos(_ context.Context, lsn pq.LSN) error {
+	s.firstUpdateNano.CompareAndSwap(0, time.Now().UnixNano())
 	s.updateCount.Add(1)
 	s.lastUpdateLSN.Store(uint64(lsn))
 	if errp := s.updateErr.Load(); errp != nil {
@@ -76,6 +125,16 @@ type stubFactory struct {
 	current    *stubConnector
 	handler    replication.ListenerFunc
 	lastConfig config.Config
+
+	// presetReadyGate, when non-nil, is installed on every connector this
+	// factory builds AT CONSTRUCTION TIME -- i.e. before Start's
+	// startConnector goroutine can possibly reach WaitUntilReady. This
+	// closes an otherwise-inherent race in tests that need to observe
+	// "nothing happened yet" before releasing the gate: installing the
+	// gate via the connector AFTER Start returns is too late, since the
+	// startConnector goroutine may already have called (and an ungated
+	// stub WaitUntilReady returns from) WaitUntilReady by then.
+	presetReadyGate atomic.Pointer[chan struct{}]
 }
 
 func newStubFactory() *stubFactory { return &stubFactory{} }
@@ -87,8 +146,22 @@ func (f *stubFactory) Build(_ context.Context, cfg config.Config, h replication.
 	f.handler = h
 	f.lastConfig = cfg
 	conn := newStubConnector()
+	if gatep := f.presetReadyGate.Load(); gatep != nil {
+		conn.readyGate.Store(gatep)
+	}
 	f.current = conn
 	return conn, nil
+}
+
+// gateReady installs a WaitUntilReady gate on every connector this factory
+// subsequently builds, closed only when the returned release func is
+// called. Race-free by construction: call it BEFORE s.Start, so the gate
+// is already in place on the connector the moment it's constructed.
+func (f *stubFactory) gateReady() (release func()) {
+	gate := make(chan struct{})
+	f.presetReadyGate.Store(&gate)
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
 }
 
 // Handler returns the replication.ListenerFunc most recently passed to
@@ -712,5 +785,10 @@ func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
 	assert.True(t, got.Snapshot.Enabled, "Snapshot.Enabled must be unconditional, not gated on checkpoint.IngressLSN")
 	assert.True(t, got.ManualCommit, "ManualCommit must be set so the coordinator is the sole slot-advance path")
 	assert.NotNil(t, got.KeepaliveFunc, "KeepaliveFunc must be wired to AckManager.IdleAdvance")
-	assert.Equal(t, pq.LSN(12345), got.StartLSN, "the StartLSN seed is WI-7's job to remove, not WI-4's")
+	// WI-7: StartLSN is no longer seeded from the checkpoint at all. The
+	// replication slot's own confirmed_flush_lsn is the sole resume
+	// authority; the hydrated watermark floor is applied via
+	// AckManager.Hydrate and (on resume) the B3 mitigation in
+	// startConnector, never via cfg.StartLSN.
+	assert.Equal(t, pq.LSN(0), got.StartLSN, "StartLSN must always be 0; the slot's confirmed_flush_lsn is the sole resume authority")
 }

@@ -2,14 +2,19 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
+	pqcdc "github.com/Trendyol/go-pq-cdc/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog/log"
 )
 
@@ -30,16 +35,27 @@ type Pipeline struct {
 	// Drain() path (which never calls p.cancel()) can complete promptly;
 	// auxWg is only waited on in Shutdown, after p.cancel() has fired.
 	auxWg sync.WaitGroup
+
+	// slotConfirmedFlushLSN resolves the source's replication slot's
+	// current confirmed_flush_lsn for the WI-7 §3 operator warning
+	// (warnIfSlotAheadOfMinLSN). Defaults to queryPostgresConfirmedFlushLSN
+	// (a real, short-lived DB connection); tests override it to avoid a
+	// live PostgreSQL dependency. The bool return is false whenever the
+	// value could not be determined (any error), in which case the
+	// warning check is skipped -- this is pure observability and must
+	// never fail pipeline startup.
+	slotConfirmedFlushLSN func(srcCfg protocol.SourceConfig) (uint64, bool)
 }
 
 func NewPipeline(id string, prod *Producer, consumers []*Consumer, cfg protocol.PipelineConfig) *Pipeline {
 	return &Pipeline{
-		id:                id,
-		producer:          prod,
-		consumers:         consumers,
-		config:            cfg,
-		finished:          make(chan struct{}),
-		dynamicTablesChan: make(chan []string),
+		id:                    id,
+		producer:              prod,
+		consumers:             consumers,
+		config:                cfg,
+		finished:              make(chan struct{}),
+		dynamicTablesChan:     make(chan []string),
+		slotConfirmedFlushLSN: queryPostgresConfirmedFlushLSN,
 	}
 }
 
@@ -138,7 +154,22 @@ func (p *Pipeline) runProducer() error {
 	}
 
 	// 2. Get Checkpoints for all tables (use EgressLSN for resume safety)
+	//
+	// minLSN is the MIN over every (table, sink) egress checkpoint. This is
+	// deliberately a floor keyed on the LEAST-active table, so a table with
+	// low/no recent write traffic (which keeps an old egress checkpoint
+	// indefinitely) does not get skipped ahead of by Hydrate. It is only
+	// ever used for Hydrate/initialCP -- never compared against the slot
+	// position (see sinkFrontierLSN below for that).
 	minLSN := uint64(0)
+	// sinkFrontier[sinkID] is the MAX EgressLSN across that sink's tables
+	// -- i.e. how far that sink has actually gotten, not the pipeline's
+	// stalest table. sinkHasCheckpoint tracks whether a sink produced ANY
+	// checkpoint at all (a newly-added sink has none), so the frontier
+	// comparison below can be skipped rather than silently treating an
+	// unknown sink as caught up.
+	sinkFrontier := make(map[string]uint64, len(p.config.Sinks))
+	sinkHasCheckpoint := make(map[string]bool, len(p.config.Sinks))
 	for _, table := range p.config.Tables {
 		// Pull from egress checkpoints for all configured sinks
 		for _, sinkID := range p.config.Sinks {
@@ -150,8 +181,54 @@ func (p *Pipeline) runProducer() error {
 					if cp.EgressLSN > 0 && (minLSN == 0 || cp.EgressLSN < minLSN) {
 						minLSN = cp.EgressLSN
 					}
+					sinkHasCheckpoint[sinkID] = true
+					if cp.EgressLSN > sinkFrontier[sinkID] {
+						sinkFrontier[sinkID] = cp.EgressLSN
+					}
 				}
 			}
+		}
+	}
+
+	// WI-7: minLSN (above) is observability/Hydrate input ONLY -- it must
+	// never feed StartLSN (the replication slot's own confirmed_flush_lsn
+	// is now the sole resume authority, see source.go Start).
+	//
+	// The operator warning below is a SEPARATE, stricter comparison: the
+	// slot vs. the durable FRONTIER (min over sinks of that sink's own
+	// max EgressLSN), not vs. minLSN. minLSN tracks the least-active
+	// table and is routinely far behind the slot on any pipeline with
+	// tables at unequal write rates -- comparing the slot against it
+	// would fire on essentially every restart and print a false "data
+	// loss" message. The frontier is the actual per-sink durable
+	// position; under the WI-4/WI-5 invariant the slot must never be
+	// ahead of the frontier, so seeing it ahead there genuinely means the
+	// invariant was violated upstream (e.g. a pre-upgrade slot that older
+	// code over-advanced) and rows between the frontier and the slot
+	// position cannot be replayed on a future failover.
+	//
+	// If any configured sink has no checkpoint at all yet, its frontier
+	// is unknown (not zero), so the whole check is skipped rather than
+	// judged against an assumed-zero frontier.
+	if len(p.config.Sinks) > 0 {
+		frontierKnown := true
+		frontierLSN := uint64(0)
+		first := true
+		for _, sinkID := range p.config.Sinks {
+			if !sinkHasCheckpoint[sinkID] {
+				frontierKnown = false
+				break
+			}
+			f := sinkFrontier[sinkID]
+			if first || f < frontierLSN {
+				frontierLSN = f
+				first = false
+			}
+		}
+		if frontierKnown {
+			p.warnIfSlotAheadOfSinkFrontier(srcCfg, frontierLSN)
+		} else {
+			log.Debug().Str("pipeline_id", p.id).Msg("sink durable frontier unknown (at least one configured sink has no egress checkpoint yet); skipping slot-vs-frontier check")
 		}
 	}
 
@@ -267,4 +344,80 @@ func (p *Pipeline) SignalDynamicTables(tables []string) {
 
 func (p *Pipeline) DynamicTablesChan() <-chan []string {
 	return p.dynamicTablesChan
+}
+
+// warnIfSlotAheadOfSinkFrontier is a best-effort, non-fatal check: it
+// resolves the replication slot's confirmed_flush_lsn via
+// p.slotConfirmedFlushLSN and logs a warning if it is meaningfully ahead
+// of frontierLSN (the caller-computed min-over-sinks of each sink's own
+// max EgressLSN -- i.e. the durable frontier, NOT the min-over-tables
+// minLSN used for Hydrate). Under the WI-4/WI-5 invariant the slot must
+// never advance past an LSN a sink has not durably written, so the slot
+// outrunning the frontier means that invariant was violated upstream of
+// this code (e.g. by a pre-upgrade build that over-advanced the slot) --
+// see plan §6's rollback note. Comparing against the frontier (rather
+// than minLSN, which tracks the least-active table and lags the slot on
+// every pipeline with unevenly-written tables) is what keeps this from
+// firing on the normal steady state. This is pure observability: it must
+// never block or fail pipeline startup.
+func (p *Pipeline) warnIfSlotAheadOfSinkFrontier(srcCfg protocol.SourceConfig, frontierLSN uint64) {
+	if srcCfg.Type != "postgres" || srcCfg.SlotName == "" || p.slotConfirmedFlushLSN == nil {
+		return
+	}
+
+	slotLSN, ok := p.slotConfirmedFlushLSN(srcCfg)
+	if !ok {
+		return
+	}
+
+	if frontierLSN > 0 && slotLSN > frontierLSN {
+		log.Warn().
+			Str("pipeline_id", p.id).
+			Str("slot", srcCfg.SlotName).
+			Uint64("slot_confirmed_flush_lsn", slotLSN).
+			Uint64("sink_frontier_lsn", frontierLSN).
+			Msg("replication slot confirmed_flush_lsn is ahead of the durable sink frontier; the at-least-once invariant was violated upstream and rows between the sink frontier and the slot position cannot be replayed on failover")
+	}
+}
+
+// queryPostgresConfirmedFlushLSN is the real (non-test) implementation of
+// Pipeline.slotConfirmedFlushLSN: it opens a short-lived connection to the
+// source database and reads the replication slot's confirmed_flush_lsn.
+// Any error (connection, query, parse) reports ok=false; callers treat
+// that as "unknown, skip the check" since this is observability-only.
+func queryPostgresConfirmedFlushLSN(srcCfg protocol.SourceConfig) (uint64, bool) {
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   fmt.Sprintf("%s:%d", srcCfg.Host, srcCfg.Port),
+		User:   url.UserPassword(srcCfg.User, srcCfg.PassEncrypted),
+		Path:   srcCfg.Database,
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		log.Debug().Err(err).Msg("queryPostgresConfirmedFlushLSN: failed to open source connection")
+		return 0, false
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var confirmedFlushLSN string
+	row := db.QueryRowContext(ctx, `SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1`, srcCfg.SlotName)
+	if err := row.Scan(&confirmedFlushLSN); err != nil {
+		log.Debug().Err(err).Str("slot", srcCfg.SlotName).Msg("queryPostgresConfirmedFlushLSN: failed to read confirmed_flush_lsn")
+		return 0, false
+	}
+
+	lsn, err := pqcdc.ParseLSN(confirmedFlushLSN)
+	if err != nil {
+		log.Debug().Err(err).Str("confirmed_flush_lsn", confirmedFlushLSN).Msg("queryPostgresConfirmedFlushLSN: failed to parse confirmed_flush_lsn")
+		return 0, false
+	}
+
+	return uint64(lsn), true
 }
