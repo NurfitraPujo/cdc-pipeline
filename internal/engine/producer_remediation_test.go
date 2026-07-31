@@ -76,19 +76,26 @@ func TestProducerDrainToCDCRoutesConcurrentInsertToMainStream(t *testing.T) {
 		},
 	}
 
-	verificationStarted := make(chan struct{})
-	allowTransition := make(chan struct{})
+	// WI-9 correction: the (potentially long, retrying) verifyEmpty step now
+	// runs UNLOCKED (a sustained JetStream outage must not be able to hold
+	// muTableStates and deadlock the producer's main publish path). The
+	// write lock is held only for transitionTableToCDC's final, bounded
+	// PendingCount recheck immediately before the state flip — that recheck
+	// is the invariant this test now exercises: publishBufferBatch must
+	// still be unable to proceed while that final recheck is in flight.
+	finalCheckStarted := make(chan struct{})
+	allowFinalCheck := make(chan struct{})
+	pc := &blockingPendingCounter{started: finalCheckStarted, release: allowFinalCheck}
+
 	transitionDone := make(chan error, 1)
 	go func() {
-		_, err := producer.transitionTableToCDC(sourceID, table, func() (bool, error) {
-			close(verificationStarted)
-			<-allowTransition
+		_, err := producer.transitionTableToCDC(context.Background(), sourceID, table, func() (bool, error) {
 			return true, nil
-		})
+		}, pc)
 		transitionDone <- err
 	}()
 
-	<-verificationStarted // transition holds muTableStates.Lock here
+	<-finalCheckStarted // transition holds muTableStates.Lock here, blocked in the final PendingCount recheck
 
 	publishDone := make(chan error, 1)
 	go func() {
@@ -106,7 +113,7 @@ func TestProducerDrainToCDCRoutesConcurrentInsertToMainStream(t *testing.T) {
 		// Expected: the insert cannot choose a route until the state flip completes.
 	}
 
-	close(allowTransition)
+	close(allowFinalCheck)
 	require.NoError(t, <-transitionDone)
 	require.NoError(t, <-publishDone)
 
@@ -138,6 +145,23 @@ func TestProducerPublishWithRetryWaitsForCircuitCoolDown(t *testing.T) {
 	executeCalls, openChecks := breaker.counts()
 	assert.Equal(t, 1, executeCalls)
 	assert.LessOrEqual(t, openChecks, 3, "open-state polling must be timer paced")
+}
+
+// blockingPendingCounter is a stream.PendingCounter test double whose
+// PendingCount signals `started` on entry and blocks until `release` is
+// closed, then reports zero pending. Used to hold transitionTableToCDC's
+// final-recheck critical section open long enough to observe concurrent
+// callers being blocked by it.
+type blockingPendingCounter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingPendingCounter) PendingCount(ctx context.Context) (uint64, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.release
+	return 0, nil
 }
 
 type remediationCircuitBreaker struct {

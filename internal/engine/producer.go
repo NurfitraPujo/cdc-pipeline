@@ -40,7 +40,19 @@ const (
 	evoStatePersistAttempts  = 5
 	evoStatePersistBackoff   = 50 * time.Millisecond
 	evoStatePersistMaxDelay  = 200 * time.Millisecond
-	bufferDrainIdleTimeout   = time.Second
+
+	// bufferDrainPendingCheckInterval is how often drainBufferedUntilIdle
+	// polls JetStream's NumPending while the buffer channel is quiet. It is
+	// purely a poll cadence, not a correctness deadline: drain completion is
+	// decided by NumPending==0 (server-side truth), not by elapsed time (WI-9
+	// replaces the old 1s-idle-timeout heuristic, which could declare a
+	// buffer empty while messages were still in JetStream redelivery flight).
+	bufferDrainPendingCheckInterval = 200 * time.Millisecond
+	// bufferDrainPendingCheckTimeout bounds each individual NumPending call so
+	// a NATS outage during drain surfaces as a logged, retried failure rather
+	// than blocking forever (plan §7 Risk 5) — this matters most for the
+	// final verification call, which runs under the muTableStates write lock.
+	bufferDrainPendingCheckTimeout = 3 * time.Second
 )
 
 var errPublishRetriesExhausted = errors.New("publisher retries exhausted")
@@ -85,6 +97,12 @@ type Producer struct {
 
 	muTableStates sync.RWMutex
 	tableStates   map[string]string // table name -> snapshot state (Snapshotting, Draining, CDC, Error)
+
+	// bufferDrainMu/bufferDraining guard against two concurrent flushBuffer
+	// goroutines racing on the same table's (stable, non-UUID) drainer
+	// durable name.
+	bufferDrainMu  sync.Mutex
+	bufferDraining map[string]bool
 }
 
 func NewProducer(pipelineID, natsURL string, cfg protocol.PipelineConfig, src source.Source, pub stream.Publisher, sub stream.Subscriber, kv nats.KeyValue, srcConfig protocol.SourceConfig) *Producer {
@@ -350,14 +368,16 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 				// Success! Update checkpoints
 				latestByTable := make(map[string]protocol.Message)
 				for _, m := range mainBatch {
-					if m.LSN > lastLSN {
-						lastLSN = m.LSN
-					}
 					// Snapshot rows are checkpointed by chunk, not by LSN (Critical
 					// 11's second half): their LSN is meaningless/zero and must not
-					// poison the ingress checkpoint used as a resume floor.
+					// poison the ingress checkpoint used as a resume floor. WI-9:
+					// this must also never become a drain target, so update lastLSN
+					// only after this check, not before it.
 					if m.Op == protocol.OpSnapshot || m.LSN == 0 {
 						continue
+					}
+					if m.LSN > lastLSN {
+						lastLSN = m.LSN
 					}
 					latestByTable[m.SourceID+"."+m.Table] = m
 				}
@@ -568,10 +588,51 @@ func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
 	p.muEvo.Unlock()
 }
 
+// sanitizeDurableComponent makes s safe to embed in a JetStream durable
+// consumer name, which forbids '.', whitespace, and '>'/'*' wildcards. Table
+// names are frequently schema-qualified (e.g. "public.orders"), which would
+// otherwise produce an invalid durable name.
+func sanitizeDurableComponent(s string) string {
+	return strings.NewReplacer(".", "_", " ", "_", ">", "_", "*", "_").Replace(s)
+}
+
 func (p *Producer) flushBuffer(ctx context.Context, table string) {
+	// Guard against concurrent flushBuffer calls for the same table (it is
+	// launched via `go` from three call sites: recoverEvoStates x2,
+	// handleSchemaAck, handleDynamicTables). Two concurrent drains would
+	// share the stable durable name below, and one completing and deleting
+	// the JetStream consumer out from under the other is worse than the
+	// UUID-suffixed-name behavior it replaced. The tableStates/evoStates
+	// Draining checks narrow this but do not fully close it (state is read,
+	// not reserved), so reserve explicitly here.
+	p.bufferDrainMu.Lock()
+	if p.bufferDraining == nil {
+		p.bufferDraining = make(map[string]bool)
+	}
+	if p.bufferDraining[table] {
+		p.bufferDrainMu.Unlock()
+		log.Warn().Str("table", table).Msg("Buffer drain already in progress for this table, skipping duplicate flushBuffer call")
+		return
+	}
+	p.bufferDraining[table] = true
+	p.bufferDrainMu.Unlock()
+	defer func() {
+		p.bufferDrainMu.Lock()
+		delete(p.bufferDraining, table)
+		p.bufferDrainMu.Unlock()
+	}()
+
 	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
-	// Create a temporary subscriber to drain the buffer
-	sub, err := stream_nats.NewNatsSubscriber(p.natsURL, "drainer-"+uuid.New().String(), topic, 100, 30*time.Second)
+	// Stable durable name (not UUID-suffixed): if this drain is interrupted
+	// (process restart, NATS blip) a subsequent flushBuffer for the same
+	// pipeline+table binds to the SAME durable consumer, so JetStream
+	// resumes redelivery of whatever was still pending instead of a fresh
+	// UUID-named consumer silently stranding those buffered messages behind
+	// an abandoned durable (plan 01a WI-9). Table names are sanitized since
+	// a schema-qualified name (e.g. "public.orders") would otherwise embed a
+	// "." illegal in a JetStream durable name.
+	durableName := fmt.Sprintf("drainer-%s-%s", p.pipelineID, sanitizeDurableComponent(table))
+	sub, err := stream_nats.NewNatsSubscriber(p.natsURL, durableName, topic, 100, 30*time.Second)
 	if err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to create subscriber to drain buffer")
 		return
@@ -585,7 +646,7 @@ func (p *Producer) flushBuffer(ctx context.Context, table string) {
 	}
 
 	mainTopic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
-	if _, err := p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, bufferDrainIdleTimeout); err != nil {
+	if _, err := p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, sub); err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to drain buffered messages")
 		return
 	}
@@ -603,35 +664,61 @@ func (p *Producer) flushBuffer(ctx context.Context, table string) {
 	}
 	p.muEvo.Unlock()
 
-	// 2. Transition snapshot state back to CDC. The write lock is held while the
-	// subscriber verifies a final quiet period and while the local state flips.
-	// Incoming routed publishes hold the corresponding read lock through publish,
-	// closing the race where a CDC event could otherwise land after drain exit.
+	// 2. Transition snapshot state back to CDC. The (potentially long-running,
+	// retrying) buffer verification runs UNLOCKED — transitionTableToCDC only
+	// takes the write lock for one short, bounded final recheck plus the
+	// state flip itself, never for the whole poll loop (a sustained JetStream
+	// outage must not be able to deadlock the producer's main publish path,
+	// which takes the read lock per message). Incoming routed publishes hold
+	// the corresponding read lock through publish, so once transitionTableToCDC
+	// acquires the write lock for its final recheck, no more can land in the
+	// buffer until it releases — closing the race where a CDC event could
+	// otherwise land after drain exit.
 	p.mu.RLock()
 	sourceID := p.sourceConfig.ID
 	p.mu.RUnlock()
 
-	transitioned, err := p.transitionTableToCDC(sourceID, table, func() (bool, error) {
-		return p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, bufferDrainIdleTimeout)
-	})
+	transitioned, err := p.transitionTableToCDC(ctx, sourceID, table, func() (bool, error) {
+		return p.drainBufferedUntilIdle(ctx, table, msgChan, mainTopic, sub)
+	}, sub)
 	if err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to complete snapshot buffer drain")
 		return
 	}
 	if transitioned {
 		log.Info().Str("table", table).Msg("Buffer flush complete for snapshot, table is now CDC")
+		// The drain fully completed (NumPending==0 observed under the write
+		// lock in transitionTableToCDC) and the durable name is stable across
+		// runs, so nothing will ever resume this consumer again. Delete it
+		// rather than leaking one durable JetStream consumer definition per
+		// evolution/drain cycle for this table.
+		delCtx, cancel := context.WithTimeout(context.Background(), bufferDrainPendingCheckTimeout)
+		if err := sub.DeleteConsumer(delCtx); err != nil {
+			log.Warn().Err(err).Str("table", table).Msg("Failed to delete drainer JetStream consumer after completed drain")
+		}
+		cancel()
 	}
 }
 
-func (p *Producer) drainBufferedUntilIdle(ctx context.Context, table string, msgChan <-chan *message.Message, mainTopic string, idleTimeout time.Duration) (bool, error) {
+// drainBufferedUntilIdle republishes buffered messages to mainTopic until the
+// buffer's JetStream consumer backlog is provably empty. It no longer trusts
+// a client-side idle timeout to mean "empty" (plan 01a WI-9): JetStream
+// redelivery lag after a NATS restart or under load can easily exceed any
+// reasonable fixed idle window, and treating that as "done" strands buffered
+// rows behind the table's flip to CDC — silent data loss. Instead it polls
+// pc.PendingCount (server-side truth) while msgChan is quiet, and only
+// returns true once NumPending==0. pc may be nil (subscriber without
+// PendingCounter support); in that degenerate case the function can only
+// keep waiting on msgChan/ctx, since there is no other durable line at that
+// point.
+func (p *Producer) drainBufferedUntilIdle(ctx context.Context, table string, msgChan <-chan *message.Message, mainTopic string, pc stream.PendingCounter) (bool, error) {
+	ticker := time.NewTicker(bufferDrainPendingCheckInterval)
+	defer ticker.Stop()
 	for {
-		timer := time.NewTimer(idleTimeout)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return false, ctx.Err()
 		case m, ok := <-msgChan:
-			timer.Stop()
 			if !ok {
 				return true, nil
 			}
@@ -642,31 +729,82 @@ func (p *Producer) drainBufferedUntilIdle(ctx context.Context, table string, msg
 				return false, fmt.Errorf("republishing buffered message for table %s: %w", table, err)
 			}
 			m.Ack()
-		case <-timer.C:
-			return true, nil
+		case <-ticker.C:
+			if pc == nil {
+				continue
+			}
+			// Bounded so a NATS outage during drain surfaces as a retried
+			// failure rather than blocking this call (and, for the final
+			// verification call, the muTableStates write lock) forever.
+			pendCtx, cancel := context.WithTimeout(ctx, bufferDrainPendingCheckTimeout)
+			pending, err := pc.PendingCount(pendCtx)
+			cancel()
+			if err != nil {
+				log.Warn().Err(err).Str("table", table).Msg("drainBufferedUntilIdle: failed to query pending count, will retry")
+				continue
+			}
+			if pending == 0 {
+				return true, nil
+			}
 		}
 	}
 }
 
-func (p *Producer) transitionTableToCDC(sourceID, table string, verifyEmpty func() (bool, error)) (bool, error) {
-	p.muTableStates.Lock()
-	if p.tableStates[table] != protocol.TableStateDraining {
-		p.muTableStates.Unlock()
+// transitionTableToCDC flips table from Draining to CDC once its buffer is
+// verified empty. verifyEmpty (typically drainBufferedUntilIdle) runs
+// UNLOCKED and may retry for as long as its ctx allows — it must NOT run
+// under muTableStates, or a sustained JetStream outage would hold that lock
+// indefinitely and deadlock the producer's main publish path (which takes
+// muTableStates.RLock() per message). Once verifyEmpty reports empty, the
+// write lock is taken only for a single, tightly bounded recheck via pc
+// (closing the race window between the unlocked verify and acquiring the
+// lock: a message could have landed in the buffer in that window) plus the
+// state flip itself — bounded by bufferDrainPendingCheckTimeout, not an
+// unbounded retry loop, so a NATS outage during exactly this recheck can
+// only stall the flip for a few seconds, not deadlock the producer.
+func (p *Producer) transitionTableToCDC(ctx context.Context, sourceID, table string, verifyEmpty func() (bool, error), pc stream.PendingCounter) (bool, error) {
+	p.muTableStates.RLock()
+	draining := p.tableStates[table] == protocol.TableStateDraining
+	p.muTableStates.RUnlock()
+	if !draining {
 		return false, nil
 	}
 
 	empty, err := verifyEmpty()
 	if err != nil {
-		p.muTableStates.Unlock()
 		return false, fmt.Errorf("verifying final buffer state for table %s: %w", table, err)
 	}
 	if !empty {
-		p.muTableStates.Unlock()
 		return false, nil
 	}
 
+	p.muTableStates.Lock()
+	defer p.muTableStates.Unlock()
+
+	if p.tableStates[table] != protocol.TableStateDraining {
+		// Raced with something else (e.g. an error path) that already moved
+		// this table out of Draining while we verified unlocked above.
+		return false, nil
+	}
+
+	if pc != nil {
+		checkCtx, cancel := context.WithTimeout(ctx, bufferDrainPendingCheckTimeout)
+		pending, pcErr := pc.PendingCount(checkCtx)
+		cancel()
+		if pcErr != nil {
+			return false, fmt.Errorf("final pending recheck for table %s: %w", table, pcErr)
+		}
+		if pending != 0 {
+			// Something landed in the buffer during the unlocked verify ->
+			// lock-acquisition window. Do not flip; the caller's drain loop
+			// has already exited, so this table will only be retried on the
+			// next flushBuffer trigger (schema ack / recovery / dynamic-table
+			// addition) rather than looping here under the write lock.
+			return false, nil
+		}
+	}
+
 	p.tableStates[table] = protocol.TableStateCDC
-	p.muTableStates.Unlock()
 
 	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
 	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateCDC)); err != nil {
@@ -971,13 +1109,13 @@ func (p *Producer) SetDynamicTablesChan(ctx context.Context, wg *sync.WaitGroup,
 				p.mu.RLock()
 				sid := p.sourceConfig.ID
 				p.mu.RUnlock()
-				p.handleDynamicTables(sid, tables)
+				p.handleDynamicTables(ctx, sid, tables)
 			}
 		}
 	}()
 }
 
-func (p *Producer) handleDynamicTables(sourceID string, newTables []string) {
+func (p *Producer) handleDynamicTables(ctx context.Context, sourceID string, newTables []string) {
 	log.Debug().Str("source_id", sourceID).Strs("table_names", newTables).Msg("Handling new dynamic tables")
 	for _, tableName := range newTables {
 		tableKey := fmt.Sprintf("public.%s", tableName)
@@ -1031,8 +1169,13 @@ func (p *Producer) handleDynamicTables(sourceID string, newTables []string) {
 			// Transition to Draining
 			p.setTableState(sourceID, tbl, protocol.TableStateDraining)
 
-			// Flush buffer
-			p.flushBuffer(context.Background(), tbl)
+			// Flush buffer. Uses the pipeline-lifetime ctx threaded in from
+			// SetDynamicTablesChan (not context.Background()): a Background
+			// ctx here meant a sustained JetStream/NATS outage during drain
+			// could never be cancelled by pipeline shutdown, wedging this
+			// goroutine (and, before the transitionTableToCDC fix above, the
+			// producer's write lock) forever.
+			p.flushBuffer(ctx, tbl)
 
 			select {
 			case p.snapshotDoneChan <- tbl:

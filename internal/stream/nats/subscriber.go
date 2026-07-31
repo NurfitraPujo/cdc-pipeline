@@ -2,6 +2,7 @@ package nats
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
@@ -43,6 +44,19 @@ func subscriberReconnectOpts() []go_nats.Option {
 
 type NatsSubscriber struct {
 	subscriber *nats.Subscriber
+
+	// js is derived from the SAME *go_nats.Conn the watermill subscriber
+	// uses (see NewNatsSubscriber), not a second connection. watermill's
+	// *nats.Subscriber doesn't expose its internal JetStreamContext, so we
+	// build the raw conn ourselves via nats.NewSubscriberWithNatsConn and
+	// keep our own JetStreamContext handle from it for ConsumerInfo/
+	// DeleteConsumer calls. This avoids doubling the fleet's NATS connection
+	// count (every subscriber is created per-sink, per-pipeline, per-worker
+	// replica; a second connection each would have meaningfully increased
+	// broker-side connection load for no operational benefit).
+	js          go_nats.JetStreamContext
+	streamName  string
+	durableName string
 }
 
 func NewNatsSubscriber(url string, queueGroupPrefix string, streamName string, maxAckPending int, ackWait time.Duration) (*NatsSubscriber, error) {
@@ -58,27 +72,46 @@ func NewNatsSubscriber(url string, queueGroupPrefix string, streamName string, m
 		subscribeOptions = append(subscribeOptions, go_nats.BindStream(streamName))
 	}
 
-	sub, err := nats.NewSubscriber(
-		nats.SubscriberConfig{
-			URL:              url,
-			QueueGroupPrefix: queueGroupPrefix,
-			JetStream: nats.JetStreamConfig{
-				Disabled:         false,
-				AutoProvision:    true,
-				DurablePrefix:    queueGroupPrefix,
-				TrackMsgId:       true,
-				SubscribeOptions: subscribeOptions,
-			},
-			NatsOptions: append([]go_nats.Option{
-				go_nats.Name("cdc-data-pipeline-subscriber-" + queueGroupPrefix),
-			}, subscriberReconnectOpts()...),
-		},
-		logger.NewWatermillLogger(),
-	)
+	natsOpts := append([]go_nats.Option{
+		go_nats.Name("cdc-data-pipeline-subscriber-" + queueGroupPrefix),
+	}, subscriberReconnectOpts()...)
+
+	conn, err := go_nats.Connect(url, natsOpts...)
 	if err != nil {
+		return nil, fmt.Errorf("connecting to NATS: %w", err)
+	}
+
+	js, err := conn.JetStream()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("obtaining JetStream context: %w", err)
+	}
+
+	cfg := nats.SubscriberConfig{
+		URL:              url,
+		QueueGroupPrefix: queueGroupPrefix,
+		JetStream: nats.JetStreamConfig{
+			Disabled:         false,
+			AutoProvision:    true,
+			DurablePrefix:    queueGroupPrefix,
+			TrackMsgId:       true,
+			SubscribeOptions: subscribeOptions,
+		},
+		NatsOptions: natsOpts,
+	}
+
+	sub, err := nats.NewSubscriberWithNatsConn(conn, cfg.GetSubscriberSubscriptionConfig(), logger.NewWatermillLogger())
+	if err != nil {
+		conn.Close()
 		return nil, err
 	}
-	return &NatsSubscriber{subscriber: sub}, nil
+
+	return &NatsSubscriber{
+		subscriber:  sub,
+		js:          js,
+		streamName:  streamName,
+		durableName: queueGroupPrefix,
+	}, nil
 }
 
 func (s *NatsSubscriber) Subscribe(ctx context.Context, topic string) (<-chan *message.Message, error) {
@@ -86,5 +119,45 @@ func (s *NatsSubscriber) Subscribe(ctx context.Context, topic string) (<-chan *m
 }
 
 func (s *NatsSubscriber) Close() error {
+	// s.subscriber.Close() closes the single underlying *go_nats.Conn we
+	// handed it in NewNatsSubscriber; there is no separate connection of
+	// ours left to close.
 	return s.subscriber.Close()
+}
+
+// PendingCount reports whether this durable JetStream consumer's backlog is
+// truly empty. A naive NumPending==0 check is NOT sufficient: NumPending
+// only counts messages not yet delivered to this consumer, and excludes
+// NumAckPending — everything already delivered and awaiting ack, which
+// includes both prefetched-but-unprocessed messages (bounded by
+// MaxAckPending) and anything previously Nacked and awaiting redelivery.
+// Treating NumPending==0 alone as "empty" can declare a drain complete while
+// up to MaxAckPending messages are still in flight or awaiting redelivery —
+// exactly the silent-stranding failure mode this replaces a client-side idle
+// timer to avoid (plan 01a WI-9). Callers must therefore require BOTH
+// counts to be zero; PendingCount enforces that itself and returns the sum
+// so a caller checking `== 0` gets the correct answer either way. The call
+// is bound by ctx so a NATS outage surfaces as an error rather than
+// blocking forever.
+func (s *NatsSubscriber) PendingCount(ctx context.Context) (uint64, error) {
+	if s.js == nil {
+		return 0, fmt.Errorf("PendingCount unavailable: no JetStream context for durable %s", s.durableName)
+	}
+	info, err := s.js.ConsumerInfo(s.streamName, s.durableName, go_nats.Context(ctx))
+	if err != nil {
+		return 0, fmt.Errorf("fetching consumer info for stream %s durable %s: %w", s.streamName, s.durableName, err)
+	}
+	return info.NumPending + uint64(info.NumAckPending), nil
+}
+
+// DeleteConsumer removes this subscriber's durable JetStream consumer. Used
+// by short-lived, uniquely-named subscribers (e.g. the schema-evolution
+// buffer drainer, plan 01a WI-9) to avoid leaking a durable consumer
+// definition per drain cycle now that the durable name is stable rather than
+// UUID-suffixed.
+func (s *NatsSubscriber) DeleteConsumer(ctx context.Context) error {
+	if s.js == nil {
+		return fmt.Errorf("DeleteConsumer unavailable: no JetStream context for durable %s", s.durableName)
+	}
+	return s.js.DeleteConsumer(s.streamName, s.durableName, go_nats.Context(ctx))
 }

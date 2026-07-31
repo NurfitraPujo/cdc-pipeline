@@ -219,7 +219,15 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 	var batch []protocol.Message
 	var wmMsgs []*message.Message
-	var schemaWMMsgs []*message.Message // T0-2: separate slice for schema-change wrappers
+	// pendingSchema tracks, per wmMsg wrapper that contains at least one
+	// OpSchemaChange message, how many of those schema changes are still
+	// unapplied. A wrapper only reaches this map when it also carries at
+	// least one non-schema message (see the mixed-payload handling below);
+	// pure schema-only wrappers are still acked directly in place, exactly
+	// as before, since there is no data flush to wait for.
+	pendingSchema := make(map[*message.Message]int)
+	ackFilter := func(m *message.Message) bool { return pendingSchema[m] == 0 }
+
 	timer := time.NewTimer(c.batchWait)
 	if !timer.Stop() {
 		select {
@@ -232,25 +240,54 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 		select {
 		case <-ctx.Done():
 			if len(batch) > 0 {
-				c.flush(ctx, batch, wmMsgs)
-			}
-			// T0-2: Nack any unprocessed schema-change messages on shutdown
-			for _, sm := range schemaWMMsgs {
-				sm.Nack()
+				c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+				clearPendingSchema(pendingSchema, wmMsgs)
 			}
 			return ctx.Err()
 
 		case <-timer.C:
 			if len(batch) > 0 {
-				c.flush(ctx, batch, wmMsgs)
+				maxLSN := maxLSNIn(batch)
+				flushed := c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+				clearPendingSchema(pendingSchema, wmMsgs)
 				batch = nil
 				wmMsgs = nil
+				c.mu.RLock()
+				draining := c.isDraining
+				c.mu.RUnlock()
+				if flushed && draining && c.checkDrained(maxLSN) {
+					log.Info().Str("pipeline_id", c.pipelineID).Msg("Drain target reached via checkpoint LSN, finishing consumer")
+					return nil
+				}
+			} else {
+				// Periodic backstop (plan §3.WI-9): draining must not depend
+				// solely on a single, possibly-lost or oddly-redelivered
+				// drain_marker message. On an idle tick while draining, ask
+				// JetStream directly whether the consumer's backlog is empty.
+				c.mu.RLock()
+				draining := c.isDraining
+				c.mu.RUnlock()
+				if draining {
+					if pc, ok := c.subscriber.(stream.PendingCounter); ok {
+						pendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+						pending, err := pc.PendingCount(pendCtx)
+						cancel()
+						if err != nil {
+							log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Msg("Drain backstop: failed to query pending count")
+						} else if pending == 0 {
+							log.Info().Str("pipeline_id", c.pipelineID).Msg("Drain backstop: JetStream reports zero pending, finishing consumer")
+							return nil
+						}
+					}
+				}
 			}
+			timer.Reset(c.batchWait)
 
 		case wmMsg, ok := <-msgChan:
 			if !ok {
 				if len(batch) > 0 {
-					c.flush(ctx, batch, wmMsgs)
+					c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+					clearPendingSchema(pendingSchema, wmMsgs)
 				}
 				return nil
 			}
@@ -268,26 +305,38 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 			log.Debug().Str("pipeline_id", c.pipelineID).Any("data", wmMsg).Msg("Received message from NATS")
 
-			// T0-2: Pre-scan batch for schema changes BEFORE appending wmMsg to wmMsgs
+			// T0-2/WI-9: Pre-scan batch for schema changes BEFORE appending wmMsg to wmMsgs
 			hasSchemaChange := false
+			schemaCount := 0
 			for i := range batchFromNats {
 				if batchFromNats[i].Op == protocol.OpSchemaChange {
 					hasSchemaChange = true
-					break
+					schemaCount++
 				}
 			}
+			hasNonSchema := schemaCount < len(batchFromNats)
 
-			// T0-2: If schema change detected and we have pending batch, flush prior batch
+			// If schema change detected and we have pending batch, flush prior batch
 			// WITHOUT including the current wmMsg (which wraps the schema change)
 			if hasSchemaChange && len(batch) > 0 {
-				c.flush(ctx, batch, wmMsgs)
+				c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+				clearPendingSchema(pendingSchema, wmMsgs)
 				batch = nil
 				wmMsgs = nil
 			}
 
-			// Only append wmMsg to wmMsgs if no schema change (schema wmMsgs go to schemaWMMsgs)
-			if !hasSchemaChange {
+			// WI-9: a wrapper that carries at least one non-schema (data)
+			// message must flow through the normal flush/ack path so its
+			// wrapper is acked only after that data is durably written, not
+			// eagerly right after ApplySchema succeeds (that was the
+			// ack-before-durable-write bug for mixed schema+data wrappers).
+			// A wrapper that is schema-only carries no data to wait for, so
+			// it keeps the old direct in-place ack below.
+			if hasNonSchema {
 				wmMsgs = append(wmMsgs, wmMsg)
+				if hasSchemaChange {
+					pendingSchema[wmMsg] = schemaCount
+				}
 			}
 
 			for i := range batchFromNats {
@@ -299,7 +348,8 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 
 					if isDraining {
 						if len(batch) > 0 {
-							c.flush(ctx, batch, wmMsgs)
+							c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+							clearPendingSchema(pendingSchema, wmMsgs)
 							batch = nil
 							wmMsgs = nil
 						}
@@ -315,9 +365,6 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				}
 
 				if m.Op == protocol.OpSchemaChange {
-					// T0-2: Carry schema-change wmMsg in separate slice; only ack AFTER ApplySchema succeeds
-					schemaWMMsgs = append(schemaWMMsgs, wmMsg)
-
 					if m.Schema == nil && m.Diff != nil {
 						log.Info().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Interface("added_cols", m.Diff.Added).Msg("Constructing schema from diff")
 						m.Schema = &protocol.SchemaMetadata{
@@ -326,37 +373,49 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 						}
 					}
 
-					var applyErr error
+					applyFailed := false
 					if m.Schema != nil {
 						transformedMsgs, err := c.processMessages(ctx, []protocol.Message{*m})
 						if err != nil {
 							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error transforming schema change")
 							c.updateTableError(m.SourceID, m.Table)
-							// T0-2: Nack and continue - do NOT abort consumer loop on DDL failure
-							wmMsg.Nack()
-							schemaWMMsgs = schemaWMMsgs[:len(schemaWMMsgs)-1] // remove from slice
-							continue
-						}
-						if len(transformedMsgs) > 0 {
+							applyFailed = true
+						} else if len(transformedMsgs) > 0 {
 							transformed := transformedMsgs[0]
 							if err := c.sink.ApplySchema(ctx, transformed); err != nil {
 								log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
 								c.updateTableError(m.SourceID, m.Table)
-								// T0-2: Nack and continue - do NOT abort consumer loop on DDL failure
-								wmMsg.Nack()
-								schemaWMMsgs = schemaWMMsgs[:len(schemaWMMsgs)-1] // remove from slice
-								continue
+								applyFailed = true
 							}
 						} else {
 							log.Warn().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Schema change filtered out by transformer")
 						}
 					}
 
-					// T0-2: Only ack AFTER ApplySchema succeeds (tracked via applyErr)
-					applyErr = nil // no error means success
-					if applyErr == nil {
+					if applyFailed {
+						// T0-2: Nack and continue - do NOT abort consumer loop on DDL failure.
+						// A mixed wrapper: it is also in wmMsgs (and possibly already
+						// holds data for a table other than this schema change earlier
+						// in this same payload); remove it there too so flush never
+						// double-disposes of it.
+						wmMsg.Nack()
+						delete(pendingSchema, wmMsg)
+						if hasNonSchema {
+							wmMsgs = removeWMMsg(wmMsgs, wmMsg)
+						}
+						continue
+					}
+
+					if hasNonSchema {
+						// Mixed wrapper: do not ack here. Decrement the
+						// outstanding-schema count; the wrapper is acked by
+						// flushWithFilter's ackFilter once this reaches zero
+						// AND the wrapper's data has been durably flushed.
+						pendingSchema[wmMsg]--
+					} else {
+						// Schema-only wrapper: no data to wait for, ack now
+						// (unchanged from prior behavior).
 						wmMsg.Ack()
-						schemaWMMsgs = schemaWMMsgs[:len(schemaWMMsgs)-1] // remove from slice after ack
 					}
 
 					// Emit Ack only if CorrelationID is present (indicates proactive evolution)
@@ -390,12 +449,58 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 					default:
 					}
 				}
-				c.flush(ctx, batch, wmMsgs)
+				maxLSN := maxLSNIn(batch)
+				flushed := c.flushWithFilter(ctx, batch, wmMsgs, ackFilter)
+				clearPendingSchema(pendingSchema, wmMsgs)
 				batch = nil
 				wmMsgs = nil
+				c.mu.RLock()
+				draining := c.isDraining
+				c.mu.RUnlock()
+				if flushed && draining && c.checkDrained(maxLSN) {
+					log.Info().Str("pipeline_id", c.pipelineID).Msg("Drain target reached via checkpoint LSN, finishing consumer")
+					return nil
+				}
 			}
 		}
 	}
+}
+
+// maxLSNIn returns the largest LSN among batch's messages, or 0 if batch has
+// no LSN-bearing messages (e.g. all snapshot/zero-LSN rows).
+func maxLSNIn(batch []protocol.Message) uint64 {
+	var max uint64
+	for _, m := range batch {
+		if m.LSN > max {
+			max = m.LSN
+		}
+	}
+	return max
+}
+
+// clearPendingSchema removes wmMsgs' entries from pendingSchema once a flush
+// has resolved their fate (acked or Nacked either way). By the time
+// flushWithFilter is called, every entry present is already at count 0 (that
+// is the ackFilter gate), so this is pure cleanup — it never affects which
+// wmMsgs got acked — and prevents pendingSchema from retaining one stale
+// *message.Message key per mixed schema+data wrapper for the lifetime of the
+// consumer.
+func clearPendingSchema(pendingSchema map[*message.Message]int, wmMsgs []*message.Message) {
+	for _, m := range wmMsgs {
+		delete(pendingSchema, m)
+	}
+}
+
+// removeWMMsg returns wmMsgs with target removed (by pointer identity),
+// preserving order of the rest.
+func removeWMMsg(wmMsgs []*message.Message, target *message.Message) []*message.Message {
+	out := wmMsgs[:0]
+	for _, m := range wmMsgs {
+		if m != target {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 
@@ -421,81 +526,15 @@ func (c *Consumer) updateTableError(sourceID, table string) {
 	}
 }
 
-func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message) {
-	if len(batch) == 0 {
-		return
-	}
-	toUpload, err := c.processMessages(ctx, batch)
-	if err != nil {
-		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Transformation failed, handling as batch error")
-		c.handleSinkError(ctx, batch, wmMsgs, err)
-		return
-	}
-	if len(toUpload) == 0 {
-		// Every message in batch was terminally decided by transformer
-		// filtering (processMessages can drop rows, e.g. via a transformer's
-		// keep=false at :184-186) — nothing will ever be written for those
-		// LSNs by anyone. That IS the durability decision, so it must be
-		// confirmed the same as a successful sink write, or the source's
-		// AckManager waits for a RecordAck that will never come and the
-		// watermark — and the replication slot behind it — freezes forever.
-		if !c.publishRecordAck(ctx, batch) {
-			for _, m := range wmMsgs {
-				m.Nack()
-			}
-			return
-		}
-		for _, m := range wmMsgs {
-			m.Ack()
-			c.retryMu.Lock()
-			delete(c.retries, m.UUID)
-			c.retryMu.Unlock()
-		}
-		return
-	}
-
-	if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
-		c.handleSinkError(ctx, batch, wmMsgs, err)
-		return
-	}
-	log.Debug().Int("count", len(toUpload)).Str("pipeline_id", c.pipelineID).Msg("Consumer: Batch upload successful")
-
-	// Ordering (crash-window fix, plan §3.WI-5): publish the RecordAck BEFORE
-	// acking the wmMsgs, not after. A crash between BatchUpload and this point
-	// has no JetStream redelivery to regenerate the ack once wmMsgs are acked,
-	// which would silently stall the watermark. Publishing first means a crash
-	// before the wmMsg ack simply causes JetStream to redeliver the batch; the
-	// re-emitted RecordAck is harmless because AckManager.Confirm(lsn <=
-	// watermark) is a no-op.
-	//
-	// The LSN set comes from `batch` (the full terminally-handled input), not
-	// `toUpload` (the post-transformer-filter subset): any row a transformer
-	// dropped from toUpload was still terminally decided — it will never be
-	// written — so its LSN must still be confirmed, or that LSN is stuck in
-	// the source's AckManager.pending forever even though the wmMsg carrying
-	// it gets acked below.
-	if !c.publishRecordAck(ctx, batch) {
-		// Publish failed after bounded retries: never proceed silently (a lost
-		// ack would permanently stall the watermark). Nack so the whole flush
-		// re-runs on redelivery.
-		for _, m := range wmMsgs {
-			m.Nack()
-		}
-		return
-	}
-
-	for _, m := range wmMsgs {
-		m.Ack()
-		c.retryMu.Lock()
-		delete(c.retries, m.UUID)
-		c.retryMu.Unlock()
-	}
-
-	c.updateStats(toUpload)
-	if time.Since(c.lastCleanupTime) > retryCleanupInterval {
-		c.cleanupOldRetries()
-		c.lastCleanupTime = time.Now()
-	}
+// flush is a thin wrapper over flushWithFilter for callers with no wrapper
+// wmMsgs to exclude (nil acksFilter acks/nacks every wmMsg unconditionally).
+// Kept as a separate name because it reads better at call sites that have no
+// schema-wrapper filtering concern (e.g. existing tests), and because it's a
+// zero-cost indirection to a single implementation. flushWithFilter is where
+// all the actual logic — and the WI-5 publish-before-ack, batch-not-toUpload
+// LSN-set behavior — lives.
+func (c *Consumer) flush(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message) bool {
+	return c.flushWithFilter(ctx, batch, wmMsgs, nil)
 }
 
 // publishRecordAck publishes a single protocol.RecordAck envelope on
@@ -579,17 +618,25 @@ func (c *Consumer) publishRecordAck(ctx context.Context, msgs []protocol.Message
 	return false
 }
 
-// T0-2: flushWithFilter flushes batch while using acksFilter to decide which wmMsgs to ack.
-// This allows the caller to exclude schema-change wrappers from being acked prematurely.
-func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message, acksFilter func(*message.Message) bool) {
+// flushWithFilter flushes batch while using acksFilter to decide which
+// wmMsgs to ack/nack (nil acksFilter acks/nacks all of them). This lets a
+// caller exclude a schema-change wrapper from being acked prematurely: for a
+// wmMsg wrapping both a schema change and data rows, the wrapper must not be
+// acked here until ApplySchema succeeded AND (via this call) its data was
+// durably flushed. Returns true iff the batch's fate was successfully
+// confirmed (either durably written, or terminally filtered and RecordAck'd)
+// and the eligible wmMsgs were acked; false if the batch was Nacked for
+// redelivery (sink/transform error, isolation, or RecordAck publish
+// failure), meaning it was not durably resolved on this attempt.
+func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message, acksFilter func(*message.Message) bool) bool {
 	if len(batch) == 0 {
-		return
+		return true
 	}
 	toUpload, err := c.processMessages(ctx, batch)
 	if err != nil {
 		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Transformation failed, handling as batch error")
 		c.handleSinkError(ctx, batch, wmMsgs, err)
-		return
+		return false
 	}
 	if len(toUpload) == 0 {
 		// Same terminal-decision reasoning as flush's len(toUpload)==0 branch:
@@ -601,7 +648,7 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 					m.Nack()
 				}
 			}
-			return
+			return false
 		}
 		for _, m := range wmMsgs {
 			if acksFilter == nil || acksFilter(m) {
@@ -611,12 +658,12 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 			delete(c.retries, m.UUID)
 			c.retryMu.Unlock()
 		}
-		return
+		return true
 	}
 
 	if err := c.sink.BatchUpload(ctx, toUpload); err != nil {
 		c.handleSinkError(ctx, batch, wmMsgs, err)
-		return
+		return false
 	}
 	log.Debug().Int("count", len(toUpload)).Str("pipeline_id", c.pipelineID).Msg("Consumer: Batch upload successful")
 
@@ -630,7 +677,7 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 				m.Nack()
 			}
 		}
-		return
+		return false
 	}
 
 	for _, m := range wmMsgs {
@@ -647,6 +694,7 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 		c.cleanupOldRetries()
 		c.lastCleanupTime = time.Now()
 	}
+	return true
 }
 
 func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message, err error) {
