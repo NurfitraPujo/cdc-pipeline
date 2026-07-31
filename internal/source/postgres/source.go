@@ -599,8 +599,41 @@ func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message,
 }
 
 func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceConfig, checkpoint protocol.Checkpoint, ackers []string) (<-chan []protocol.Message, chan<- source.SourceAck, error) {
+	// HIGH-2: serialise re-entry. If a previous session is still live (its
+	// goroutines have not yet observed cancellation and exited), signal it
+	// and wait for it to fully wind down BEFORE this call mutates any
+	// shared field (s.dsn, s.db, s.connector, s.msgChan, s.ackChan, ...).
+	// Without this, a caller that invokes Start again while the previous
+	// session's coordinator/probe/cleanup goroutines are still running
+	// (e.g. Producer.recoverProducer after errPublishRetriesExhausted)
+	// races those goroutines' unlocked reads of s.db against this
+	// function's writes, leaks the previous *sql.DB/connector, and lets
+	// the previous session's closures keep writing to fields this call
+	// reassigns out from under them.
+	s.mu.Lock()
+	prevCancel := s.cancel
+	prevDB := s.db
+	prevConnector := s.connector
+	s.mu.Unlock()
+
+	if prevCancel != nil {
+		prevCancel()
+		s.runWg.Wait()
+	}
+	if prevConnector != nil {
+		prevConnector.Close()
+	}
+	if prevDB != nil {
+		prevDB.Close()
+	}
+
 	sourceCtx, sourceCancel := context.WithCancel(ctx)
 	s.mu.Lock()
+	// A fresh session begins: closeOnce must be reset so that a later
+	// Stop() call actually closes THIS session's resources rather than
+	// silently no-op'ing because an earlier session's Stop() already fired
+	// it once for the lifetime of this PostgresSource.
+	s.closeOnce = sync.Once{}
 	s.config = srcConfig
 	s.cancel = sourceCancel
 	s.ctx = sourceCtx
@@ -632,10 +665,12 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	q.Set("sslmode", "disable")
 	u.RawQuery = q.Encode()
 	dsn := u.String()
-	s.dsn = dsn
 
-	var err error
-	s.db, err = sql.Open("pgx", dsn)
+	db, err := sql.Open("pgx", dsn)
+	s.mu.Lock()
+	s.dsn = dsn
+	s.db = db
+	s.mu.Unlock()
 	if err != nil {
 		sourceCancel()
 		return nil, nil, fmt.Errorf("failed to open DB: %w", err)
@@ -781,7 +816,7 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	s.runWg.Add(1)
 	go func() {
 		defer s.runWg.Done()
-		s.runAckCoordinator(sourceCtx, srcConfig.SlotName)
+		s.runAckCoordinator(sourceCtx, srcConfig.SlotName, strictAck)
 	}()
 
 	// WI-5a: periodic slot-lag probe. This is pure observability -- it
@@ -882,7 +917,27 @@ const updateXLogPosTimeout = 5 * time.Second
 //     push it to PostgreSQL via connector.UpdateXLogPos. A failed or
 //     timed-out call is retried on the next tick; the watermark itself is
 //     never rolled back, so nothing is lost by retrying.
-func (s *PostgresSource) runAckCoordinator(ctx context.Context, slotName string) {
+//
+// strictAck is the §6 flag snapshotted once by the caller (Start) from
+// resolveStrictAck, and MUST be threaded through rather than re-read here:
+// a mid-life env change must never desync the coordinator from the
+// cfg.ManualCommit value the connector was actually built with.
+//
+// When strictAck is false (the production default, see resolveStrictAck),
+// ManualCommit is false and the vendored stream's lc.Ack closure is live —
+// it already performs an un-semaphored SendStandbyStatusUpdate on every
+// event (pq/replication/stream.go). If this coordinator's UpdateXLogPos
+// call ran concurrently with that, two unsynchronized standby-status writes
+// could interleave on the wire and corrupt the replication protocol stream
+// (standbySem only serializes UpdateXLogPos against itself, not against the
+// legacy lc.Ack send). So under strictAck==false this coordinator MUST NOT
+// call UpdateXLogPos at all — the slot is advanced exclusively by lc.Ack in
+// that mode. Everything else (watermark computation, PendingCount/
+// ack_watermark gauges, persistWatermark, and draining s.ackChan) keeps
+// running regardless of strictAck, so operators can compare the coordinator's
+// watermark against confirmed_flush_lsn during the bake period before
+// flipping the flag to true.
+func (s *PostgresSource) runAckCoordinator(ctx context.Context, slotName string, strictAck bool) {
 	const keepaliveInterval = 500 * time.Millisecond
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
@@ -934,6 +989,18 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context, slotName string)
 			}
 
 			if wm == 0 || wm == lastFlushedWatermark {
+				continue
+			}
+
+			if !strictAck {
+				// strict_ack OFF: the slot is advanced exclusively by the
+				// vendored lc.Ack per-event send (ManualCommit is false).
+				// Calling UpdateXLogPos here too would race that unsynchronized
+				// SendStandbyStatusUpdate on the wire (see doc above). Track
+				// lastFlushedWatermark as if we had flushed so the bake-period
+				// watermark/gauges above still reflect real progress without
+				// ever touching the wire ourselves.
+				lastFlushedWatermark = wm
 				continue
 			}
 

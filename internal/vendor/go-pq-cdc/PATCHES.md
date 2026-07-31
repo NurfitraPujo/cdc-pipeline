@@ -109,6 +109,14 @@ byte-for-byte upstream except for the two always-on guards above (the `ReplyRequ
 guard and the monotonic-report guard), both of which are pure bug fixes with no legacy-mode
 behavior change in any reachable, correctly-functioning scenario.
 
+> ⚠ **This claim is superseded for the flag-off path by T0-2's "Runtime" section below.** T0-2
+> rewrote `UpdateXLogPos` into a goroutine+semaphore form that **all three legacy
+> (`ManualCommit == false`) call sites** traverse -- the keepalive fast-forward, the undecodable-
+> message path, and the `Ack` closure -- so "byte-for-byte upstream except the two guards above"
+> was only ever true as of T0-1 landing, in isolation. Read T0-2's "Runtime" section (its four
+> numbered legacy-mode deltas) before concluding the flag-off path is inert; do not skip
+> re-testing it after a re-sync on the strength of this paragraph alone.
+
 ---
 
 ## T0-2: Context and Error on UpdateXLogPos; Bounded Standby Write via Goroutine + Semaphore
@@ -287,6 +295,11 @@ guarantee ever regresses again.
   patch exists to close is the opposite (advancing too eagerly) -- so erring toward "advance
   later" here is intentional, not an oversight. Logged at `Warn`.
 
+  Note also that `buf.flush()` itself is not guaranteed non-blocking: if `messageCH` is full,
+  `buf.flush()`'s own send onto it can block the sink goroutine. The "never block the sink"
+  property this patch relies on for the marker (the drop-on-full `select`/`default` above) is
+  therefore not absolute -- it holds for the marker itself, not for the flush that precedes it.
+
 **Backward Compatibility**: `ManualCommit` defaults to `false`; with it unset, `handleKeepalive`'s
 legacy branch (`UpdateXLogPos`, unchanged) is untouched, `keepaliveMarker` values are never
 constructed, and `process()`'s new type-switch branch is simply never taken. This patch is
@@ -296,6 +309,31 @@ until every previously decoded message has drained through `process`/`listenerFu
 embedder using `KeepaliveFunc` to drive idle-advance logic (as this repo's `AckManager.IdleAdvance`
 does), that delay is the entire point: it is what makes "nothing pending" a sound statement about
 stream order.
+
+---
+
+## Re-sync Risk Callouts
+
+Two changes across T0-1..T0-3 are silent-break risks: a future re-sync can drop or reorder
+either one, the vendored module will still compile, the flag-off (`ManualCommit == false`) tests
+will still pass, and nothing will fail loudly. General "re-apply the patches" advice is not
+enough for these two; verify the exact expressions survive, not just that the surrounding
+function still exists.
+
+1. **T0-3's `buf.flush()`-before-marker-enqueue ordering**, in `handleKeepalive`. This single
+   line-ordering fact is the entire correctness argument for T0-3: it is what guarantees every
+   message decoded before a given keepalive is already enqueued ahead of that keepalive's
+   `keepaliveMarker` on `messageCH`. Drop the `buf.flush()` call, or reorder it to *after* the
+   marker is enqueued, and the confirmed-then-never-`Observe`d data-loss class T0-3 exists to
+   close (see `AckManager.IdleAdvance` fast-forwarding past an undelivered replay backlog)
+   silently returns -- with `pending_lsns` reading a healthy 0 the entire time. This is exactly
+   the failure mode `cdc_source_idle_advance_refused_total` (OPS-2, see
+   `internal/source/postgres/ack.go`) exists to catch if it ever does regress, but the ordering
+   itself must still be verified on every re-sync, not left to the canary.
+2. **The always-on `&& s.LoadXLogPos() > 0` guard** on `handleKeepalive`'s `ReplyRequested`
+   branch (T0-1). It is easy to mistake for flag-guarded (it lives inside the same function as
+   several `ManualCommit`-gated branches) and drop or move it during a re-sync merge. It is not
+   gated: losing it reintroduces replying to the primary with LSN 0 in both modes.
 
 ---
 

@@ -109,6 +109,26 @@ type AckManager struct {
 	// i.e. data that should have been protected by the watermark was not. See
 	// Observe.
 	belowWatermarkDrops uint64
+
+	// idleAdvanceRefused counts every time IdleAdvance has refused an
+	// over-advance attempt (the T0-3 canary -- see idleTrusted's doc
+	// comment). AckManager has no access to the {pipeline,source,slot}
+	// label tuple used by the package's other Prometheus metrics (those
+	// live in source.go, alongside the PostgresSource that knows its own
+	// identity), so this is exposed two ways for whoever wires the real
+	// cdc_source_idle_advance_refused_total counter:
+	//
+	//   - IdleAdvanceRefusedCount(), a plain accessor, for tests and
+	//     anything that just wants the number.
+	//   - onIdleAdvanceRefused, an optional hook set via
+	//     SetIdleAdvanceRefusedHook, invoked once per refusal (while a.mu
+	//     IS held, so it must be cheap and non-reentrant -- see
+	//     SetIdleAdvanceRefusedHook) so a caller that DOES have the labels
+	//     can increment a real prometheus.CounterVec.
+	idleAdvanceRefused uint64
+	// onIdleAdvanceRefused, if non-nil, is called once per IdleAdvance
+	// refusal. See idleAdvanceRefused.
+	onIdleAdvanceRefused func()
 }
 
 // NewAckManager returns an AckManager ready to track observed LSNs, gated
@@ -306,6 +326,31 @@ func (a *AckManager) PendingCount() int {
 	return len(a.lsns)
 }
 
+// IdleAdvanceRefusedCount returns the number of times IdleAdvance has
+// refused an over-advance attempt -- the T0-3 regression canary. See
+// idleAdvanceRefused's doc comment.
+func (a *AckManager) IdleAdvanceRefusedCount() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.idleAdvanceRefused
+}
+
+// SetIdleAdvanceRefusedHook registers fn to be called once per IdleAdvance
+// refusal. It exists so a caller that has access to this source's
+// {pipeline,source,slot} Prometheus label values -- which AckManager itself
+// does not -- can wire cdc_source_idle_advance_refused_total. Passing nil
+// clears the hook. Intended to be called before the AckManager is shared
+// with other goroutines, matching WithKV/WithMetricPort's usage contract.
+//
+// fn is invoked from inside IdleAdvance while a.mu IS held (see
+// idleAdvanceRefused), so it must be cheap, non-blocking, and must never
+// call back into this AckManager.
+func (a *AckManager) SetIdleAdvanceRefusedHook(fn func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onIdleAdvanceRefused = fn
+}
+
 // IdleAdvance fast-forwards the watermark to serverWALEnd IFF nothing is
 // pending. This is the ONLY sanctioned fast-forward; it reinstates
 // keepalive-driven slot advancement for idle streams (WAL-bloat
@@ -345,6 +390,13 @@ func (a *AckManager) IdleAdvance(serverWALEnd uint64) bool {
 			Uint64("watermark", a.watermark).
 			Msg("AckManager.IdleAdvance: refusing to fast-forward past the highest Observe()'d LSN " +
 				"(first attempt after backlog drained) - retrying on the next keepalive")
+		// Counted and (optionally) surfaced to Prometheus as
+		// cdc_source_idle_advance_refused_total: this log line alone is the
+		// exact "buried in the log stream" failure mode OPS-2 exists to fix.
+		// See idleAdvanceRefused's doc comment for why the hook, not a
+		// labelled metric, lives here.
+		a.idleAdvanceRefused++
+		hook := a.onIdleAdvanceRefused
 		// Latch trust now, even though THIS call is refused: the point of the
 		// guard is to prove, once, that a keepalive-driven jump beyond
 		// highestSeen was actually observed happening (the canary a future
@@ -353,6 +405,13 @@ func (a *AckManager) IdleAdvance(serverWALEnd uint64) bool {
 		// WAL-bloat protection on a legitimately idle pipeline whose ongoing
 		// WAL activity (e.g. an untracked table) never produces an Observe.
 		a.idleTrusted = true
+		if hook != nil {
+			// Invoked while still holding a.mu -- deliberately: the hook is
+			// expected to be a cheap prometheus.Counter.Inc() (or similar),
+			// never one that reacquires a.mu or does I/O. Documented on
+			// SetIdleAdvanceRefusedHook.
+			hook()
+		}
 		return false
 	}
 	a.watermark = serverWALEnd

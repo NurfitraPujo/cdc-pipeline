@@ -175,6 +175,20 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 	if err != nil {
 		return 0, fmt.Errorf("failed to start source: %w", err)
 	}
+	// HIGH-2: Run's defer cancel() above only SIGNALS the source's
+	// goroutines (coordinator, slot-lag probe, msgChan-cleanup) to wind
+	// down; nothing previously awaited them. recoverProducer calls Run
+	// again on errPublishRetriesExhausted (and other error returns), so
+	// without an explicit Stop() here the next Run's source.Start() could
+	// begin while the prior session's goroutines are still live, racing
+	// s.db/s.dsn and leaking the prior *sql.DB/connector. Stop() cancels
+	// (idempotent with the deferred cancel above), awaits runWg, and
+	// closes the source's resources exactly once per session.
+	defer func() {
+		if stopErr := p.source.Stop(); stopErr != nil {
+			log.Warn().Err(stopErr).Msg("failed to stop source cleanly after Run")
+		}
+	}()
 
 	// Subscribe to acks topic
 	ackTopic := protocol.AcksTopic(p.pipelineID)

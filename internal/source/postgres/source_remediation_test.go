@@ -961,3 +961,79 @@ func TestHandler_StrictAckOff_RestoresLegacyPerEventAck(t *testing.T) {
 	require.Eventually(t, func() bool { return s.ackMgr.Watermark() == 100 }, time.Second, 5*time.Millisecond,
 		"AckManager/coordinator bookkeeping must keep running under strict_ack off so cdc_source_ack_watermark stays observable")
 }
+
+// TestRunAckCoordinator_SkipsWireWriteUnderStrictAckOff is HIGH-1: under
+// strict_ack off (the production ENV=production default per
+// resolveStrictAck), ManualCommit is false so the vendored lc.Ack closure
+// is the live, un-semaphored writer of the replication slot position
+// (pq/replication/stream.go SendStandbyStatusUpdate). standbySem only
+// serializes UpdateXLogPos calls against each other, not against that
+// legacy send, so runAckCoordinator issuing UpdateXLogPos concurrently
+// with lc.Ack risks interleaving two standby-status writes on the wire and
+// corrupting the replication protocol stream.
+//
+// The fix: runAckCoordinator must never call UpdateXLogPos when strictAck
+// is false, while everything else (watermark computation via
+// ObserveConfirmed/Confirm, PendingCount, persistWatermark) keeps running.
+// Under strictAck true, UpdateXLogPos must still fire exactly as before.
+func TestRunAckCoordinator_SkipsWireWriteUnderStrictAckOff(t *testing.T) {
+	t.Run("strict_ack off: never calls UpdateXLogPos", func(t *testing.T) {
+		conn := newStubConnector()
+		s := NewPostgresSource("high1-off-source")
+		s.connector = conn
+		s.ackChan = make(chan source.SourceAck, 4)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		s.runWg.Add(1)
+		go func() {
+			defer s.runWg.Done()
+			s.runAckCoordinator(ctx, "high1-off-slot", false)
+		}()
+
+		// Feed a fully-confirmed LSN so the watermark advances above zero.
+		s.ackMgr.ObserveConfirmed(100)
+		s.ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{100}}
+
+		require.Eventually(t, func() bool {
+			return s.ackMgr.Watermark() == 100
+		}, time.Second, 5*time.Millisecond, "watermark bookkeeping must keep running under strict_ack off")
+
+		// Give the 500ms ticker a couple of cycles to fire.
+		time.Sleep(1200 * time.Millisecond)
+
+		assert.Equal(t, int32(0), conn.updateCount.Load(),
+			"strict_ack off must never issue UpdateXLogPos: the legacy lc.Ack send is the sole slot-advance path")
+
+		cancel()
+		require.NoError(t, waitWithTimeout(&s.runWg, time.Second))
+	})
+
+	t.Run("strict_ack on: advances via UpdateXLogPos", func(t *testing.T) {
+		conn := newStubConnector()
+		s := NewPostgresSource("high1-on-source")
+		s.connector = conn
+		s.ackChan = make(chan source.SourceAck, 4)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		s.runWg.Add(1)
+		go func() {
+			defer s.runWg.Done()
+			s.runAckCoordinator(ctx, "high1-on-slot", true)
+		}()
+
+		s.ackMgr.ObserveConfirmed(200)
+		s.ackChan <- source.SourceAck{SinkID: "sink1", LSNs: []uint64{200}}
+
+		require.Eventually(t, func() bool {
+			return conn.updateCount.Load() >= 1
+		}, 2*time.Second, 20*time.Millisecond, "strict_ack on must advance the slot via UpdateXLogPos")
+		assert.Equal(t, uint64(200), conn.lastUpdateLSN.Load())
+
+		cancel()
+		require.NoError(t, waitWithTimeout(&s.runWg, time.Second))
+	})
+}

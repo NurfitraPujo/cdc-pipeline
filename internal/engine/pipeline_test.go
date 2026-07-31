@@ -111,6 +111,7 @@ func TestPipeline_DynamicTablesChan_GoroutineExitsOnShutdown(t *testing.T) {
 	srcMsgChan := make(chan []protocol.Message)
 	ackChan := make(chan source.SourceAck)
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 
 	producer := NewProducer(pipelineID, "nats://localhost:4222", cfg, mockSrc, nil, mockSub, mockKV, srcCfg)
 
@@ -191,6 +192,7 @@ func TestPipeline_Drain_FinishesWithoutCancel(t *testing.T) {
 	srcMsgChan := make(chan []protocol.Message)
 	ackChan := make(chan source.SourceAck)
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 
 	consumerMsgChan := make(chan *message.Message, 1)
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return((<-chan *message.Message)(consumerMsgChan), nil).AnyTimes()

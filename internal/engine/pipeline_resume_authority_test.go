@@ -152,6 +152,7 @@ func TestPipeline_RunProducer_StaleTableDoesNotFalseAlarm(t *testing.T) {
 	srcMsgChan := make(chan []protocol.Message)
 	ackChan := make(chan source.SourceAck)
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil).AnyTimes()
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 
 	mockSub := mocks.NewMockSubscriber(ctrl)
 	ackMsgChan := make(chan *message.Message)

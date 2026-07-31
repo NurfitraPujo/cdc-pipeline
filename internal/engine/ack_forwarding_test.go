@@ -47,6 +47,7 @@ func TestProducer_ForwardsRecordAck_Lossless_Blocking(t *testing.T) {
 	ackMsgChan := make(chan *message.Message)
 
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), []string{"sinkA"}).Return((<-chan []protocol.Message)(srcMsgChan), (chan<- source.SourceAck)(ackChan), nil)
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 	mockSub.EXPECT().Subscribe(gomock.Any(), protocol.AcksTopic("p1")).Return(ackMsgChan, nil)
 
 	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV, srcCfg)
@@ -154,6 +155,7 @@ func TestProducer_SkipsCheckpointForSnapshotAndZeroLSN(t *testing.T) {
 	ackMsgChan := make(chan *message.Message)
 
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return((<-chan []protocol.Message)(srcMsgChan), (chan<- source.SourceAck)(ackChan), nil)
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackMsgChan, nil)
 	mockPub.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
@@ -622,6 +624,7 @@ func TestProducer_LegacyAck_ConfirmsAllRequiredSinks(t *testing.T) {
 	ackMsgChan := make(chan *message.Message)
 
 	mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return((<-chan []protocol.Message)(srcMsgChan), (chan<- source.SourceAck)(ackChan), nil)
+	mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 	mockSub.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(ackMsgChan, nil)
 
 	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV, srcCfg)

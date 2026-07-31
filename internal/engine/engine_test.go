@@ -176,6 +176,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 
 	t.Run("Source Start Failure", func(t *testing.T) {
 		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil, errors.New("pg failed"))
+		mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 
 		_, err := p.Run(context.Background(), srcCfg, cp)
 		assert.Error(t, err)
@@ -189,6 +190,7 @@ func TestProducer_FailurePaths(t *testing.T) {
 		srcMsgChan := make(chan []protocol.Message, 1)
 		ackChan := make(chan source.SourceAck, 1)
 		mockSrc.EXPECT().Start(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(srcMsgChan, ackChan, nil)
+		mockSrc.EXPECT().Stop().Return(nil).AnyTimes() // HIGH-2: Run defers source.Stop()
 
 		srcMsgChan <- []protocol.Message{{SourceID: "s1", Table: "t1", Op: protocol.OpInsert}}
 

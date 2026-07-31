@@ -58,6 +58,13 @@ the diff/rsync/patch workflow below — but re-verify all six sites in the PATCH
 by hand after any upstream re-sync, since `stream.go` is exactly the file most likely to shift
 underneath a line-based patch.
 
+> ⚠ **The "byte-for-byte upstream" claim above is for T0-1 in isolation only.** T0-2 (next)
+> rewrites `UpdateXLogPos` into a goroutine+semaphore form that all three legacy
+> (`ManualCommit == false`) call sites go through, which is itself a set of documented,
+> non-byte-for-byte legacy-mode deltas (see the T0-2 paragraph's "Runtime" reference below, and
+> PATCHES.md's T0-2 "Runtime" section for the full four-item list). Read both entries together;
+> do not conclude the flag-off path is inert from T0-1's paragraph alone.
+
 **T0-2** is a different and more invasive class of patch: it is **API-breaking**. It widens
 `UpdateXLogPos` to `(ctx context.Context, lsn pq.LSN) error` across three exported interfaces
 (`Connector`, `replication.Streamer`, `slot.XLogUpdater`), and bounds the standby status write
