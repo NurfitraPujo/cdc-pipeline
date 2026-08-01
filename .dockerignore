@@ -4,5 +4,11 @@ node_modules
 web/node_modules
 web/.output
 web/tsconfig.tsbuildinfo
+# NOTE: "*.log" alone matches only root-level files. Nested logs -- notably
+# internal/test/e2e/logs/app.log, which the e2e suite can grow to tens of GB --
+# need the ** form, or `COPY . .` pulls them into the image and the build dies
+# with "no space left on device".
 *.log
+**/*.log
+internal/test/e2e/logs/
 *.bak
