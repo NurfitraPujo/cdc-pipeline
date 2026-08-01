@@ -257,17 +257,22 @@ func TestKeepaliveDoesNotConfirmInflight(t *testing.T) {
 	const table = "keepalive_gate_table"
 	// churnTable lives in a schema NOT in env.PgConfig.Schemas (["public"]
 	// only), so this pipeline's discovery loop never sees it and never
-	// dynamically adds it to CDC. That matters: an earlier version of this
-	// test put the churn table in "public" and it got auto-discovered and
-	// added to CDC mid-test (observed live: "New table discovered via CDC,
-	// starting dynamic addition"), which then self-acked its own snapshot/
-	// schema-change bookkeeping LSNs independently of the gated sink and
-	// intermittently landed exactly on (or past) the captured commitLSN --
-	// a false failure caused by the test's own dynamic-discovery side
-	// effect, not a real keepalive-fast-forward bug. Keeping churnTable
-	// entirely outside the source's configured schemas guarantees it can
-	// only ever contribute physical WAL/keepalive traffic, never decoded,
-	// self-acking CDC events.
+	// dynamically adds it to CDC -- enforced by the configured schema
+	// whitelist (discoverTables only queries table_schema = ANY(Schemas)).
+	// That matters: an earlier version of this test put the churn table in
+	// "public" and it got auto-discovered and added to CDC mid-test
+	// (observed live: "New table discovered via CDC, starting dynamic
+	// addition"), which then self-acked its own snapshot/schema-change
+	// bookkeeping LSNs independently of the gated sink and intermittently
+	// landed exactly on (or past) the captured commitLSN -- a false failure
+	// caused by the test's own dynamic-discovery side effect, not a real
+	// keepalive-fast-forward bug. Keeping churnTable entirely outside the
+	// source's configured schemas guarantees it can only ever contribute
+	// physical WAL/keepalive traffic, never decoded, self-acking CDC
+	// events. Asserted explicitly below (rather than inferred from the
+	// absence of a keepalive-fast-forward failure) by checking that no
+	// TableState KV entry was ever created for it -- dynamic addition
+	// always writes one before decoding any row for a table.
 	const churnSchema = "churn_schema"
 	const churnTable = churnSchema + ".keepalive_churn_table"
 	const sinkID = "gate2"
@@ -373,6 +378,21 @@ func TestKeepaliveDoesNotConfirmInflight(t *testing.T) {
 
 	close(stopChurn)
 	<-churnDone
+
+	// churn_schema.keepalive_churn_table must never have been discovered:
+	// dynamic addition (producer.go's "New table discovered via CDC"
+	// path) always writes a TableState KV entry before decoding anything
+	// for a table, so a present entry here would mean the schema
+	// whitelist failed to exclude it -- exactly the false-failure mode
+	// this test was rewritten to avoid (see the comment above). This has
+	// teeth: reverting the schema filter in discoverTables (or passing an
+	// empty/wildcard Schemas list) would let the churn table be
+	// discovered and this assertion would fail.
+	churnTableRef, err := protocol.ParseTableRef(churnTable)
+	require.NoError(t, err)
+	_, err = env.KV.Get(protocol.TableStateKey(pipelineID, env.PgConfig.ID, churnTableRef))
+	require.Error(t, err, "churn_schema.keepalive_churn_table was discovered and added to CDC -- "+
+		"the source schema whitelist failed to exclude it")
 
 	// Unblock the sink: the pipeline's own LSN should now get acked and the
 	// slot should catch up past commitLSN.

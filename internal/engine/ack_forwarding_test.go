@@ -162,7 +162,7 @@ func TestProducer_SkipsCheckpointForSnapshotAndZeroLSN(t *testing.T) {
 	p := NewProducer("p1", "nats://localhost:4222", cfg, mockSrc, mockPub, mockSub, mockKV, srcCfg)
 
 	// The only Put call we expect is the ingress checkpoint for the insert.
-	insertCheckpointKey := protocol.IngressCheckpointKey("p1", "s1", "t_insert")
+	insertCheckpointKey := protocol.IngressCheckpointKey("p1", "s1", protocol.TableRef{Schema: "public", Table: "t_insert"})
 	var putCalls []string
 	mockKV.EXPECT().Put(gomock.Any(), gomock.Any()).DoAndReturn(func(key string, data []byte) (uint64, error) {
 		putCalls = append(putCalls, key)
@@ -189,7 +189,7 @@ func TestProducer_SkipsCheckpointForSnapshotAndZeroLSN(t *testing.T) {
 
 	assert.Contains(t, putCalls, insertCheckpointKey)
 	for _, key := range putCalls {
-		assert.NotEqual(t, protocol.IngressCheckpointKey("p1", "s1", "t_snapshot"), key, "snapshot message must not get an ingress checkpoint write")
+		assert.NotEqual(t, protocol.IngressCheckpointKey("p1", "s1", protocol.TableRef{Schema: "public", Table: "t_snapshot"}), key, "snapshot message must not get an ingress checkpoint write")
 	}
 }
 

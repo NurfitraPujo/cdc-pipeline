@@ -42,6 +42,12 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "Table")
 				return
 			}
+		case "tsch":
+			z.TableSchema, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
+				return
+			}
 		case "op":
 			{
 				var zb0002 string
@@ -166,28 +172,32 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 // EncodeMsg implements msgp.Encodable
 func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 	// check for omitted fields
-	zb0001Len := uint32(13)
-	var zb0001Mask uint16 /* 13 bits */
+	zb0001Len := uint32(14)
+	var zb0001Mask uint16 /* 14 bits */
 	_ = zb0001Mask
 	if z.SinkID == "" {
 		zb0001Len--
 		zb0001Mask |= 0x2
 	}
+	if z.TableSchema == "" {
+		zb0001Len--
+		zb0001Mask |= 0x8
+	}
 	if z.Data == nil {
 		zb0001Len--
-		zb0001Mask |= 0x80
+		zb0001Mask |= 0x100
 	}
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x400
+		zb0001Mask |= 0x800
 	}
 	if z.CorrelationID == "" {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x1000
 	}
 	if z.Diff == nil {
 		zb0001Len--
-		zb0001Mask |= 0x1000
+		zb0001Mask |= 0x2000
 	}
 	// variable map header, size zb0001Len
 	err = en.Append(0x80 | uint8(zb0001Len))
@@ -229,6 +239,18 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "Table")
 			return
 		}
+		if (zb0001Mask & 0x8) == 0 { // if not omitted
+			// write "tsch"
+			err = en.Append(0xa4, 0x74, 0x73, 0x63, 0x68)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(z.TableSchema)
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
+				return
+			}
+		}
 		// write "op"
 		err = en.Append(0xa2, 0x6f, 0x70)
 		if err != nil {
@@ -269,7 +291,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "UUID")
 			return
 		}
-		if (zb0001Mask & 0x80) == 0 { // if not omitted
+		if (zb0001Mask & 0x100) == 0 { // if not omitted
 			// write "data"
 			err = en.Append(0xa4, 0x64, 0x61, 0x74, 0x61)
 			if err != nil {
@@ -313,7 +335,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "Timestamp")
 			return
 		}
-		if (zb0001Mask & 0x400) == 0 { // if not omitted
+		if (zb0001Mask & 0x800) == 0 { // if not omitted
 			// write "meta"
 			err = en.Append(0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if err != nil {
@@ -332,7 +354,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// write "c_id"
 			err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
 			if err != nil {
@@ -344,7 +366,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				return
 			}
 		}
-		if (zb0001Mask & 0x1000) == 0 { // if not omitted
+		if (zb0001Mask & 0x2000) == 0 { // if not omitted
 			// write "diff"
 			err = en.Append(0xa4, 0x64, 0x69, 0x66, 0x66)
 			if err != nil {
@@ -371,28 +393,32 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// check for omitted fields
-	zb0001Len := uint32(13)
-	var zb0001Mask uint16 /* 13 bits */
+	zb0001Len := uint32(14)
+	var zb0001Mask uint16 /* 14 bits */
 	_ = zb0001Mask
 	if z.SinkID == "" {
 		zb0001Len--
 		zb0001Mask |= 0x2
 	}
+	if z.TableSchema == "" {
+		zb0001Len--
+		zb0001Mask |= 0x8
+	}
 	if z.Data == nil {
 		zb0001Len--
-		zb0001Mask |= 0x80
+		zb0001Mask |= 0x100
 	}
 	if z.Schema == nil {
 		zb0001Len--
-		zb0001Mask |= 0x400
+		zb0001Mask |= 0x800
 	}
 	if z.CorrelationID == "" {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x1000
 	}
 	if z.Diff == nil {
 		zb0001Len--
-		zb0001Mask |= 0x1000
+		zb0001Mask |= 0x2000
 	}
 	// variable map header, size zb0001Len
 	o = append(o, 0x80|uint8(zb0001Len))
@@ -410,6 +436,11 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "tbl"
 		o = append(o, 0xa3, 0x74, 0x62, 0x6c)
 		o = msgp.AppendString(o, z.Table)
+		if (zb0001Mask & 0x8) == 0 { // if not omitted
+			// string "tsch"
+			o = append(o, 0xa4, 0x74, 0x73, 0x63, 0x68)
+			o = msgp.AppendString(o, z.TableSchema)
+		}
 		// string "op"
 		o = append(o, 0xa2, 0x6f, 0x70)
 		o = msgp.AppendString(o, string(z.Op))
@@ -422,7 +453,7 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "uuid"
 		o = append(o, 0xa4, 0x75, 0x75, 0x69, 0x64)
 		o = msgp.AppendString(o, z.UUID)
-		if (zb0001Mask & 0x80) == 0 { // if not omitted
+		if (zb0001Mask & 0x100) == 0 { // if not omitted
 			// string "data"
 			o = append(o, 0xa4, 0x64, 0x61, 0x74, 0x61)
 			o = msgp.AppendMapHeader(o, uint32(len(z.Data)))
@@ -441,7 +472,7 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		// string "ts"
 		o = append(o, 0xa2, 0x74, 0x73)
 		o = msgp.AppendTime(o, z.Timestamp)
-		if (zb0001Mask & 0x400) == 0 { // if not omitted
+		if (zb0001Mask & 0x800) == 0 { // if not omitted
 			// string "meta"
 			o = append(o, 0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if z.Schema == nil {
@@ -454,12 +485,12 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// string "c_id"
 			o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
 			o = msgp.AppendString(o, z.CorrelationID)
 		}
-		if (zb0001Mask & 0x1000) == 0 { // if not omitted
+		if (zb0001Mask & 0x2000) == 0 { // if not omitted
 			// string "diff"
 			o = append(o, 0xa4, 0x64, 0x69, 0x66, 0x66)
 			if z.Diff == nil {
@@ -510,6 +541,12 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			z.Table, bts, err = msgp.ReadStringBytes(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "Table")
+				return
+			}
+		case "tsch":
+			z.TableSchema, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
 				return
 			}
 		case "op":
@@ -634,7 +671,7 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *Message) Msgsize() (s int) {
-	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.SinkID) + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.StringPrefixSize + len(string(z.Op)) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 5 + msgp.StringPrefixSize + len(z.UUID) + 5 + msgp.MapHeaderSize
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.SourceID) + 4 + msgp.StringPrefixSize + len(z.SinkID) + 4 + msgp.StringPrefixSize + len(z.Table) + 5 + msgp.StringPrefixSize + len(z.TableSchema) + 3 + msgp.StringPrefixSize + len(string(z.Op)) + 4 + msgp.Uint64Size + 3 + msgp.StringPrefixSize + len(z.PK) + 5 + msgp.StringPrefixSize + len(z.UUID) + 5 + msgp.MapHeaderSize
 	if z.Data != nil {
 		for za0001, za0002 := range z.Data {
 			_ = za0002
@@ -1058,6 +1095,12 @@ func (z *SchemaDiff) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "Table")
 				return
 			}
+		case "tsch":
+			z.TableSchema, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
+				return
+			}
 		case "ts":
 			z.Timestamp, err = dc.ReadTime()
 			if err != nil {
@@ -1199,133 +1242,161 @@ func (z *SchemaDiff) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *SchemaDiff) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 7
-	// write "tbl"
-	err = en.Append(0x87, 0xa3, 0x74, 0x62, 0x6c)
+	// check for omitted fields
+	zb0001Len := uint32(8)
+	var zb0001Mask uint8 /* 8 bits */
+	_ = zb0001Mask
+	if z.TableSchema == "" {
+		zb0001Len--
+		zb0001Mask |= 0x2
+	}
+	// variable map header, size zb0001Len
+	err = en.Append(0x80 | uint8(zb0001Len))
 	if err != nil {
 		return
 	}
-	err = en.WriteString(z.Table)
-	if err != nil {
-		err = msgp.WrapError(err, "Table")
-		return
-	}
-	// write "ts"
-	err = en.Append(0xa2, 0x74, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteTime(z.Timestamp)
-	if err != nil {
-		err = msgp.WrapError(err, "Timestamp")
-		return
-	}
-	// write "src"
-	err = en.Append(0xa3, 0x73, 0x72, 0x63)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.Source)
-	if err != nil {
-		err = msgp.WrapError(err, "Source")
-		return
-	}
-	// write "add"
-	err = en.Append(0xa3, 0x61, 0x64, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteMapHeader(uint32(len(z.Added)))
-	if err != nil {
-		err = msgp.WrapError(err, "Added")
-		return
-	}
-	for za0001, za0002 := range z.Added {
-		err = en.WriteString(za0001)
+
+	// skip if no fields are to be emitted
+	if zb0001Len != 0 {
+		// write "tbl"
+		err = en.Append(0xa3, 0x74, 0x62, 0x6c)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.Table)
+		if err != nil {
+			err = msgp.WrapError(err, "Table")
+			return
+		}
+		if (zb0001Mask & 0x2) == 0 { // if not omitted
+			// write "tsch"
+			err = en.Append(0xa4, 0x74, 0x73, 0x63, 0x68)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(z.TableSchema)
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
+				return
+			}
+		}
+		// write "ts"
+		err = en.Append(0xa2, 0x74, 0x73)
+		if err != nil {
+			return
+		}
+		err = en.WriteTime(z.Timestamp)
+		if err != nil {
+			err = msgp.WrapError(err, "Timestamp")
+			return
+		}
+		// write "src"
+		err = en.Append(0xa3, 0x73, 0x72, 0x63)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.Source)
+		if err != nil {
+			err = msgp.WrapError(err, "Source")
+			return
+		}
+		// write "add"
+		err = en.Append(0xa3, 0x61, 0x64, 0x64)
+		if err != nil {
+			return
+		}
+		err = en.WriteMapHeader(uint32(len(z.Added)))
 		if err != nil {
 			err = msgp.WrapError(err, "Added")
 			return
 		}
-		err = en.WriteString(za0002)
-		if err != nil {
-			err = msgp.WrapError(err, "Added", za0001)
-			return
+		for za0001, za0002 := range z.Added {
+			err = en.WriteString(za0001)
+			if err != nil {
+				err = msgp.WrapError(err, "Added")
+				return
+			}
+			err = en.WriteString(za0002)
+			if err != nil {
+				err = msgp.WrapError(err, "Added", za0001)
+				return
+			}
 		}
-	}
-	// write "rem"
-	err = en.Append(0xa3, 0x72, 0x65, 0x6d)
-	if err != nil {
-		return
-	}
-	err = en.WriteArrayHeader(uint32(len(z.Removed)))
-	if err != nil {
-		err = msgp.WrapError(err, "Removed")
-		return
-	}
-	for za0003 := range z.Removed {
-		err = en.WriteString(z.Removed[za0003])
-		if err != nil {
-			err = msgp.WrapError(err, "Removed", za0003)
-			return
-		}
-	}
-	// write "type"
-	err = en.Append(0xa4, 0x74, 0x79, 0x70, 0x65)
-	if err != nil {
-		return
-	}
-	err = en.WriteMapHeader(uint32(len(z.TypeChanges)))
-	if err != nil {
-		err = msgp.WrapError(err, "TypeChanges")
-		return
-	}
-	for za0004, za0005 := range z.TypeChanges {
-		err = en.WriteString(za0004)
-		if err != nil {
-			err = msgp.WrapError(err, "TypeChanges")
-			return
-		}
-		// map header, size 3
-		// write "old"
-		err = en.Append(0x83, 0xa3, 0x6f, 0x6c, 0x64)
+		// write "rem"
+		err = en.Append(0xa3, 0x72, 0x65, 0x6d)
 		if err != nil {
 			return
 		}
-		err = en.WriteString(za0005.OldType)
+		err = en.WriteArrayHeader(uint32(len(z.Removed)))
 		if err != nil {
-			err = msgp.WrapError(err, "TypeChanges", za0004, "OldType")
+			err = msgp.WrapError(err, "Removed")
 			return
 		}
-		// write "new"
-		err = en.Append(0xa3, 0x6e, 0x65, 0x77)
-		if err != nil {
-			return
-		}
-		err = en.WriteString(za0005.NewType)
-		if err != nil {
-			err = msgp.WrapError(err, "TypeChanges", za0004, "NewType")
-			return
+		for za0003 := range z.Removed {
+			err = en.WriteString(z.Removed[za0003])
+			if err != nil {
+				err = msgp.WrapError(err, "Removed", za0003)
+				return
+			}
 		}
 		// write "type"
 		err = en.Append(0xa4, 0x74, 0x79, 0x70, 0x65)
 		if err != nil {
 			return
 		}
-		err = en.WriteString(za0005.ChangeType)
+		err = en.WriteMapHeader(uint32(len(z.TypeChanges)))
 		if err != nil {
-			err = msgp.WrapError(err, "TypeChanges", za0004, "ChangeType")
+			err = msgp.WrapError(err, "TypeChanges")
 			return
 		}
-	}
-	// write "c_id"
-	err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.CorrelationID)
-	if err != nil {
-		err = msgp.WrapError(err, "CorrelationID")
-		return
+		for za0004, za0005 := range z.TypeChanges {
+			err = en.WriteString(za0004)
+			if err != nil {
+				err = msgp.WrapError(err, "TypeChanges")
+				return
+			}
+			// map header, size 3
+			// write "old"
+			err = en.Append(0x83, 0xa3, 0x6f, 0x6c, 0x64)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(za0005.OldType)
+			if err != nil {
+				err = msgp.WrapError(err, "TypeChanges", za0004, "OldType")
+				return
+			}
+			// write "new"
+			err = en.Append(0xa3, 0x6e, 0x65, 0x77)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(za0005.NewType)
+			if err != nil {
+				err = msgp.WrapError(err, "TypeChanges", za0004, "NewType")
+				return
+			}
+			// write "type"
+			err = en.Append(0xa4, 0x74, 0x79, 0x70, 0x65)
+			if err != nil {
+				return
+			}
+			err = en.WriteString(za0005.ChangeType)
+			if err != nil {
+				err = msgp.WrapError(err, "TypeChanges", za0004, "ChangeType")
+				return
+			}
+		}
+		// write "c_id"
+		err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
+		if err != nil {
+			return
+		}
+		err = en.WriteString(z.CorrelationID)
+		if err != nil {
+			err = msgp.WrapError(err, "CorrelationID")
+			return
+		}
 	}
 	return
 }
@@ -1333,48 +1404,66 @@ func (z *SchemaDiff) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *SchemaDiff) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 7
-	// string "tbl"
-	o = append(o, 0x87, 0xa3, 0x74, 0x62, 0x6c)
-	o = msgp.AppendString(o, z.Table)
-	// string "ts"
-	o = append(o, 0xa2, 0x74, 0x73)
-	o = msgp.AppendTime(o, z.Timestamp)
-	// string "src"
-	o = append(o, 0xa3, 0x73, 0x72, 0x63)
-	o = msgp.AppendString(o, z.Source)
-	// string "add"
-	o = append(o, 0xa3, 0x61, 0x64, 0x64)
-	o = msgp.AppendMapHeader(o, uint32(len(z.Added)))
-	for za0001, za0002 := range z.Added {
-		o = msgp.AppendString(o, za0001)
-		o = msgp.AppendString(o, za0002)
+	// check for omitted fields
+	zb0001Len := uint32(8)
+	var zb0001Mask uint8 /* 8 bits */
+	_ = zb0001Mask
+	if z.TableSchema == "" {
+		zb0001Len--
+		zb0001Mask |= 0x2
 	}
-	// string "rem"
-	o = append(o, 0xa3, 0x72, 0x65, 0x6d)
-	o = msgp.AppendArrayHeader(o, uint32(len(z.Removed)))
-	for za0003 := range z.Removed {
-		o = msgp.AppendString(o, z.Removed[za0003])
-	}
-	// string "type"
-	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
-	o = msgp.AppendMapHeader(o, uint32(len(z.TypeChanges)))
-	for za0004, za0005 := range z.TypeChanges {
-		o = msgp.AppendString(o, za0004)
-		// map header, size 3
-		// string "old"
-		o = append(o, 0x83, 0xa3, 0x6f, 0x6c, 0x64)
-		o = msgp.AppendString(o, za0005.OldType)
-		// string "new"
-		o = append(o, 0xa3, 0x6e, 0x65, 0x77)
-		o = msgp.AppendString(o, za0005.NewType)
+	// variable map header, size zb0001Len
+	o = append(o, 0x80|uint8(zb0001Len))
+
+	// skip if no fields are to be emitted
+	if zb0001Len != 0 {
+		// string "tbl"
+		o = append(o, 0xa3, 0x74, 0x62, 0x6c)
+		o = msgp.AppendString(o, z.Table)
+		if (zb0001Mask & 0x2) == 0 { // if not omitted
+			// string "tsch"
+			o = append(o, 0xa4, 0x74, 0x73, 0x63, 0x68)
+			o = msgp.AppendString(o, z.TableSchema)
+		}
+		// string "ts"
+		o = append(o, 0xa2, 0x74, 0x73)
+		o = msgp.AppendTime(o, z.Timestamp)
+		// string "src"
+		o = append(o, 0xa3, 0x73, 0x72, 0x63)
+		o = msgp.AppendString(o, z.Source)
+		// string "add"
+		o = append(o, 0xa3, 0x61, 0x64, 0x64)
+		o = msgp.AppendMapHeader(o, uint32(len(z.Added)))
+		for za0001, za0002 := range z.Added {
+			o = msgp.AppendString(o, za0001)
+			o = msgp.AppendString(o, za0002)
+		}
+		// string "rem"
+		o = append(o, 0xa3, 0x72, 0x65, 0x6d)
+		o = msgp.AppendArrayHeader(o, uint32(len(z.Removed)))
+		for za0003 := range z.Removed {
+			o = msgp.AppendString(o, z.Removed[za0003])
+		}
 		// string "type"
 		o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
-		o = msgp.AppendString(o, za0005.ChangeType)
+		o = msgp.AppendMapHeader(o, uint32(len(z.TypeChanges)))
+		for za0004, za0005 := range z.TypeChanges {
+			o = msgp.AppendString(o, za0004)
+			// map header, size 3
+			// string "old"
+			o = append(o, 0x83, 0xa3, 0x6f, 0x6c, 0x64)
+			o = msgp.AppendString(o, za0005.OldType)
+			// string "new"
+			o = append(o, 0xa3, 0x6e, 0x65, 0x77)
+			o = msgp.AppendString(o, za0005.NewType)
+			// string "type"
+			o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
+			o = msgp.AppendString(o, za0005.ChangeType)
+		}
+		// string "c_id"
+		o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
+		o = msgp.AppendString(o, z.CorrelationID)
 	}
-	// string "c_id"
-	o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
-	o = msgp.AppendString(o, z.CorrelationID)
 	return
 }
 
@@ -1400,6 +1489,12 @@ func (z *SchemaDiff) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			z.Table, bts, err = msgp.ReadStringBytes(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "Table")
+				return
+			}
+		case "tsch":
+			z.TableSchema, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "TableSchema")
 				return
 			}
 		case "ts":
@@ -1544,7 +1639,7 @@ func (z *SchemaDiff) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *SchemaDiff) Msgsize() (s int) {
-	s = 1 + 4 + msgp.StringPrefixSize + len(z.Table) + 3 + msgp.TimeSize + 4 + msgp.StringPrefixSize + len(z.Source) + 4 + msgp.MapHeaderSize
+	s = 1 + 4 + msgp.StringPrefixSize + len(z.Table) + 5 + msgp.StringPrefixSize + len(z.TableSchema) + 3 + msgp.TimeSize + 4 + msgp.StringPrefixSize + len(z.Source) + 4 + msgp.MapHeaderSize
 	if z.Added != nil {
 		for za0001, za0002 := range z.Added {
 			_ = za0002

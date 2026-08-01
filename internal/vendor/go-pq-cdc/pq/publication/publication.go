@@ -120,8 +120,24 @@ func decodePublicationInfoResult(result *pgconn.Result) (*Config, error) {
 		}
 	}
 
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 2) - tableName
+	// is produced by infoQuery's `schemaname || '.' || tablename` concat
+	// (config.go), which guarantees exactly one schema/table separator but says
+	// nothing about additional dots inside tablename itself (quoted Postgres
+	// identifiers may legally contain "."). The previous `strings.Split` +
+	// `st[1]`/`st[0]` indexing (a) panicked on an unqualified name (len(st) < 2 --
+	// unreachable today given the concat, but not guaranteed by the type system)
+	// and (b) silently misparsed a table name containing a literal "." by
+	// assigning only the first fragment to Name and dropping the rest.
+	// SplitN(..., 2) fixes (b) by keeping everything after the first "." as the
+	// table name, and an explicit length/emptiness guard fixes (a) by skipping
+	// the entry (with a warning) instead of panicking.
 	for _, tableName := range tables {
-		st := strings.Split(tableName, ".")
+		st := strings.SplitN(tableName, ".", 2)
+		if len(st) != 2 || st[0] == "" || st[1] == "" {
+			logger.Warn("publication info: skipping unparseable qualified table name", "table", tableName)
+			continue
+		}
 		publicationConfig.Tables = append(publicationConfig.Tables, Table{
 			Name:   st[1],
 			Schema: st[0],

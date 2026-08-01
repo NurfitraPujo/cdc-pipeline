@@ -45,6 +45,22 @@ func (tc Table) Validate() error {
 		return errors.New("table name cannot be empty")
 	}
 
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 4) - Schema is
+	// required here rather than left to SetDefault()'s silent "" -> "public"
+	// fallback (config/config.go). SetDefault() still runs first in the normal
+	// connector.New() flow (connector.go) and always fills Schema before this
+	// runs, so this check is inert on that path today -- the embedding
+	// application (internal/source/postgres/source.go) already sets Schema
+	// explicitly on every publication.Table via TableRef.NormalizeSchema. Its
+	// purpose is to catch any *future* or *direct* caller (tests, a different
+	// embedder, a call to Tables.Validate()/Table.Validate() that bypasses
+	// SetDefault) that constructs a Table without Schema: such a caller now
+	// fails loudly here instead of silently landing on "public" three call
+	// frames away.
+	if strings.TrimSpace(tc.Schema) == "" {
+		return errors.New("table schema cannot be empty")
+	}
+
 	if !slices.Contains(ReplicaIdentityOptions, tc.ReplicaIdentity) {
 		return errors.Newf("undefined replica identity option. valid identity options are: %v", ReplicaIdentityOptions)
 	}
@@ -72,12 +88,17 @@ func (ts Tables) Diff(tss Tables) Tables {
 	res := Tables{}
 	tssMap := make(map[string]Table)
 
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 1) - the diff
+	// key was Name+ReplicaIdentity only, which is schema-blind: "a.t" and "b.t"
+	// hashed to the same key, so a table added or removed in one schema could
+	// be masked entirely by a same-named table in another schema. Schema is now
+	// part of the key so cross-schema same-named tables diff independently.
 	for _, t := range tss {
-		tssMap[t.Name+t.ReplicaIdentity] = t
+		tssMap[t.Schema+"."+t.Name+t.ReplicaIdentity] = t
 	}
 
 	for _, t := range ts {
-		if v, found := tssMap[t.Name+t.ReplicaIdentity]; !found || v.ReplicaIdentity != t.ReplicaIdentity {
+		if v, found := tssMap[t.Schema+"."+t.Name+t.ReplicaIdentity]; !found || v.ReplicaIdentity != t.ReplicaIdentity {
 			res = append(res, t)
 		}
 	}

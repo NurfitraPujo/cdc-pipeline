@@ -942,6 +942,66 @@ func (h *Handler) GetSource(c *gin.Context) {
 	c.JSON(http.StatusOK, SourceConfigFromProtocol(cfg))
 }
 
+// discoverySchemas returns the schemas ListSourceTables' fallback discovery
+// path should query. Empty configured Schemas means "public" only, NOT all
+// schemas -- see MULTI_SCHEMA_PLAN.md §2.4/§8 item 4. Every existing source
+// config has Schemas empty (the field was dead until this stage), so
+// defaulting to a wildcard here would silently start discovering tables from
+// every schema on the database on upgrade.
+func discoverySchemas(configured []string) []string {
+	if len(configured) == 0 {
+		return []string{"public"}
+	}
+	return configured
+}
+
+// openSourceDB loads the source config for id, decrypts its password, and
+// opens a connection to the source database. Callers must Close() the
+// returned *sql.DB. Returns (nil, nil, false) with the response already
+// written if the source cannot be loaded or connected to -- callers should
+// just return in that case.
+func (h *Handler) openSourceDB(c *gin.Context, id string) (*sql.DB, bool) {
+	key := protocol.SourceConfigKey(id)
+	entry, err := h.kv.Get(key)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		return nil, false
+	}
+
+	var cfg protocol.SourceConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return nil, false
+	}
+
+	if cfg.PassEncrypted != "" {
+		encKey, err := crypto.GetEncryptionKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return nil, false
+		}
+		if decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encKey); err == nil {
+			cfg.PassEncrypted = decrypted
+		}
+	}
+
+	u := &url.URL{
+		Scheme: "postgres", Host: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		User: url.UserPassword(cfg.User, cfg.PassEncrypted), Path: cfg.Database,
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	q.Set("connect_timeout", "3")
+	u.RawQuery = q.Encode()
+
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to open connection: %v", err)})
+		return nil, false
+	}
+	return db, true
+}
+
 // GetSourceSchema triggers or retrieves table schema discovery for a source.
 // @Summary      Get source schema
 // @Description  Discover available tables and schemas directly from the source database
@@ -952,13 +1012,43 @@ func (h *Handler) GetSource(c *gin.Context) {
 // @Success      200  {object}  map[string]any
 // @Router       /sources/{id}/schema [get]
 func (h *Handler) GetSourceSchema(c *gin.Context) {
-	// In a real implementation, this might send a request to a worker to perform discovery
-	// or query the database directly if the API has connectivity.
-	// For now, return what we have in metadata plus a mock of available schemas.
 	id := c.Param("id")
+
+	db, ok := h.openSourceDB(c, id)
+	if !ok {
+		return
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// pg_namespace, not information_schema.schemata, so the query needs no
+	// per-database grants beyond CONNECT -- excludes catalog/toast/temp
+	// schemas, which are never valid replication targets.
+	rows, err := db.QueryContext(ctx, `
+		SELECT nspname FROM pg_namespace
+		WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND nspname NOT LIKE 'pg_toast%'
+		  AND nspname NOT LIKE 'pg_temp_%'
+		ORDER BY nspname`)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to discover schemas: %v", err)})
+		return
+	}
+	defer rows.Close()
+
+	schemas := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			schemas = append(schemas, name)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"source_id":         id,
-		"available_schemas": []string{"public", "inventory", "sales"},
+		"available_schemas": schemas,
 		"discovery_status":  "ready",
 	})
 }
@@ -996,54 +1086,48 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 	}
 
 	if len(tables) == 0 {
-		// Attempt dynamic discovery from the source database
+		// Attempt dynamic discovery from the source database.
 		key := protocol.SourceConfigKey(sourceID)
-		if entry, err := h.kv.Get(key); err == nil {
-			var cfg protocol.SourceConfig
-			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
-				// Decrypt password
-				encKey, err := crypto.GetEncryptionKey()
-				if err != nil {
-					log.Error().Err(err).Msg("failed to get encryption key for source schema discovery")
-				} else if cfg.PassEncrypted != "" {
-					decrypted, err := crypto.Decrypt(cfg.PassEncrypted, encKey)
-					if err == nil {
-						cfg.PassEncrypted = decrypted
-					}
-				}
-				// Connect to database
-				u := &url.URL{
-					Scheme: "postgres", Host: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-					User: url.UserPassword(cfg.User, cfg.PassEncrypted), Path: cfg.Database,
-				}
-				q := u.Query()
-				q.Set("sslmode", "disable")
-				q.Set("connect_timeout", "3")
-				u.RawQuery = q.Encode()
+		entry, err := h.kv.Get(key)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
+			return
+		}
+		var cfg protocol.SourceConfig
+		if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+			c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
+			return
+		}
 
-				db, err := sql.Open("pgx", u.String())
-				if err == nil {
-					defer db.Close()
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
+		db, ok := h.openSourceDB(c, sourceID)
+		if !ok {
+			return
+		}
+		defer db.Close()
 
-					rows, err := db.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
-					if err == nil {
-						defer rows.Close()
-						for rows.Next() {
-							var tableName string
-							if err := rows.Scan(&tableName); err == nil {
-								// Filter out snapshot tables
-								if strings.Contains(tableName, "cdc_snapshot") {
-									continue
-								}
-								tables = append(tables, protocol.TableMetadata{
-									ID:   tableName,
-									Name: tableName,
-								})
-							}
-						}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		schemas := discoverySchemas(cfg.Schemas)
+
+		rows, err := db.QueryContext(ctx,
+			"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = ANY($1) AND table_type = 'BASE TABLE'",
+			schemas)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var schema, tableName string
+				if err := rows.Scan(&schema, &tableName); err == nil {
+					// Filter out snapshot tables
+					if strings.Contains(tableName, "cdc_snapshot") {
+						continue
 					}
+					ref := protocol.TableRef{Schema: schema, Table: tableName}
+					tables = append(tables, protocol.TableMetadata{
+						ID:     ref.KeyToken(),
+						Name:   tableName,
+						Schema: ref.Schema,
+					})
 				}
 			}
 		}

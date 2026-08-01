@@ -367,20 +367,58 @@ func (s *DebugSink) isSampledOut(tableName string) bool {
 	return false
 }
 
+// getSchemaName resolves the source schema for the debug row's schema_name
+// column. It prefers the sibling Message.TableSchema (populated on every
+// message, including plain data messages) over SchemaMetadata.Schema, which is
+// only present on schema-change messages -- reading only the latter left
+// schema_name empty for essentially every captured row.
 func (s *DebugSink) getSchemaName(m protocol.Message) string {
-	if m.Schema != nil {
+	if m.TableSchema != "" {
+		return protocol.NormalizeSchema(m.TableSchema)
+	}
+	if m.Schema != nil && m.Schema.Schema != "" {
 		return m.Schema.Schema
 	}
+	// Deliberately NOT NormalizeSchema("") here: a message carrying no schema
+	// information at all is unknown, and recording it as "public" would assert
+	// something we were never told. The debug row's schema_name stays empty.
 	return ""
 }
 
+// matchesWildcard matches text against a pattern where "*" means "any
+// sequence of characters" (glob semantics), not against text as a raw regex.
+//
+// Two bugs fixed here (MULTI_SCHEMA_PLAN.md §7.4 item 10, §7.3):
+//  1. The previous version replaced "*" with ".*" without escaping the rest
+//     of the pattern first, so any other regex metacharacter in a table name
+//     -- most commonly "." -- was interpreted as regex syntax. A filter for
+//     "order." (meant literally, e.g. matching nothing on purpose) matched
+//     "orderX" because "." means "any character" in regex.
+//  2. `matched, _ := regexp.MatchString(...)` discarded compile errors from
+//     a malformed pattern, silently treating an invalid filter as "matches
+//     nothing" rather than surfacing the misconfiguration.
+//
+// We build the regex by quoting every literal segment between "*"s with
+// regexp.QuoteMeta and only ever inserting ".*" for the wildcard itself, so
+// no character from the operator-supplied pattern is interpreted as regex
+// syntax.
 func matchesWildcard(pattern, text string) bool {
 	if !strings.Contains(pattern, "*") {
 		return pattern == text
 	}
-	pattern = strings.ReplaceAll(pattern, "*", ".*")
-	pattern = "^" + pattern + "$"
-	matched, _ := regexp.MatchString(pattern, text)
+
+	segments := strings.Split(pattern, "*")
+	quoted := make([]string, len(segments))
+	for i, seg := range segments {
+		quoted[i] = regexp.QuoteMeta(seg)
+	}
+	rePattern := "^" + strings.Join(quoted, ".*") + "$"
+
+	matched, err := regexp.MatchString(rePattern, text)
+	if err != nil {
+		log.Warn().Err(err).Str("pattern", pattern).Msg("postgresdebug: invalid table filter pattern; treating as no match")
+		return false
+	}
 	return matched
 }
 

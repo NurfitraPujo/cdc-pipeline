@@ -58,41 +58,60 @@ func WorkerHeartbeatKey(id string) string {
 	return fmt.Sprintf("%s%s.heartbeat", PrefixWorkerState, id)
 }
 
-func TableStatsKey(pid, sid, sinkID, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.stats", PrefixPipelineState, pid, sid, sinkID, table)
+func TableStatsKey(pid, sid, sinkID string, table TableRef) string {
+	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.stats", PrefixPipelineState, pid, sid, sinkID, table.KeyToken())
 }
 
 type TableStatsKeyInfo struct {
 	PipelineID string
 	SourceID   string
 	SinkID     string
-	Table      string
+	Table      string // the raw KeyToken(), e.g. "orders" or "sales=orders"
 }
 
+// ParseTableStatsKey parses a key built by TableStatsKey. It parses from
+// BOTH ENDS -- fixed prefix tokens 0..7, terminal "stats" -- rather than
+// asserting a fixed length and a positional "stats" token (the previous
+// version silently returned nil the moment the table token contained an
+// extra "."; see MULTI_SCHEMA_PLAN.md §2.3). KeyToken() never emits a "."
+// today, but this stays correct even if that ever changes.
 func ParseTableStatsKey(key string) *TableStatsKeyInfo {
-	// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
+	// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{token}.stats
 	parts := strings.Split(key, ".")
-	if len(parts) < 10 || parts[0] != "cdc" || parts[1] != "pipeline" || parts[3] != "sources" || parts[5] != "sinks" || parts[7] != "tables" || parts[9] != "stats" {
+	if len(parts) < 10 {
+		return nil
+	}
+	if parts[0] != "cdc" || parts[1] != "pipeline" || parts[3] != "sources" || parts[5] != "sinks" || parts[7] != "tables" {
+		return nil
+	}
+	if parts[len(parts)-1] != "stats" {
 		return nil
 	}
 	return &TableStatsKeyInfo{
 		PipelineID: parts[2],
 		SourceID:   parts[4],
 		SinkID:     parts[6],
-		Table:      parts[8],
+		Table:      strings.Join(parts[8:len(parts)-1], "."),
 	}
 }
 
-func ProducerTableStatsKey(pid, sid, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table)
+func ProducerTableStatsKey(pid, sid string, table TableRef) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.stats", PrefixPipelineState, pid, sid, table.KeyToken())
 }
 
-func IngressCheckpointKey(pid, sid, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.tables.%s.ingress_checkpoint", PrefixPipelineState, pid, sid, table)
+func IngressCheckpointKey(pid, sid string, table TableRef) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.ingress_checkpoint", PrefixPipelineState, pid, sid, table.KeyToken())
 }
 
-func EgressCheckpointKey(pid, sid, sinkID, table string) string {
-	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, sinkID, table)
+func EgressCheckpointKey(pid, sid, sinkID string, table TableRef) string {
+	return fmt.Sprintf("%s%s.sources.%s.sinks.%s.tables.%s.egress_checkpoint", PrefixPipelineState, pid, sid, sinkID, table.KeyToken())
+}
+
+// TableMetadataKey addresses the per-table schema metadata blob written on
+// dynamic-table discovery. Previously an inline fmt.Sprintf with no builder
+// at all (MULTI_SCHEMA_PLAN.md §3 Stage 1).
+func TableMetadataKey(pid, sid string, table TableRef) string {
+	return fmt.Sprintf("%s%s.sources.%s.tables.%s.metadata", PrefixPipelineState, pid, sid, table.KeyToken())
 }
 
 // SourceWatermarkKey addresses a per-source, per-pipeline observability
@@ -221,7 +240,7 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.Name, validation.Required),
 		validation.Field(&p.Sources, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
-		validation.Field(&p.Tables),
+		validation.Field(&p.Tables, validation.Each(validation.By(validateTableIdentifier))),
 		validation.Field(&p.Retry),
 	)
 }
@@ -252,7 +271,22 @@ func (s SourceConfig) Validate() error {
 		validation.Field(&s.Host, validation.Required),
 		validation.Field(&s.Port, validation.Required, validation.Min(1), validation.Max(65535)),
 		validation.Field(&s.Database, validation.Required),
+		validation.Field(&s.Schemas, validation.Each(validation.By(validateTableIdentifier))),
+		validation.Field(&s.Tables, validation.Each(validation.By(validateTableIdentifier))),
 	)
+}
+
+// validateTableIdentifier rejects "=" (reserved for KeyToken's schema
+// separator, see TableRef.KeyToken) and more than one "." (the schema.table
+// separator) in a single Schemas/Tables entry, keeping KeyToken() injective.
+// A bare or schema-qualified identifier ("orders", "sales.orders") is valid;
+// ParseTableRef performs the equivalent check at the point of use.
+func validateTableIdentifier(value interface{}) error {
+	s, _ := value.(string)
+	if _, err := ParseTableRef(s); err != nil {
+		return err
+	}
+	return nil
 }
 
 type SinkConfig struct {

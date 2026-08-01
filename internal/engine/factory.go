@@ -103,6 +103,28 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 			return nil, fmt.Errorf("failed to create sink %s: %w", sinkID, err)
 		}
 
+		// Startup-time schema validation (MULTI_SCHEMA_PLAN.md §7.4 item 2).
+		// Sinks implementing SchemaValidator get every target schema checked --
+		// and, where auto-provisioning is enabled, created -- before the worker
+		// is reported as started. Without this the check fires lazily on the
+		// first ApplySchema, which turns a permanently-unsatisfiable target
+		// (e.g. a missing database with auto_create_schema disabled) into an
+		// unbounded redelivery loop on the schema path rather than a clean
+		// startup failure.
+		if validator, ok := snk.(sink.SchemaValidator); ok {
+			refs := make([]protocol.TableRef, 0, len(cfg.Tables))
+			for _, t := range cfg.Tables {
+				ref, err := protocol.ParseTableRef(t)
+				if err != nil {
+					return nil, fmt.Errorf("pipeline %s: invalid table %q: %w", id, t, err)
+				}
+				refs = append(refs, ref)
+			}
+			if err := validator.ValidateSchemas(workerCtx, refs); err != nil {
+				return nil, fmt.Errorf("sink %s: %w", sinkID, err)
+			}
+		}
+
 		// Wire up hooks if it's a debug sink
 		var preHook sink.PreTransformHook
 		var postHook sink.PostTransformHook

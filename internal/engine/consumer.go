@@ -96,13 +96,20 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 	c.statsMu.Lock()
 	defer c.statsMu.Unlock()
 
-	for _, table := range tables {
-		key := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
+	for _, cfgEntry := range tables {
+		// Normalise the config-shaped entry to the same identity the hot
+		// path uses (msgTableRef, below) so restored stats are found by the
+		// runtime instead of orphaned under a different map key -- the §1.1
+		// "restored stats orphaned" bug (MULTI_SCHEMA_PLAN.md §1.1, §3
+		// Stage 1): this previously keyed off the raw config string while
+		// updateStats/handleSinkError key off m.Table.
+		ref := tableRefFromConfigEntry(cfgEntry)
+		key := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, ref)
 		entry, err := c.kv.Get(key)
 		if err == nil {
 			var st protocol.TableStats
 			if err := json.Unmarshal(entry.Value(), &st); err == nil {
-				c.stats[sourceID+"."+table] = &st
+				c.stats[sourceID+"."+ref.KeyToken()] = &st
 			}
 		}
 	}
@@ -367,8 +374,23 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 				if m.Op == protocol.OpSchemaChange {
 					if m.Schema == nil && m.Diff != nil {
 						log.Info().Str("pipeline_id", c.pipelineID).Str("table", m.Table).Interface("added_cols", m.Diff.Added).Msg("Constructing schema from diff")
+						// Schema must be populated here, not left "" -- a
+						// reader downstream (debug-sink excludes, sampling
+						// overrides, the transformer allowlist, and the sink's
+						// qualified-target resolution) sees an unqualified
+						// {Table} and either matches the wrong table or drops
+						// the row untransformed (MULTI_SCHEMA_PLAN.md §11.2
+						// requirement 1). Prefer the message's own TableSchema
+						// sibling field; fall back to the diff's (both are set
+						// by emitSchemaChange/the inline producer copy as of
+						// this stage).
+						schema := m.TableSchema
+						if schema == "" {
+							schema = m.Diff.TableSchema
+						}
 						m.Schema = &protocol.SchemaMetadata{
 							Table:   m.Table,
+							Schema:  protocol.NormalizeSchema(schema),
 							Columns: m.Diff.Added,
 						}
 					}
@@ -378,13 +400,13 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 						transformedMsgs, err := c.processMessages(ctx, []protocol.Message{*m})
 						if err != nil {
 							log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error transforming schema change")
-							c.updateTableError(m.SourceID, m.Table)
+							c.updateTableError(m.SourceID, msgTableRef(*m))
 							applyFailed = true
 						} else if len(transformedMsgs) > 0 {
 							transformed := transformedMsgs[0]
 							if err := c.sink.ApplySchema(ctx, transformed); err != nil {
 								log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Error applying schema change")
-								c.updateTableError(m.SourceID, m.Table)
+								c.updateTableError(m.SourceID, msgTableRef(*m))
 								applyFailed = true
 							}
 						} else {
@@ -424,6 +446,7 @@ func (c *Consumer) Run(ctx context.Context, topic string) error {
 							Op:            protocol.OpSchemaChangeAck,
 							CorrelationID: m.CorrelationID,
 							Table:         m.Table,
+							TableSchema:   m.TableSchema,
 							SourceID:      m.SourceID,
 							SinkID:        c.sinkID,
 							Timestamp:     time.Now(),
@@ -504,11 +527,19 @@ func removeWMMsg(wmMsgs []*message.Message, target *message.Message) []*message.
 }
 
 
-func (c *Consumer) updateTableError(sourceID, table string) {
+// updateTableError takes ref, the message's own TableRef (see callers'
+// msgTableRef(*m)), rather than re-deriving one from a bare table string.
+// Previously this took a bare table name and recovered a TableRef via
+// TableRefFromKeyToken, which always yields {public, table} regardless of the
+// message's real schema -- silently writing (and, via the in-memory map key
+// below, reading back) the wrong identity for any non-public table
+// (MULTI_SCHEMA_PLAN.md §11.2 requirement 6: this is the schema-dropped half
+// of the updateTableError/:729/:849 key-shape mismatch).
+func (c *Consumer) updateTableError(sourceID string, ref protocol.TableRef) {
 	c.statsMu.Lock()
 	defer c.statsMu.Unlock()
 
-	key := sourceID + "." + table
+	key := sourceID + "." + ref.KeyToken()
 	s, ok := c.stats[key]
 	if !ok {
 		s = &protocol.TableStats{Status: "ERROR"}
@@ -518,11 +549,11 @@ func (c *Consumer) updateTableError(sourceID, table string) {
 	s.Status = "ERROR"
 	s.UpdatedAt = time.Now()
 
-	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, table).Inc()
+	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, ref.Table).Inc()
 	statsData, _ := json.Marshal(s)
-	statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, table)
+	statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, ref)
 	if _, err := c.kv.Put(statsKey, statsData); err != nil {
-		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", table).Msg("Failed to update table stats")
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", ref.Table).Msg("Failed to update table stats")
 	}
 }
 
@@ -700,7 +731,12 @@ func (c *Consumer) flushWithFilter(ctx context.Context, batch []protocol.Message
 func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message, wmMsgs []*message.Message, err error) {
 	c.statsMu.Lock()
 	for _, m := range batch {
-		key := m.SourceID + "." + m.Table
+		// KeyToken()-based, matching LoadStats/updateStats -- a bare
+		// "sourceID.orders" key would let a "sales.orders" row and a
+		// "public.orders" row share one in-memory stats entry even though
+		// the KV write two lines below (msgTableRef(m)) already keeps them
+		// separate (MULTI_SCHEMA_PLAN.md §11.2 requirement 5).
+		key := m.SourceID + "." + msgTableRef(m).KeyToken()
 		s, ok := c.stats[key]
 		if !ok {
 			s = &protocol.TableStats{Status: "ERROR"}
@@ -712,7 +748,7 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 
 		metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
 		statsData, _ := s.MarshalMsg(nil)
-		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 		if _, err := c.kv.Put(statsKey, statsData); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
 		} else {
@@ -785,7 +821,10 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 	latestByTable := make(map[string]protocol.Message)
 	countsByTable := make(map[string]int)
 	for _, m := range batch {
-		key := m.SourceID + "." + m.Table
+		// KeyToken()-based, matching LoadStats -- see handleSinkError's
+		// identical fix above for why bare m.Table would collide across
+		// schemas.
+		key := m.SourceID + "." + msgTableRef(m).KeyToken()
 		latestByTable[key] = m
 		countsByTable[key]++
 	}
@@ -805,7 +844,7 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 			}
 			cpData, err := checkpoint.MarshalMsg(nil)
 			if err == nil {
-				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 				if _, err := c.kv.Put(cpKey, cpData); err != nil {
 					log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating egress checkpoint")
 				}
@@ -832,7 +871,7 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 
 		statsData, err := s.MarshalMsg(nil)
 		if err == nil {
-			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, m.Table)
+			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 			if _, err := c.kv.Put(statsKey, statsData); err != nil {
 				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Msg("Error updating table stats")
 			}

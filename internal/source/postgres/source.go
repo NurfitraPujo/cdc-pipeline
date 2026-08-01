@@ -25,6 +25,10 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	// libpq is aliased (not "pq") because that name is already taken by the
+	// vendored github.com/Trendyol/go-pq-cdc/pq package above; only
+	// QuoteIdentifier is used, for AlterPublication's DDL string.
+	libpq "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -214,7 +218,13 @@ type PostgresSource struct {
 	mu       sync.RWMutex
 	config   protocol.SourceConfig
 	oidMu    sync.RWMutex
-	oidCache map[uint32]string
+	oidCache map[uint32]string // pg_type OID -> typname (primeOIDCache); unrelated to relationCache below
+	// relationCache maps a WAL relation OID -> its (schema, table) TableRef,
+	// populated from format.Relation.Namespace/Name (cacheRelation). Kept
+	// separate from oidCache (a different OID namespace, pg_type vs
+	// pg_class) rather than folding schema into that existing map, which
+	// would conflate two unrelated caches. Guarded by the same oidMu.
+	relationCache map[uint32]protocol.TableRef
 
 	// metricPort is the static Prometheus metrics port used by the
 	// underlying go-pq-cdc connector. When > 0 the same port is reused
@@ -275,6 +285,7 @@ func NewPostgresSource(name string) *PostgresSource {
 	return &PostgresSource{
 		name:                  name,
 		oidCache:              make(map[uint32]string),
+		relationCache:         make(map[uint32]protocol.TableRef),
 		ackMgr:                NewAckManager(nil),
 		connectorFactory:      defaultConnectorFactory,
 		slotConfirmedFlushLSN: queryConfirmedFlushLSN,
@@ -420,6 +431,23 @@ func (s *PostgresSource) Name() string {
 	return s.name
 }
 
+// tableRefFromConfigEntry parses a srcConfig.Tables entry (bare "orders" or
+// schema-qualified "sales.orders") into a TableRef, falling back to a bare
+// public ref rather than silently dropping identity -- protocol.SourceConfig
+// .Validate() should already reject anything that reaches here with "=" or
+// more than one ".". This is the ONLY place a config.Tables string is turned
+// into a TableRef in this package; every consumer below (knownTables,
+// pubTables, the schema-priming loop) threads the resulting ref rather than
+// re-deriving it from the raw string (MULTI_SCHEMA_PLAN.md §11.2 requirement
+// 3 -- mirrors internal/engine/producer.go's tableRefFromConfigEntry).
+func tableRefFromConfigEntry(s string) protocol.TableRef {
+	ref, err := protocol.ParseTableRef(s)
+	if err != nil {
+		return protocol.TableRef{Schema: "public", Table: s}
+	}
+	return ref
+}
+
 // handlerKind classifies what buildMessage did with a single replication
 // event, so the (unlocked) outer closure knows what follow-up action —
 // triggerFlush / AckManager bookkeeping — to take.
@@ -449,27 +477,33 @@ type handlerResult struct {
 	lsn  uint64
 }
 
-// cacheRelation records an OID -> table-name mapping. It exists so the
-// write happens under a DEFERRED unlock: a nil-map assignment (or any other
-// panic) must not strand s.oidMu, which would deadlock every subsequent
-// handler invocation and silently wedge the source. Same reasoning as
-// buildMessage's own deferred unlock.
-func (s *PostgresSource) cacheRelation(oid uint32, name string) {
+// cacheRelation records an OID -> TableRef mapping (schema AND bare table
+// name -- a Relation message is the only place the namespace is carried
+// explicitly for a given OID, so both must be cached together; caching only
+// the bare name here would silently lose the schema for any DML message
+// that arrives with an empty TableName/TableNamespace and has to fall back
+// to this cache, see buildMessage). It exists so the write happens under a
+// DEFERRED unlock: a nil-map assignment (or any other panic) must not
+// strand s.oidMu, which would deadlock every subsequent handler invocation
+// and silently wedge the source. Same reasoning as buildMessage's own
+// deferred unlock.
+func (s *PostgresSource) cacheRelation(oid uint32, schema, name string) {
 	s.oidMu.Lock()
 	defer s.oidMu.Unlock()
 	// Deliberately NOT nil-guarded: the map is initialised in
 	// NewPostgresSource, and TestHandler_PanicSafety_MuNotStranded forces a
 	// nil map here precisely to prove that a panic under this lock is
 	// survivable. Adding a guard would make that test vacuous.
-	s.oidCache[oid] = name
+	s.relationCache[oid] = protocol.TableRef{Schema: protocol.NormalizeSchema(schema), Table: name}
 }
 
-// lookupRelationName resolves an OID to a cached table name under a
+// lookupRelationName resolves an OID to a cached TableRef under a
 // deferred read-unlock, for the same panic-safety reason as cacheRelation.
-func (s *PostgresSource) lookupRelationName(oid uint32) string {
+// The zero value (TableRef{}) means "not cached".
+func (s *PostgresSource) lookupRelationName(oid uint32) protocol.TableRef {
 	s.oidMu.RLock()
 	defer s.oidMu.RUnlock()
-	return s.oidCache[oid]
+	return s.relationCache[oid]
 }
 
 // buildMessage performs the entire message-construction critical section
@@ -483,43 +517,33 @@ func (s *PostgresSource) lookupRelationName(oid uint32) string {
 // buildMessage must never perform a blocking operation (triggerFlush,
 // AckManager calls, channel sends) — those happen in the caller, after
 // this method returns and mu has been released.
-func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool) handlerResult {
+func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[protocol.TableRef]bool) handlerResult {
 	mu.Lock()
 	defer mu.Unlock()
 
 	switch msg := lc.Message.(type) {
 	case *format.Relation:
-		s.cacheRelation(msg.OID, msg.Name)
-		log.Info().Str("table", msg.Name).Uint32("oid", msg.OID).Msg("PostgresSource: Received relation")
+		s.cacheRelation(msg.OID, msg.Namespace, msg.Name)
+		log.Info().Str("schema", msg.Namespace).Str("table", msg.Name).Uint32("oid", msg.OID).Msg("PostgresSource: Received relation")
 		return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 
 	case *format.Insert:
-		tableName := msg.TableName
-		if tableName == "" {
-			tableName = s.lookupRelationName(msg.OID)
-		}
-
-		cleanName := strings.TrimPrefix(tableName, "public.")
-		if tableName == "" || !knownTables[cleanName] {
+		ref, ok := s.resolveDMLTableRef(msg.OID, msg.TableNamespace, msg.TableName, knownTables)
+		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
 		sani := sanitizePayload(msg.Decoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 
 	case *format.Update:
-		tableName := msg.TableName
-		if tableName == "" {
-			tableName = s.lookupRelationName(msg.OID)
-		}
-
-		cleanName := strings.TrimPrefix(tableName, "public.")
-		if tableName == "" || !knownTables[cleanName] {
+		ref, ok := s.resolveDMLTableRef(msg.OID, msg.TableNamespace, msg.TableName, knownTables)
+		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
 		sani := sanitizePayload(msg.NewDecoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 
@@ -527,9 +551,14 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		if msg.EventType != format.SnapshotEventTypeData {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
-		tableName := msg.Table
-		cleanName := strings.TrimPrefix(tableName, "public.")
-		if tableName == "" || !knownTables[cleanName] {
+		// Snapshot carries schema and table as separate fields already
+		// (unlike the pre-multi-schema TrimPrefix("public.") assumption);
+		// no OID/relation-cache fallback exists for snapshot rows.
+		if msg.Table == "" {
+			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+		}
+		ref := protocol.TableRef{Schema: protocol.NormalizeSchema(msg.Schema), Table: msg.Table}
+		if !knownTables[ref] {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
 		sani := sanitizePayload(msg.Data)
@@ -537,22 +566,17 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		// the emitted message and this kind is never Observed. Their
 		// durability story is JetStream + the vendored chunk-job state,
 		// not the replication watermark.
-		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: 0, UUID: uuid.New().String()}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: 0, UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindSnapshot}
 
 	case *format.Delete:
-		tableName := msg.TableName
-		if tableName == "" {
-			tableName = s.lookupRelationName(msg.OID)
-		}
-
-		cleanName := strings.TrimPrefix(tableName, "public.")
-		if tableName == "" || !knownTables[cleanName] {
+		ref, ok := s.resolveDMLTableRef(msg.OID, msg.TableNamespace, msg.TableName, knownTables)
+		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
 		sani := sanitizePayload(msg.OldDecoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: cleanName, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 	}
@@ -561,6 +585,34 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 	// like a filtered event so it self-acks through AckManager rather
 	// than stalling the watermark.
 	return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
+}
+
+// resolveDMLTableRef derives the TableRef for an Insert/Update/Delete event
+// and reports whether it is present in knownTables. This is the
+// MULTI_SCHEMA_PLAN.md §3 Stage 2 "highest-risk edit": a partial change here
+// makes every non-matching event handlerKindFiltered -- self-acked,
+// watermark advanced, row dropped forever, no error, invisible to any
+// public-only test -- so both the schema and table components MUST come
+// from the same source (never table-only) before being checked against
+// knownTables (itself keyed by TableRef, not a bare string).
+//
+// tableNamespace/tableName come directly off the wire message; the vendored
+// library populates both from the cached Relation on every DML message
+// (format.Insert/Update/Delete.decode), but an empty tableName falls back
+// to the OID relation cache (cacheRelation) rather than being treated as
+// having no schema -- discarding the cached namespace here would silently
+// misfile a non-public table into the "public" bucket instead of correctly
+// filtering or matching it.
+func (s *PostgresSource) resolveDMLTableRef(oid uint32, tableNamespace, tableName string, knownTables map[protocol.TableRef]bool) (protocol.TableRef, bool) {
+	if tableName == "" {
+		ref := s.lookupRelationName(oid)
+		if ref.Table == "" {
+			return protocol.TableRef{}, false
+		}
+		return ref, knownTables[ref]
+	}
+	ref := protocol.TableRef{Schema: protocol.NormalizeSchema(tableNamespace), Table: tableName}
+	return ref, knownTables[ref]
 }
 
 // createHandler builds the replication callback. strictAck is the
@@ -579,7 +631,7 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 //     stay live for the §6 bake period) but are harmless no-ops here
 //     because they can only ever report vendored stream.go's monotonic
 //     max(lastXLogPos, lsn), never regress it.
-func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func(), strictAck bool) func(lc *replication.ListenerContext) {
+func (s *PostgresSource) createHandler(mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[protocol.TableRef]bool, triggerFlush func(), strictAck bool) func(lc *replication.ListenerContext) {
 	return func(lc *replication.ListenerContext) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -748,11 +800,14 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	// case after close(msgChan), which panics (send on closed channel).
 	var flushWg sync.WaitGroup
 	var flushClosed bool
-	knownTables := make(map[string]bool)
+	// knownTables is keyed by TableRef -- MULTI_SCHEMA_PLAN.md §3 Stage 2:
+	// the dual bare/qualified string entries this replaced could not tell
+	// "sales.users" and "public.users" apart, and could not represent
+	// "sales.users" at all (see buildMessage/resolveDMLTableRef, the only
+	// readers of this map).
+	knownTables := make(map[protocol.TableRef]bool)
 	for _, t := range srcConfig.Tables {
-		cleanTable := strings.TrimPrefix(t, "public.")
-		knownTables["public."+cleanTable] = true
-		knownTables[cleanTable] = true
+		knownTables[tableRefFromConfigEntry(t)] = true
 	}
 
 	triggerFlush := func() {
@@ -775,9 +830,15 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 		}
 	}
 
+	// Schema MUST be set explicitly on every entry (MULTI_SCHEMA_PLAN.md §3
+	// Stage 2 item 3 / §1 defect 3): an empty Schema falls through to the
+	// vendored default at internal/vendor/go-pq-cdc/pq/publication/config.go
+	// ("public", hardcoded), so a config entry naming "sales.orders" would
+	// silently ask PostgreSQL to publish "public.orders" instead.
 	pubTables := make(publication.Tables, len(srcConfig.Tables))
 	for i, t := range srcConfig.Tables {
-		pubTables[i] = publication.Table{Name: t, ReplicaIdentity: "DEFAULT"}
+		ref := tableRefFromConfigEntry(t)
+		pubTables[i] = publication.Table{Name: ref.Table, Schema: ref.Schema, ReplicaIdentity: "DEFAULT"}
 	}
 
 	// strictAck resolves the §6 feature flag once per Start call. See
@@ -786,9 +847,23 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 	// single replication session never straddles both handler behaviours.
 	strictAck := resolveStrictAck()
 
+	// searchPath pins the vendored connector's regular (non-replication)
+	// connection to exactly the configured schema whitelist (vendored-patch
+	// MS-1, config.Config.SearchPath -- see that field's doc for why
+	// ReplicationDSN is deliberately excluded and for the Stage 4 follow-up
+	// this creates). Same "empty means public only" semantics as
+	// discoverTables, for the same reason (§8 item 4): every existing
+	// deployment has Schemas empty today.
+	searchSchemas := srcConfig.Schemas
+	if len(searchSchemas) == 0 {
+		searchSchemas = []string{"public"}
+	}
+	searchPath := strings.Join(searchSchemas, ",")
+
 	cfg := config.Config{
 		Host: srcConfig.Host, Port: srcConfig.Port, Username: srcConfig.User, Password: srcConfig.PassEncrypted, Database: srcConfig.Database,
-		Slot: slot.Config{Name: srcConfig.SlotName, CreateIfNotExists: true},
+		SearchPath: searchPath,
+		Slot:       slot.Config{Name: srcConfig.SlotName, CreateIfNotExists: true},
 		Publication: publication.Config{
 			Name: srcConfig.PublicationName, CreateIfNotExists: true, Tables: pubTables,
 			Operations: publication.Operations{publication.OperationInsert, publication.OperationUpdate, publication.OperationDelete},
@@ -1148,7 +1223,7 @@ func (s *PostgresSource) persistWatermark(wm uint64) {
 	}
 }
 
-func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Context, checkpoint protocol.Checkpoint, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func(), batchWait time.Duration, discoveryInterval time.Duration, srcConfig protocol.SourceConfig, flushWg *sync.WaitGroup, flushClosed *bool) {
+func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Context, checkpoint protocol.Checkpoint, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[protocol.TableRef]bool, triggerFlush func(), batchWait time.Duration, discoveryInterval time.Duration, srcConfig protocol.SourceConfig, flushWg *sync.WaitGroup, flushClosed *bool) {
 	log.Info().Uint64("lsn", checkpoint.IngressLSN).Msg("Starting connector loop")
 
 	if batchWait == 0 {
@@ -1160,7 +1235,7 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 
 	// Prime initial schemas synchronously BEFORE starting connector to prevent race with first data messages
 	for _, t := range srcConfig.Tables {
-		cleanTable := strings.TrimPrefix(t, "public.")
+		ref := tableRefFromConfigEntry(t)
 		// T1-24 / T1-3 hardening: s.db may be nil when startConnector is
 		// invoked outside the Start path (e.g. by a test that swaps the
 		// connector factory). In that case there is no live database to
@@ -1169,11 +1244,11 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 		if s.db == nil {
 			break
 		}
-		cols, pks, err := s.getTableMetadata(sourceCtx, s.db, "public", cleanTable)
+		cols, pks, err := s.getTableMetadata(sourceCtx, s.db, ref.Schema, ref.Table)
 		if err == nil {
 			m := protocol.Message{
-				SourceID: srcConfig.ID, Table: cleanTable, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
-				Schema: &protocol.SchemaMetadata{Table: cleanTable, Schema: "public", Columns: cols, PKColumns: pks},
+				SourceID: srcConfig.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
+				Schema: &protocol.SchemaMetadata{Table: ref.Table, Schema: ref.Schema, Columns: cols, PKColumns: pks},
 			}
 			mu.Lock()
 			*msgs = append(*msgs, m)
@@ -1439,7 +1514,16 @@ func (s *PostgresSource) Stop() error {
 	return nil
 }
 
-
+// AlterPublication issues ALTER PUBLICATION ... ADD TABLE for tableName,
+// which may be bare ("orders") or schema-qualified ("sales.orders") --
+// MULTI_SCHEMA_PLAN.md §3 Stage 2 item 3. It is always emitted as a quoted,
+// schema-qualified identifier ("schema"."table") rather than the previous
+// raw %s interpolation of the caller's string: unquoted, an unqualified
+// name resolves against whatever search_path this DB connection happens to
+// have, which becomes actively wrong once the replication connection's
+// search_path is pinned to a non-public schema (see Start's search_path
+// pinning below) -- and raw interpolation of an operator-controlled table
+// name is also a SQL-injection surface this closes as a side effect.
 func (s *PostgresSource) AlterPublication(ctx context.Context, tableName string) error {
 	s.mu.RLock()
 	db := s.db
@@ -1450,11 +1534,14 @@ func (s *PostgresSource) AlterPublication(ctx context.Context, tableName string)
 		return fmt.Errorf("database connection not initialized")
 	}
 
+	ref := tableRefFromConfigEntry(tableName)
+	quotedTable := libpq.QuoteIdentifier(ref.Schema) + "." + libpq.QuoteIdentifier(ref.Table)
+
 	// Retry logic for "publication does not exist" which can happen due to replication lag or race
 	var lastErr error
 	for i := 0; i < 10; i++ {
 		execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", pubName, tableName)
+		query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", pubName, quotedTable)
 		_, err := db.ExecContext(execCtx, query)
 		cancel()
 
@@ -1537,9 +1624,38 @@ func (s *PostgresSource) getTableMetadata(ctx context.Context, db *sql.DB, schem
 	return cols, pks, nil
 }
 
-func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConfig protocol.SourceConfig, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[string]bool, triggerFlush func()) {
-	query := "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-	rows, err := db.QueryContext(ctx, query)
+// discoverTables polls information_schema for new tables in the
+// whitelisted schemas (MULTI_SCHEMA_PLAN.md §3 Stage 2).
+//
+// CRITICAL SEMANTIC (plan §8 item 4): an empty/nil srcConfig.Schemas means
+// "public" ONLY, NOT all schemas. Every existing config has Schemas empty
+// today (the field was collected by the UI and stored in KV but never read
+// by any backend code path before this), so treating empty as "all schemas"
+// would silently start replicating every schema in the database the moment
+// this ships -- see the (now corrected) doc comment on the generated
+// SourceConfig.Schemas field (internal/api/generated.go, sourced from
+// docs/openapi.yaml).
+func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConfig protocol.SourceConfig, mu *sync.Mutex, msgs *[]protocol.Message, knownTables map[protocol.TableRef]bool, triggerFlush func()) {
+	schemas := srcConfig.Schemas
+	if len(schemas) == 0 {
+		schemas = []string{"public"}
+	}
+
+	// table_type = 'BASE TABLE' excludes views/foreign tables, which cannot
+	// be added to a logical replication publication. The schema exclusions
+	// are a defence-in-depth belt: table_schema = ANY($1) already scopes to
+	// the configured whitelist, but a misconfigured Schemas entry naming a
+	// system schema must never be able to pull catalog/temp tables into
+	// discovery.
+	query := `
+		SELECT table_schema, table_name
+		FROM information_schema.tables
+		WHERE table_schema = ANY($1)
+		  AND table_type = 'BASE TABLE'
+		  AND table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+		  AND table_schema NOT LIKE 'pg_temp_%'
+	`
+	rows, err := db.QueryContext(ctx, query, schemas)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to discover tables")
 		return
@@ -1548,31 +1664,32 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 
 	foundNew := false
 	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
+		var schema, tableName string
+		if err := rows.Scan(&schema, &tableName); err != nil {
 			continue
 		}
+		ref := protocol.TableRef{Schema: protocol.NormalizeSchema(schema), Table: tableName}
 
-		if !knownTables["public."+tableName] {
-			log.Info().Str("table", tableName).Msg("New table discovered")
+		if !knownTables[ref] {
+			log.Info().Str("schema", ref.Schema).Str("table", ref.Table).Msg("New table discovered")
 			if strings.Contains(tableName, "cdc_snapshot") {
-				knownTables["public."+tableName] = true
+				knownTables[ref] = true
 				continue
 			}
 
-			cols, pks, err := s.getTableMetadata(ctx, db, "public", tableName)
+			cols, pks, err := s.getTableMetadata(ctx, db, ref.Schema, ref.Table)
 			if err != nil {
-				log.Error().Err(err).Str("table", tableName).Msg("Failed to get metadata for discovered table")
+				log.Error().Err(err).Str("schema", ref.Schema).Str("table", ref.Table).Msg("Failed to get metadata for discovered table")
 				continue
 			}
 
 			m := protocol.Message{
-				SourceID: srcConfig.ID, Table: tableName, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
-				Schema: &protocol.SchemaMetadata{Table: tableName, Schema: "public", Columns: cols, PKColumns: pks},
+				SourceID: srcConfig.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpSchemaChange, Timestamp: time.Now(),
+				Schema: &protocol.SchemaMetadata{Table: ref.Table, Schema: ref.Schema, Columns: cols, PKColumns: pks},
 			}
 			mu.Lock()
 			*msgs = append(*msgs, m)
-			knownTables["public."+tableName] = true
+			knownTables[ref] = true
 			mu.Unlock()
 			foundNew = true
 		}

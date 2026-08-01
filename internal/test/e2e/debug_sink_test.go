@@ -76,7 +76,7 @@ func TestE2E_MultiSink_Debug(t *testing.T) {
 	// Check that it's masked in Databend
 	require.Eventually(t, func() bool {
 		var maskedName string
-		err := env.Databend.QueryRow("SELECT name FROM multi_test LIMIT 1").Scan(&maskedName)
+		err := env.Databend.QueryRow("SELECT name FROM public.multi_test LIMIT 1").Scan(&maskedName)
 		if err != nil {
 			return false
 		}

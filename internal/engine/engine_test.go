@@ -27,7 +27,7 @@ func TestConsumer_LoadStats(t *testing.T) {
 
 	st := protocol.TableStats{Status: "ACTIVE", TotalSynced: 100}
 	data, _ := json.Marshal(st)
-	key := protocol.TableStatsKey("p1", "s1", "sink1", "t1")
+	key := protocol.TableStatsKey("p1", "s1", "sink1", protocol.TableRef{Schema: "public", Table: "t1"})
 	mockKV.EXPECT().Get(key).Return(mockEntry{value: data}, nil)
 
 	c.LoadStats("s1", []string{"t1"})

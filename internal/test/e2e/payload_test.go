@@ -56,7 +56,7 @@ func TestE2E_LargePayload(t *testing.T) {
 
 	// Verify integrity
 	var textLen int
-	err = env.Databend.QueryRow("SELECT length(large_text) FROM large_payloads WHERE id = 1").Scan(&textLen)
+	err = env.Databend.QueryRow("SELECT length(large_text) FROM public.large_payloads WHERE id = 1").Scan(&textLen)
 	require.NoError(t, err)
 	require.Equal(t, len(largeText), textLen, "Text length mismatch")
 

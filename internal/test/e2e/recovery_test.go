@@ -82,7 +82,7 @@ func TestE2E_CheckpointResume_HardKill(t *testing.T) {
 	t.Log("Waiting for messages to reach Databend (at least some)...")
 	require.Eventually(t, func() bool {
 		var count int
-		env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&count)
+		env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&count)
 		return count > 0 && count < rowCount
 	}, 30*time.Second, 500*time.Millisecond)
 
@@ -100,7 +100,7 @@ func TestE2E_CheckpointResume_HardKill(t *testing.T) {
 
 	// Final verification
 	var finalCount int
-	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, finalCount, rowCount, "Data integrity: expected at least %d rows, got %d", rowCount, finalCount)
 
@@ -171,7 +171,7 @@ func TestE2E_NATSReconnection_Partition(t *testing.T) {
 	env.EventuallyCountDatabend(tableName, rowCount+1, 60*time.Second)
 
 	var finalCount int
-	err = env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err = env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 	require.Equal(t, rowCount+1, finalCount, "Data integrity after NATS partition: expected %d, got %d", rowCount+1, finalCount)
 }

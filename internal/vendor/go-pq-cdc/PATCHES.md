@@ -61,6 +61,78 @@ This document tracks local divergences from the upstream `go-pq-cdc` library.
 
 ---
 
+## MS-1: `search_path` Pinning on the Regular (Non-Replication) Connection
+
+**Upstream Issue**: TBD (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 resolved decision 10)
+
+**Files Modified**:
+- `config/config.go`
+
+**Problem**: The embedding application (`internal/source/postgres`) fully qualifies every
+identifier it emits (see MULTI_SCHEMA_PLAN.md §2), but this vendored library itself issues several
+unqualified queries against `cfg.DSN()` connections (most notably `pq/snapshot/coordinator.go`'s
+`cdc_snapshot_job`/`cdc_snapshot_chunks` bookkeeping tables), which resolve against whatever
+`search_path` the connection happens to have -- always `public` by default, regardless of which
+schema(s) the embedder configured.
+
+**Fix**: Added `Config.SearchPath string`. When non-empty, `DSN()` and `DSNWithoutSSL()` append a
+`options=-c search_path=<value>` libpq startup parameter, pinning the connection's `search_path`
+for its entire lifetime -- including across reconnects, since every reconnect re-derives the DSN
+string from the same `Config.SearchPath` value rather than issuing a one-time `SET` command.
+`ReplicationDSN()` is deliberately left unpinned: that connection opens with
+`replication=database` and only ever speaks the logical replication protocol (never arbitrary
+SQL), so `search_path` has no unqualified identifier to resolve there.
+
+**Known consequence, FIXED by MS-2**: once `SearchPath` names a non-public schema first, the
+coordinator's formerly-hardcoded `'public'` existence checks became actively wrong --
+`CREATE TABLE cdc_snapshot_job` (unqualified) landed in the pinned schema while the checks still
+looked in `public`, so `initTables` never found the table it had just created and re-ran
+`CREATE TABLE` (erroring) on every restart. **MS-2 resolves this**; see that section. This
+paragraph is retained because MS-1 alone reintroduces the bug if MS-2 is not replayed with it.
+
+**Backward Compatibility**: `SearchPath` defaults to `""`, in which case `DSN()`/`DSNWithoutSSL()`
+are byte-identical to before this patch and `ReplicationDSN()` is never touched.
+
+---
+
+## MS-2: Schema-Aware Snapshot Bookkeeping (`cdc_snapshot_*`)
+
+**Upstream Issue**: TBD (MULTI_SCHEMA_PLAN.md §3 Stage 4, §11.2 requirement 7)
+
+**MUST be replayed together with MS-1.** MS-1 pins `search_path`; without MS-2 that pinning
+actively breaks snapshotting (see MS-1's "Known consequence").
+
+**Files Modified**:
+- `pq/snapshot/snapshot.go`
+- `pq/snapshot/coordinator.go`
+- `connector.go`
+
+**Problem**: the snapshot coordinator created its `cdc_snapshot_job` / `cdc_snapshot_chunks`
+bookkeeping tables with *unqualified* DDL -- so they landed in whatever schema `search_path`
+resolved to -- while `tableExists`/`indexExists` hardcoded `table_schema = 'public'` /
+`schemaname = 'public'`. Create and check therefore consulted different schemas as soon as MS-1
+pinned a non-public `search_path`, and `initTables` re-ran `CREATE TABLE` on every restart. Both
+helpers also interpolated the table name directly into the SQL string.
+
+**Fix**: `Snapshotter` gained a `metadataSchema` field, resolved once in `New()` by
+`resolveMetadataSchema()` (the first comma-separated entry of `SearchPath`, mirroring how Postgres
+itself resolves an unqualified `CREATE`). `initTables` builds `qualifiedJobTable`/
+`qualifiedChunksTable` from that single field and passes the same field to `tableExists`/
+`indexExists`, which now take an explicit `schema` parameter. Create and check cannot drift,
+because there is no second source of the schema name. Identifiers are quoted via
+`libpq.QuoteLiteral` as defence in depth. `connector.go` threads `cfg.SearchPath` into `New()`.
+
+**Known residual (benign, documented deliberately)**: DML in `worker.go`, `job.go` and
+`coordinator.go` (and `migrateSchema`'s `ALTER TABLE`) remains unqualified and resolves via the
+pinned `search_path`. Because create and check agree on `metadataSchema`, this is consistent. It
+would only matter against a database that already holds `cdc_snapshot_*` tables in a *later*
+`search_path` entry.
+
+**Backward Compatibility**: with `SearchPath == ""`, `resolveMetadataSchema()` yields `public` and
+every query is equivalent to the pre-patch hardcoded form.
+
+---
+
 ## T0-1: Manual-Commit Mode, Keepalive Callback, and Monotonic Position
 
 **Upstream Issue**: N/A (new opt-in feature, tracked internally as plan `01a_delivery_source_ack.md`)

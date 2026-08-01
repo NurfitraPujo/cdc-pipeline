@@ -110,8 +110,15 @@ func (m *ConfigManager) GetKV() nats.KeyValue {
 	return m.kv
 }
 
+// table accepts a bare or schema-qualified identifier (e.g. "orders" or
+// "sales.orders") and is normalised into the canonical TableRef/KeyToken()
+// form before being used as a KV key (MULTI_SCHEMA_PLAN.md §2.1-2.3).
 func (m *ConfigManager) UpdateSchemaStateCAS(ctx context.Context, pipelineID, table string, state protocol.SchemaEvolutionState, revision uint64) (uint64, error) {
-	key := protocol.SchemaEvolutionKey(pipelineID, table)
+	ref, err := protocol.ParseTableRef(table)
+	if err != nil {
+		return 0, fmt.Errorf("invalid table reference %q: %w", table, err)
+	}
+	key := protocol.SchemaEvolutionKey(pipelineID, ref)
 	val, err := state.MarshalMsg(nil)
 	if err != nil {
 		return 0, err
@@ -123,8 +130,13 @@ func (m *ConfigManager) UpdateSchemaStateCAS(ctx context.Context, pipelineID, ta
 	return m.kv.Update(key, val, revision)
 }
 
+// table accepts a bare or schema-qualified identifier; see UpdateSchemaStateCAS.
 func (m *ConfigManager) GetSchemaState(pipelineID, table string) (protocol.SchemaEvolutionState, uint64, error) {
-	key := protocol.SchemaEvolutionKey(pipelineID, table)
+	ref, err := protocol.ParseTableRef(table)
+	if err != nil {
+		return protocol.SchemaEvolutionState{}, 0, fmt.Errorf("invalid table reference %q: %w", table, err)
+	}
+	key := protocol.SchemaEvolutionKey(pipelineID, ref)
 	entry, err := m.kv.Get(key)
 	if err != nil {
 		if err == nats.ErrKeyNotFound {

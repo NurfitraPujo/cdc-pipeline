@@ -5,6 +5,7 @@ import (
 	goerrors "errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,16 @@ type Snapshotter struct {
 	cachedSnapshotID   string
 	tables             publication.Tables
 	config             config.SnapshotConfig
-	orderByMu          sync.RWMutex
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - the schema
+	// the cdc_snapshot_job/cdc_snapshot_chunks bookkeeping tables are created in
+	// and checked against. Resolved once, in New(), from the same SearchPath the
+	// metadataConn's DSN pins (vendored-patch MS-1) -- see resolveMetadataSchema.
+	// Keeping this as an explicit field (rather than re-deriving it at each call
+	// site, or trusting the connection's live search_path) means initTables'
+	// CREATE TABLE and tableExists'/indexExists' existence checks are
+	// structurally guaranteed to agree: both read this one field.
+	metadataSchema string
+	orderByMu      sync.RWMutex
 }
 
 type orderByCacheEntry struct {
@@ -49,19 +59,52 @@ type orderByCacheEntry struct {
 }
 
 // vendored-patch: T1-4 - Deferred connection establishment to avoid eager allocation when snapshot is skipped
-func New(snapshotConfig config.SnapshotConfig, tables publication.Tables, dsn string, m metric.Metric) *Snapshotter {
+//
+// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - gained the
+// searchPath parameter. Before this, initTables' CREATE TABLE statements
+// created cdc_snapshot_job/cdc_snapshot_chunks unqualified (resolving against
+// whatever search_path the metadataConn happened to have -- the same
+// SearchPath value MS-1 pins via dsn), while tableExists/indexExists hardcoded
+// table_schema/schemaname = 'public'. Once a caller pins SearchPath to a
+// non-public schema (Stage 2), the two disagree: the tables land in the
+// pinned schema but the existence check keeps looking in 'public', so
+// initTables never finds what it just created and re-runs CREATE TABLE --
+// erroring "relation already exists" -- on every restart. searchPath is
+// resolved once here into metadataSchema so both sides read the same value.
+func New(snapshotConfig config.SnapshotConfig, tables publication.Tables, dsn string, searchPath string, m metric.Metric) *Snapshotter {
 	// Create decoder cache for efficient type decoding
 	decoderCache := NewDecoderCache()
 
 	return &Snapshotter{
-		dsn:          dsn,
-		decoderCache: decoderCache,
-		config:       snapshotConfig,
-		tables:       tables,
-		typeMap:      pgtype.NewMap(),
-		metric:       m,
-		orderByCache: make(map[string]orderByCacheEntry),
+		dsn:            dsn,
+		decoderCache:   decoderCache,
+		config:         snapshotConfig,
+		tables:         tables,
+		typeMap:        pgtype.NewMap(),
+		metric:         m,
+		orderByCache:   make(map[string]orderByCacheEntry),
+		metadataSchema: resolveMetadataSchema(searchPath),
 	}
+}
+
+// resolveMetadataSchema mirrors Postgres's own unqualified-name resolution
+// rule for an unqualified CREATE TABLE: the first schema named in
+// search_path. searchPath is the same comma-separated value MS-1's
+// Config.SearchPath pins into the DSN (empty when unset, in which case the
+// connection falls back to the server's default search_path, which is
+// "public" for every deployment this library is used against -- see
+// SourceConfig.Schemas' "empty means public only" rule, MULTI_SCHEMA_PLAN.md
+// §8 item 4). vendored-patch: MS-2.
+func resolveMetadataSchema(searchPath string) string {
+	if searchPath == "" {
+		return "public"
+	}
+	first, _, _ := strings.Cut(searchPath, ",")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		return "public"
+	}
+	return first
 }
 
 // vendored-patch: T1-4 - Connect establishes database connections lazily.

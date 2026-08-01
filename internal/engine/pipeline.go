@@ -170,10 +170,14 @@ func (p *Pipeline) runProducer() error {
 	// unknown sink as caught up.
 	sinkFrontier := make(map[string]uint64, len(p.config.Sinks))
 	sinkHasCheckpoint := make(map[string]bool, len(p.config.Sinks))
-	for _, table := range p.config.Tables {
+	for _, cfgEntry := range p.config.Tables {
+		// Normalise the config-shaped entry the same way the hot path's
+		// msgTableRef does, so this reads the same checkpoint key the
+		// consumer wrote (MULTI_SCHEMA_PLAN.md §3 Stage 1).
+		ref := tableRefFromConfigEntry(cfgEntry)
 		// Pull from egress checkpoints for all configured sinks
 		for _, sinkID := range p.config.Sinks {
-			cpKey := protocol.EgressCheckpointKey(p.id, sourceID, sinkID, table)
+			cpKey := protocol.EgressCheckpointKey(p.id, sourceID, sinkID, ref)
 			cpEntry, err := p.producer.kv.Get(cpKey)
 			if err == nil {
 				var cp protocol.Checkpoint

@@ -32,6 +32,7 @@ type TypeChange struct {
 
 type SchemaDiff struct {
 	Table         string                `msg:"tbl" json:"table"`
+	TableSchema   string                `msg:"tsch,omitempty" json:"table_schema,omitempty"`
 	Timestamp     time.Time             `msg:"ts" json:"timestamp"`
 	Source        string                `msg:"src" json:"source"`
 	Added         map[string]string     `msg:"add" json:"added"`
@@ -53,7 +54,8 @@ type RecordAck struct {
 type Message struct {
 	SourceID      string                 `msg:"sid"`
 	SinkID        string                 `msg:"snk,omitempty" json:"sink_id,omitempty"`
-	Table         string                 `msg:"tbl"`
+	Table         string                 `msg:"tbl"`            // bare table name -- never qualified, see MULTI_SCHEMA_PLAN.md §2.2
+	TableSchema   string                 `msg:"tsch,omitempty" json:"table_schema,omitempty"` // sibling schema; "" decodes to "public" via NormalizeSchema
 	Op            OperationType         `msg:"op"` // "insert", "update", "delete", "snapshot", "schema_change"
 	LSN           uint64                 `msg:"lsn"`
 	PK            string                 `msg:"pk"`

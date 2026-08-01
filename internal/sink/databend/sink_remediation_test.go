@@ -37,6 +37,11 @@ type fakeDB struct {
 	// rows iterator.
 	queryFn func(query string, args ...any) (DBRows, error)
 
+	// execErrFn, if set, is consulted by ExecContext for every query and may
+	// return a non-nil error to simulate a specific statement failing (e.g.
+	// an ALTER TABLE) while others succeed.
+	execErrFn func(query string) error
+
 	// closeErr is returned from Close, if set.
 	closeErr error
 }
@@ -49,6 +54,11 @@ func (f *fakeDB) ExecContext(_ context.Context, query string, _ ...any) (sql.Res
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execCalls = append(f.execCalls, query)
+	if f.execErrFn != nil {
+		if err := f.execErrFn(query); err != nil {
+			return nil, err
+		}
+	}
 	return fakeResult{}, nil
 }
 
@@ -147,6 +157,9 @@ func newTestSink(db DBExec, opts ...map[string]interface{}) *DatabendSink {
 		db:               db,
 		pkCache:          make(map[string][]string),
 		pkLoaded:         make(map[string]struct{}),
+		autoCreateSchema: true,
+		provisionedDB:    make(map[string]struct{}),
+		validatedDB:      make(map[string]struct{}),
 		maxPlaceholders:  DefaultMaxPlaceholders,
 		decimalPrecision: DefaultDecimalPrecision,
 		decimalScale:     DefaultDecimalScale,
@@ -499,21 +512,22 @@ func TestRefreshPrimaryKey_RunsOnce_T1_17(t *testing.T) {
 	}
 
 	snk := newTestSink(db)
+	ref := protocol.TableRef{Schema: "public", Table: "t"}
 
 	// First call: should hit SHOW CREATE TABLE.
-	err := snk.refreshPrimaryKey(context.Background(), "t")
+	err := snk.refreshPrimaryKey(context.Background(), ref)
 	require.NoError(t, err)
 	require.Equal(t, 1, scanCalls)
-	assert.Equal(t, []string{"id", "tenant_id"}, snk.pkCache["t"])
+	assert.Equal(t, []string{"id", "tenant_id"}, snk.pkCache["public.t"])
 
 	// Subsequent calls must NOT re-execute SHOW CREATE TABLE.
 	for i := 0; i < 5; i++ {
-		err := snk.refreshPrimaryKey(context.Background(), "t")
+		err := snk.refreshPrimaryKey(context.Background(), ref)
 		require.NoError(t, err)
 	}
 	require.Equal(t, 1, scanCalls)
-	assert.Equal(t, []string{"id", "tenant_id"}, snk.pkCache["t"])
-	assert.InDelta(t, 1.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "t")), 0.0001)
+	assert.Equal(t, []string{"id", "tenant_id"}, snk.pkCache["public.t"])
+	assert.InDelta(t, 1.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "public.t")), 0.0001)
 }
 
 func TestRefreshPrimaryKey_FallbackOnError(t *testing.T) {
@@ -523,10 +537,11 @@ func TestRefreshPrimaryKey_FallbackOnError(t *testing.T) {
 	}
 
 	snk := newTestSink(db)
-	err := snk.refreshPrimaryKey(context.Background(), "missing")
+	ref := protocol.TableRef{Schema: "public", Table: "missing"}
+	err := snk.refreshPrimaryKey(context.Background(), ref)
 	require.Error(t, err)
-	assert.Equal(t, []string{"id"}, snk.pkCache["missing"])
-	assert.InDelta(t, 0.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "missing")), 0.0001)
+	assert.Equal(t, []string{"id"}, snk.pkCache["public.missing"])
+	assert.InDelta(t, 0.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "public.missing")), 0.0001)
 }
 
 func TestRefreshPrimaryKey_NoPrimaryKeyFallsBack(t *testing.T) {
@@ -541,9 +556,39 @@ func TestRefreshPrimaryKey_NoPrimaryKeyFallsBack(t *testing.T) {
 	}
 
 	snk := newTestSink(db)
-	require.NoError(t, snk.refreshPrimaryKey(context.Background(), "no_pk"))
-	assert.Equal(t, []string{"id"}, snk.pkCache["no_pk"])
-	assert.InDelta(t, 0.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "no_pk")), 0.0001)
+	ref := protocol.TableRef{Schema: "public", Table: "no_pk"}
+	require.NoError(t, snk.refreshPrimaryKey(context.Background(), ref))
+	assert.Equal(t, []string{"id"}, snk.pkCache["public.no_pk"])
+	assert.InDelta(t, 0.0, testutil.ToFloat64(SinkPKResolved.WithLabelValues(snk.name, "public.no_pk")), 0.0001)
+}
+
+// TestRefreshPrimaryKey_QualifiesNonPublicSchema is the regression guard for
+// MULTI_SCHEMA_PLAN.md §7.4 item 5: pkCache/pkLoaded MUST be keyed
+// identically between ApplySchema and the upload path. This calls the real
+// refreshPrimaryKey (not a recomputed string) against a non-public schema
+// and asserts the cache key is the qualified "sales.orders" form, and that
+// SHOW CREATE TABLE was issued against the qualified quoted identifier.
+// Reverting refFromMessage/refFromSchemaMeta to key on the bare table name
+// (as attempt 1 did in one of the two places) makes this fail: the cache
+// entry would land under "orders" instead of "sales.orders".
+func TestRefreshPrimaryKey_QualifiesNonPublicSchema(t *testing.T) {
+	db := newFakeDB()
+	var lastQuery string
+	db.scanFn = func(query string, _ []any, dest ...any) error {
+		lastQuery = query
+		if p, ok := dest[0].(*string); ok {
+			*p = "CREATE TABLE t (id INT, PRIMARY KEY (id))"
+		}
+		return nil
+	}
+
+	snk := newTestSink(db)
+	ref := protocol.TableRef{Schema: "sales", Table: "orders"}
+	require.NoError(t, snk.refreshPrimaryKey(context.Background(), ref))
+
+	assert.Equal(t, []string{"id"}, snk.pkCache["sales.orders"])
+	assert.NotContains(t, snk.pkCache, "orders", "must not key the bare, unqualified table name")
+	assert.Contains(t, lastQuery, `"sales"."orders"`)
 }
 
 func TestBatchUpload_UsesResolvedPK_T1_17(t *testing.T) {
@@ -585,8 +630,10 @@ func TestBatchUpload_UsesResolvedPK_T1_17(t *testing.T) {
 
 	// QueryRowScan is invoked once (SHOW CREATE TABLE on the first batch)
 	// because refreshPrimaryKey is gated by pkLoaded. We assert cache state
-	// and the rendered REPLACE INTO clause directly.
-	assert.Equal(t, []string{"tenant_id", "row_id"}, snk.pkCache["t"])
+	// and the rendered REPLACE INTO clause directly. The message carries no
+	// TableSchema, so it normalises to "public" and the cache key is the
+	// qualified "public.t" form.
+	assert.Equal(t, []string{"tenant_id", "row_id"}, snk.pkCache["public.t"])
 
 	// The REPLACE INTO must use the resolved PK columns.
 	require.NotEmpty(t, db.execCalls)
@@ -616,11 +663,11 @@ func TestBatchUpload_DeserializationFailure_DLQ_T1_1(t *testing.T) {
 			{SourceID: "src", Table: "t", Op: protocol.OpInsert, UUID: "u-good", Payload: goodPayload},
 		}
 
-		before := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "t", reasonDeserializationFailed))
+		before := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "public.t", reasonDeserializationFailed))
 
 		require.NoError(t, snk.BatchUpload(context.Background(), messages))
 
-		after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "t", reasonDeserializationFailed))
+		after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "public.t", reasonDeserializationFailed))
 		assert.Equal(t, before+1, after, "DLQ counter must increment by exactly 1 per failed message")
 
 		// Exactly one DLQ publish, for the bad message.
@@ -669,7 +716,7 @@ func TestBatchUpload_DeserializationFailure_DLQ_T1_1(t *testing.T) {
 
 		require.NoError(t, snk.BatchUpload(context.Background(), messages))
 		// Counter still increments regardless of publish success.
-		after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "t", reasonDeserializationFailed))
+		after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "public.t", reasonDeserializationFailed))
 		assert.GreaterOrEqual(t, after, 1.0)
 	})
 }
@@ -683,9 +730,9 @@ func TestBatchUpload_DeserializationFailure_NoPublisher(t *testing.T) {
 		{SourceID: "src", Table: "t", Op: protocol.OpInsert, UUID: "u1", Payload: bad},
 	}
 
-	before := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "t", reasonDeserializationFailed))
+	before := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "public.t", reasonDeserializationFailed))
 	require.NoError(t, snk.BatchUpload(context.Background(), messages))
-	after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "t", reasonDeserializationFailed))
+	after := testutil.ToFloat64(SinkDLQTotal.WithLabelValues(snk.name, "public.t", reasonDeserializationFailed))
 	assert.Equal(t, before+1, after, "counter must increment even without a publisher")
 }
 

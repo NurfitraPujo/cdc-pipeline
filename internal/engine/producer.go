@@ -18,7 +18,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 	"github.com/sony/gobreaker"
@@ -65,6 +65,32 @@ const (
 )
 
 var errPublishRetriesExhausted = errors.New("publisher retries exhausted")
+
+// tableRefFromConfigEntry parses a config.Tables entry (bare "orders" or
+// schema-qualified "sales.orders") into a TableRef, falling back to a bare
+// public ref rather than silently dropping identity -- Validate() should
+// already reject anything that reaches here with "=" or more than one ".".
+// This is the ONLY place a config.Tables string is turned into a TableRef;
+// everything downstream threads the resulting ref (or its KeyToken()),
+// never re-parses the raw string (MULTI_SCHEMA_PLAN.md §11.2 requirement 3).
+func tableRefFromConfigEntry(s string) protocol.TableRef {
+	ref, err := protocol.ParseTableRef(s)
+	if err != nil {
+		return protocol.TableRef{Schema: "public", Table: s}
+	}
+	return ref
+}
+
+// msgTableRef derives the canonical TableRef for a wire message from its
+// (bare) Table and sibling TableSchema fields (MULTI_SCHEMA_PLAN.md §2.2).
+// The source connector and the engine's own message-construction sites
+// (emitSchemaChange, the inline schema-change copy in Run, performChunkedSnapshot,
+// the OpSchemaChangeAck the consumer builds) all set TableSchema as of Stage
+// 2b, so this normalises whatever they wrote -- "" only for legacy/in-flight
+// messages that predate the field, per NormalizeSchema's single rule.
+func msgTableRef(m protocol.Message) protocol.TableRef {
+	return protocol.TableRef{Schema: protocol.NormalizeSchema(m.TableSchema), Table: m.Table}
+}
 
 type producerCircuitBreaker interface {
 	Execute(func() (interface{}, error)) (interface{}, error)
@@ -315,9 +341,18 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					lastLSN = m.LSN
 				}
 
+				// key is this message's KeyToken()-normalised identity,
+				// derived ONCE here from its (bare Table, sibling TableSchema)
+				// fields and threaded through the rest of this iteration. It
+				// replaces bare m.Table as the map key for tableStates/
+				// evoStates/tableToBuffer so a "sales.orders" row and a
+				// "public.orders" row never collide on a shared "orders"
+				// entry (MULTI_SCHEMA_PLAN.md §11.2 requirements 3 and 5).
+				key := msgTableRef(m).KeyToken()
+
 				// 1. Snapshot/Draining State Check
 				p.muTableStates.RLock()
-				tblState := p.tableStates[m.Table]
+				tblState := p.tableStates[key]
 				isSnapshotting := tblState == protocol.TableStateSnapshotting ||
 					tblState == protocol.TableStateDraining ||
 					tblState == protocol.TableStateError
@@ -325,23 +360,27 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 
 				// 2. Schema Evolution Check
 				p.muEvo.RLock()
-				state, exists := p.evoStates[m.Table]
+				state, exists := p.evoStates[key]
 				// Buffer if FROZEN or currently DRAINING
 				isEvoFrozen := exists && (state.Status == protocol.SchemaStatusFrozen || state.Status == protocol.SchemaStatusDraining)
 				p.muEvo.RUnlock()
 
 				if isSnapshotting || isEvoFrozen {
-					tableToBuffer[m.Table] = append(tableToBuffer[m.Table], m)
+					tableToBuffer[key] = append(tableToBuffer[key], m)
 					continue
 				}
 
 				if m.Op == protocol.OpInsert || m.Op == protocol.OpUpdate || m.Op == protocol.OpSnapshot {
 					if diff, changed := p.detectSchemaChange(m); changed {
 						log.Info().Str("table", m.Table).Msg("Schema change detected, freezing table and emitting OpSchemaChange")
-						// Emit OpSchemaChange
+						// Emit OpSchemaChange. Table stays bare (§11.2 rule 2);
+						// TableSchema carries the sibling schema so the
+						// consumer can reconstruct SchemaMetadata.Schema from
+						// this message (see consumer.go's diff handling).
 						scm := protocol.Message{
 							SourceID:      m.SourceID,
 							Table:         m.Table,
+							TableSchema:   m.TableSchema,
 							Op:            protocol.OpSchemaChange,
 							LSN:           m.LSN,
 							Timestamp:     time.Now(),
@@ -360,7 +399,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						}
 
 						// Current message and all subsequent for this table must be buffered
-						tableToBuffer[m.Table] = append(tableToBuffer[m.Table], m)
+						tableToBuffer[key] = append(tableToBuffer[key], m)
 						continue
 					}
 				}
@@ -402,7 +441,12 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					if m.LSN > lastLSN {
 						lastLSN = m.LSN
 					}
-					latestByTable[m.SourceID+"."+m.Table] = m
+					// Grouped by the message's TableRef identity, not bare
+					// m.Table: otherwise a "public.orders" row and a
+					// "sales.orders" row in the same batch collide on one
+					// "sourceID.orders" entry and one of the two checkpoint
+					// writes below is silently dropped.
+					latestByTable[m.SourceID+"."+msgTableRef(m).KeyToken()] = m
 				}
 
 				for _, m := range latestByTable {
@@ -414,7 +458,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 					}
 					cpData, err := cp.MarshalMsg(nil)
 					if err == nil {
-						key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, m.Table)
+						key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, msgTableRef(m))
 						if _, err := p.kv.Put(key, cpData); err != nil {
 							log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating ingress checkpoint")
 						}
@@ -514,7 +558,12 @@ func (p *Producer) publishBufferBatch(ctx context.Context, table string, batch p
 
 	topic := fmt.Sprintf("cdc_pipeline_%s_ingest", p.pipelineID)
 	if shouldBuffer {
-		topic = fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
+		// Sanitized the same way flushBuffer's durable name is (below): a
+		// KeyToken() carrying a schema qualifier never contains "." (it uses
+		// "=" per §2.3), but this keeps the write side and the drain side
+		// derived identically rather than by two different rules that
+		// happen to coincide today (MULTI_SCHEMA_PLAN.md §3 Stage 1).
+		topic = fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, sanitizeDurableComponent(table))
 	}
 
 	return p.publishWithRetry(ctx, topic, wmMsg, maxRetries)
@@ -527,9 +576,18 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 	sid := p.sourceConfig.ID
 	p.mu.RUnlock()
 
-	for _, table := range tables {
+	for _, cfgEntry := range tables {
+		// Normalise the config-shaped entry once here, then use its
+		// KeyToken() as the identity for the rest of this iteration -- this
+		// is what makes recovery meet the hot path's map/KV keys (both are
+		// public-schema bare names today), fixing the §1.1 "recovered table
+		// state discarded" / "buffer streams diverge" bugs where recovery
+		// read raw config.Tables strings and the hot path read m.Table.
+		ref := tableRefFromConfigEntry(cfgEntry)
+		table := ref.KeyToken()
+
 		// 1. Evolution Recovery
-		evoKey := protocol.SchemaEvolutionKey(p.pipelineID, table)
+		evoKey := protocol.SchemaEvolutionKey(p.pipelineID, ref)
 		entry, err := p.kv.Get(evoKey)
 		if err == nil {
 			var st tableEvolution
@@ -552,7 +610,7 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 		}
 
 		// 2. Snapshot Recovery
-		stateKey := protocol.TableStateKey(p.pipelineID, sid, table)
+		stateKey := protocol.TableStateKey(p.pipelineID, sid, ref)
 		entry, err = p.kv.Get(stateKey)
 		state := ""
 		if err == nil {
@@ -570,7 +628,7 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 		}
 
 		// 3. Trigger snapshot if missing checkpoint AND not in Snapshotting/CDC/Draining
-		cpKey := protocol.IngressCheckpointKey(p.pipelineID, sid, table)
+		cpKey := protocol.IngressCheckpointKey(p.pipelineID, sid, ref)
 		_, cpErr := p.kv.Get(cpKey)
 		if cpErr != nil {
 			// If we are starting from LSN 0, go-pq-cdc handles initial snapshot for configured tables.
@@ -585,8 +643,16 @@ func (p *Producer) recoverEvoStates(ctx context.Context) {
 }
 
 func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
+	// key is the ack's KeyToken()-normalised identity, derived once from its
+	// (bare Table, sibling TableSchema) fields -- the consumer now sets
+	// TableSchema on the ack (see Consumer.Run's OpSchemaChangeAck
+	// construction), so this must match the key detectSchemaChange/
+	// performSchemaEvolution used to freeze the table in the first place
+	// (MULTI_SCHEMA_PLAN.md §11.2 requirement 5).
+	key := msgTableRef(ack).KeyToken()
+
 	p.muEvo.Lock()
-	state, ok := p.evoStates[ack.Table]
+	state, ok := p.evoStates[key]
 	if !ok || state.Status != protocol.SchemaStatusFrozen {
 		p.muEvo.Unlock()
 		return
@@ -599,13 +665,13 @@ func (p *Producer) handleSchemaAck(ctx context.Context, ack protocol.Message) {
 	}
 
 	state.AcknowledgedSinks[ack.SinkID] = true
-	p.persistEvoState(ack.Table, state)
+	p.persistEvoState(key, state)
 
 	if len(state.AcknowledgedSinks) >= len(p.config.Sinks) {
-		log.Info().Str("table", ack.Table).Msg("All sinks acknowledged, draining buffer")
+		log.Info().Str("table", key).Msg("All sinks acknowledged, draining buffer")
 		state.Status = protocol.SchemaStatusDraining
-		p.persistEvoState(ack.Table, state)
-		go p.flushBuffer(ctx, ack.Table)
+		p.persistEvoState(key, state)
+		go p.flushBuffer(ctx, key)
 	}
 
 	p.muEvo.Unlock()
@@ -645,7 +711,7 @@ func (p *Producer) flushBuffer(ctx context.Context, table string) {
 		p.bufferDrainMu.Unlock()
 	}()
 
-	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, table)
+	topic := fmt.Sprintf("cdc_pipeline_%s_buffer_%s", p.pipelineID, sanitizeDurableComponent(table))
 	// Stable durable name (not UUID-suffixed): if this drain is interrupted
 	// (process restart, NATS blip) a subsequent flushBuffer for the same
 	// pipeline+table binds to the SAME durable consumer, so JetStream
@@ -877,7 +943,12 @@ func (p *Producer) recheckAndFlipToCDC(ctx context.Context, sourceID, table stri
 
 	p.tableStates[table] = protocol.TableStateCDC
 
-	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
+	// table is already the KeyToken-normalised identity by the time it
+	// reaches this function (derived once at the boundary -- recoverEvoStates
+	// or handleDynamicTables -- and threaded here); recover the TableRef
+	// from it rather than re-parsing a raw string (MULTI_SCHEMA_PLAN.md
+	// §11.2 requirement 3).
+	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, protocol.TableRefFromKeyToken(table))
 	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateCDC)); err != nil {
 		return true, true, fmt.Errorf("persisting CDC table state for %s: %w", table, err)
 	}
@@ -891,10 +962,19 @@ func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff,
 		return nil, false
 	}
 
+	// ref/key derived once here, at the boundary where this message enters
+	// evolution tracking, then threaded through performSchemaEvolution
+	// rather than re-derived from m.Table again (MULTI_SCHEMA_PLAN.md §11.2
+	// requirement 3). evoStates is keyed by key (KeyToken()), not bare
+	// m.Table, so "public.orders" and "sales.orders" get independent freeze
+	// state (requirement 5).
+	ref := msgTableRef(m)
+	key := ref.KeyToken()
+
 	p.muEvo.Lock()
 	defer p.muEvo.Unlock()
 
-	state, ok := p.evoStates[m.Table]
+	state, ok := p.evoStates[key]
 	if !ok {
 		// Initialize with current columns
 		cols := make(map[string]string)
@@ -907,7 +987,7 @@ func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff,
 			LastCheckAt:       time.Now(),
 			AcknowledgedSinks: make(map[string]bool),
 		}
-		p.evoStates[m.Table] = state
+		p.evoStates[key] = state
 		return nil, false
 	}
 
@@ -923,14 +1003,21 @@ func (p *Producer) detectSchemaChange(m protocol.Message) (*protocol.SchemaDiff,
 	}
 
 	if len(added) > 0 {
-		return p.performSchemaEvolution(m.Table, m.SourceID, added)
+		return p.performSchemaEvolution(m.Table, ref, m.SourceID, added)
 	}
 
 	return nil, false
 }
 
-func (p *Producer) performSchemaEvolution(tableName, sourceID string, added map[string]string) (*protocol.SchemaDiff, bool) {
-	state, ok := p.evoStates[tableName]
+// performSchemaEvolution freezes the table identified by ref for schema
+// evolution. tableName is ref.Table (bare, passed separately rather than
+// re-derived) and lands in diff.Table, which -- like Message.Table -- must
+// stay bare (§11.2 rule 2); ref.Schema populates the new SchemaDiff.TableSchema
+// sibling field and ref.KeyToken() is the evoStates/persistEvoState identity
+// (requirement 5).
+func (p *Producer) performSchemaEvolution(tableName string, ref protocol.TableRef, sourceID string, added map[string]string) (*protocol.SchemaDiff, bool) {
+	key := ref.KeyToken()
+	state, ok := p.evoStates[key]
 	if !ok {
 		return nil, false
 	}
@@ -944,14 +1031,15 @@ func (p *Producer) performSchemaEvolution(tableName, sourceID string, added map[
 	state.ChangesThisMin++
 
 	if state.ChangesThisMin > 5 {
-		log.Warn().Str("table", tableName).Msg("Schema change limit exceeded, SUSPENDING table evolution")
+		log.Warn().Str("table", key).Msg("Schema change limit exceeded, SUSPENDING table evolution")
 		state.Status = protocol.SchemaStatusSuspended
-		p.persistEvoState(tableName, state)
+		p.persistEvoState(key, state)
 		return nil, false
 	}
 
 	diff := &protocol.SchemaDiff{
 		Table:         tableName,
+		TableSchema:   ref.Schema,
 		Timestamp:     time.Now(),
 		Source:        sourceID,
 		Added:         added,
@@ -967,15 +1055,20 @@ func (p *Producer) performSchemaEvolution(tableName, sourceID string, added map[
 	}
 
 	// Persist state to KV
-	p.persistEvoState(tableName, state)
+	p.persistEvoState(key, state)
 
 	return diff, true
 }
 
-func (p *Producer) emitSchemaChange(ctx context.Context, sourceID, table string, lsn uint64, diff *protocol.SchemaDiff) error {
+// emitSchemaChange publishes an OpSchemaChange message for ref. Table stays
+// bare (§11.2 rule 2); TableSchema carries ref.Schema as the sibling field so
+// downstream readers (consumer.go's diff-reconstruction, the debug sink, the
+// transformer allowlist) see the same identity that froze the table.
+func (p *Producer) emitSchemaChange(ctx context.Context, sourceID string, ref protocol.TableRef, lsn uint64, diff *protocol.SchemaDiff) error {
 	scm := protocol.Message{
 		SourceID:      sourceID,
-		Table:         table,
+		Table:         ref.Table,
+		TableSchema:   ref.Schema,
 		Op:            protocol.OpSchemaChange,
 		LSN:           lsn,
 		Timestamp:     time.Now(),
@@ -992,7 +1085,9 @@ func (p *Producer) emitSchemaChange(ctx context.Context, sourceID, table string,
 }
 
 func (p *Producer) persistEvoState(table string, state *tableEvolution) error {
-	key := protocol.SchemaEvolutionKey(p.pipelineID, table)
+	// table is already KeyToken-normalised by the caller; see the comment on
+	// recheckAndFlipToCDC's stateKey construction above.
+	key := protocol.SchemaEvolutionKey(p.pipelineID, protocol.TableRefFromKeyToken(table))
 	revision := state.Revision
 	var lastErr error
 
@@ -1055,7 +1150,7 @@ func (p *Producer) pauseTableCDC(table string) {
 		return
 	}
 
-	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, table)
+	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, protocol.TableRefFromKeyToken(table))
 	if _, err := p.kv.Put(stateKey, []byte(protocol.TableStateError)); err != nil {
 		log.Error().Err(err).Str("table", table).Msg("Failed to persist paused table state")
 	}
@@ -1067,10 +1162,23 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		return
 	}
 
+	// ref is derived ONCE here, from the discovery message's SchemaMetadata
+	// (the only place a discovery event's identity is known), then threaded
+	// through the rest of this function -- never re-derived from a raw
+	// string (MULTI_SCHEMA_PLAN.md §11.2 requirement 3).
+	ref := protocol.TableRef{Schema: protocol.NormalizeSchema(m.Schema.Schema), Table: m.Schema.Table}
+	key := ref.KeyToken()
+
 	isNew := true
 	p.mu.RLock()
 	for _, t := range p.config.Tables {
-		if t == m.Schema.Table {
+		// Compare TableRefs, not raw strings: p.config.Tables entries are
+		// config-shaped ("orders" or "sales.orders") while ref comes from
+		// the wire. A shape mismatch here (e.g. "public.orders" vs "orders")
+		// previously made every discovery tick decide isNew, appending
+		// duplicates and re-persisting the pipeline config to KV on every
+		// tick (MULTI_SCHEMA_PLAN.md §3 Stage 2, producer.go:1072-1083).
+		if tableRefFromConfigEntry(t) == ref {
 			isNew = false
 			break
 		}
@@ -1078,13 +1186,18 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 	p.mu.RUnlock()
 
 	if isNew {
-		log.Info().Str("pipeline_id", p.pipelineID).Str("schema", m.Schema.Schema).Str("table", m.Schema.Table).Msg("New table discovered via CDC, starting dynamic addition")
+		log.Info().Str("pipeline_id", p.pipelineID).Str("schema", ref.Schema).Str("table", ref.Table).Msg("New table discovered via CDC, starting dynamic addition")
 		p.mu.Lock()
-		p.config.Tables = append(p.config.Tables, m.Schema.Table)
+		// Store the qualified String() form ("sales.orders"), not the bare
+		// m.Schema.Table: a bare append would lose the schema on the next
+		// restart, since tableRefFromConfigEntry("orders") normalises back
+		// to {public, orders} regardless of what schema this table actually
+		// lives in.
+		p.config.Tables = append(p.config.Tables, ref.String())
 		p.mu.Unlock()
 
 		// 1. Update table metadata in KV
-		metaKey := fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.metadata", p.pipelineID, m.SourceID, m.Table)
+		metaKey := protocol.TableMetadataKey(p.pipelineID, m.SourceID, ref)
 		metaData, err := json.Marshal(m.Schema)
 		if err == nil {
 			if _, err := p.kv.Put(metaKey, metaData); err != nil {
@@ -1099,18 +1212,18 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 		}
 
 		// 3. Trigger dynamic table addition flow - Manager will restart us, and recoverEvoStates will handle it
-		// go p.handleDynamicTables(m.SourceID, []string{m.Schema.Table})
+		// go p.handleDynamicTables(m.SourceID, []string{ref.String()})
 	} else {
 		// ALWAYS warm the schema evolution cache to prevent freeze on first data message
 		p.muEvo.Lock()
-		state, exists := p.evoStates[m.Schema.Table]
+		state, exists := p.evoStates[key]
 		if !exists {
-			log.Info().Str("table", m.Schema.Table).Msg("Warming evolution cache for table")
+			log.Info().Str("table", key).Msg("Warming evolution cache for table")
 			cols := make(map[string]string)
 			for k, v := range m.Schema.Columns {
 				cols[k] = v
 			}
-			p.evoStates[m.Schema.Table] = &tableEvolution{
+			p.evoStates[key] = &tableEvolution{
 				Status:       protocol.SchemaStatusStable,
 				CachedSchema: cols,
 				LastCheckAt:  time.Now(),
@@ -1125,11 +1238,11 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 			}
 
 			if len(added) > 0 {
-				if diff, changed := p.performSchemaEvolution(m.Schema.Table, m.SourceID, added); changed {
-					log.Info().Str("table", m.Schema.Table).Int("new_cols", len(added)).Msg("Schema change detected via discovery, freezing table")
+				if diff, changed := p.performSchemaEvolution(ref.Table, ref, m.SourceID, added); changed {
+					log.Info().Str("table", key).Int("new_cols", len(added)).Msg("Schema change detected via discovery, freezing table")
 					p.muEvo.Unlock()
-					if err := p.emitSchemaChange(ctx, m.SourceID, m.Schema.Table, m.LSN, diff); err != nil {
-						log.Error().Err(err).Str("table", m.Schema.Table).Msg("Failed to publish OpSchemaChange from discovery")
+					if err := p.emitSchemaChange(ctx, m.SourceID, ref, m.LSN, diff); err != nil {
+						log.Error().Err(err).Str("table", key).Msg("Failed to publish OpSchemaChange from discovery")
 					}
 					p.muEvo.Lock()
 				}
@@ -1188,17 +1301,28 @@ func (p *Producer) SetDynamicTablesChan(ctx context.Context, wg *sync.WaitGroup,
 
 func (p *Producer) handleDynamicTables(ctx context.Context, sourceID string, newTables []string) {
 	log.Debug().Str("source_id", sourceID).Strs("table_names", newTables).Msg("Handling new dynamic tables")
-	for _, tableName := range newTables {
-		tableKey := fmt.Sprintf("public.%s", tableName)
+	for _, rawName := range newTables {
+		// Derive the TableRef once, here, at the boundary where a raw
+		// (possibly schema-qualified) config-shaped string enters the
+		// producer -- then thread ref/key through the rest of this
+		// iteration instead of re-deriving from rawName again (attempt 1's
+		// worst bug: MULTI_SCHEMA_PLAN.md §11.2 requirement 3). key is the
+		// KeyToken()-normalised identity used uniformly for the in-memory
+		// maps, KV state, and the buffer stream/durable names; it replaces
+		// the previous hardcoded "public.%s" snapshotInProgress key, which
+		// was already a different shape than the bare tableName used for
+		// TableStateKey a few lines below it.
+		ref := tableRefFromConfigEntry(rawName)
+		key := ref.KeyToken()
 
 		p.snapshotMu.Lock()
-		if p.snapshotInProgress[tableKey] {
-			log.Info().Str("pipeline_id", p.pipelineID).Str("table", tableName).Msg("Snapshot already in progress")
+		if p.snapshotInProgress[key] {
+			log.Info().Str("pipeline_id", p.pipelineID).Str("table", key).Msg("Snapshot already in progress")
 			p.snapshotMu.Unlock()
 			continue
 		}
 
-		stateKey := protocol.TableStateKey(p.pipelineID, sourceID, tableName)
+		stateKey := protocol.TableStateKey(p.pipelineID, sourceID, ref)
 		entry, err := p.kv.Get(stateKey)
 		state := ""
 		if err == nil {
@@ -1206,39 +1330,47 @@ func (p *Producer) handleDynamicTables(ctx context.Context, sourceID string, new
 		}
 
 		if state == protocol.TableStateCDC {
-			log.Info().Str("pipeline_id", p.pipelineID).Str("table", tableName).Msg("Table already in CDC state, skipping snapshot")
+			log.Info().Str("pipeline_id", p.pipelineID).Str("table", key).Msg("Table already in CDC state, skipping snapshot")
 			p.snapshotMu.Unlock()
 			continue
 		}
 
-		log.Info().Str("pipeline_id", p.pipelineID).Str("table", tableName).Str("state", state).Msg("Starting dynamic table addition")
-		p.snapshotInProgress[tableKey] = true
+		log.Info().Str("pipeline_id", p.pipelineID).Str("table", key).Str("state", state).Msg("Starting dynamic table addition")
+		p.snapshotInProgress[key] = true
 		p.snapshotMu.Unlock()
 
-		go func(tbl string, key string) {
+		go func(ref protocol.TableRef, key string) {
 			defer func() {
 				p.snapshotMu.Lock()
 				delete(p.snapshotInProgress, key)
 				p.snapshotMu.Unlock()
 			}()
 
-			if err := p.addTableToPublication(tbl); err != nil {
-				log.Error().Err(err).Str("table", tbl).Msg("Failed to add table to publication")
-				p.setTableState(sourceID, tbl, protocol.TableStateFailed)
+			// ref.String() (always qualified, e.g. "public.orders" or
+			// "sales.orders"), not ref.Table (bare): addTableToPublication ->
+			// AlterPublication re-derives its own TableRef from this string
+			// via tableRefFromConfigEntry, so passing the bare table name
+			// here would silently collapse the schema back to "public"
+			// regardless of ref's actual schema (MULTI_SCHEMA_PLAN.md §11.2
+			// requirement 3 -- the ref must be threaded, not re-derived from
+			// a de-qualified string).
+			if err := p.addTableToPublication(ref.String()); err != nil {
+				log.Error().Err(err).Str("table", key).Msg("Failed to add table to publication")
+				p.setTableState(sourceID, key, protocol.TableStateFailed)
 				return
 			}
 
 			// Transition to Snapshotting
-			p.setTableState(sourceID, tbl, protocol.TableStateSnapshotting)
+			p.setTableState(sourceID, key, protocol.TableStateSnapshotting)
 
-			if err := p.performChunkedSnapshot(sourceID, tbl); err != nil {
-				log.Error().Err(err).Str("table", tbl).Msg("Failed to snapshot new table")
-				p.setTableState(sourceID, tbl, protocol.TableStateFailed)
+			if err := p.performChunkedSnapshot(sourceID, ref); err != nil {
+				log.Error().Err(err).Str("table", key).Msg("Failed to snapshot new table")
+				p.setTableState(sourceID, key, protocol.TableStateFailed)
 				return
 			}
 
 			// Transition to Draining
-			p.setTableState(sourceID, tbl, protocol.TableStateDraining)
+			p.setTableState(sourceID, key, protocol.TableStateDraining)
 
 			// Flush buffer. Uses the pipeline-lifetime ctx threaded in from
 			// SetDynamicTablesChan (not context.Background()): a Background
@@ -1246,13 +1378,13 @@ func (p *Producer) handleDynamicTables(ctx context.Context, sourceID string, new
 			// could never be cancelled by pipeline shutdown, wedging this
 			// goroutine (and, before the transitionTableToCDC fix above, the
 			// producer's write lock) forever.
-			p.flushBuffer(ctx, tbl)
+			p.flushBuffer(ctx, key)
 
 			select {
-			case p.snapshotDoneChan <- tbl:
+			case p.snapshotDoneChan <- key:
 			default:
 			}
-		}(tableName, tableKey)
+		}(ref, key)
 	}
 }
 
@@ -1269,8 +1401,10 @@ func (p *Producer) addTableToPublication(tableName string) error {
 	return alterSrc.AlterPublication(context.Background(), tableName)
 }
 
+// setTableState takes tableName as an already-KeyToken-normalised identity
+// (see handleDynamicTables and recheckAndFlipToCDC's stateKey comment).
 func (p *Producer) setTableState(sourceID, tableName, state string) {
-	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, tableName)
+	stateKey := protocol.TableStateKey(p.pipelineID, sourceID, protocol.TableRefFromKeyToken(tableName))
 	data := []byte(state)
 	if _, err := p.kv.Put(stateKey, data); err != nil {
 		log.Error().Err(err).Str("table", tableName).Str("state", state).Msg("Failed to set table state")
@@ -1280,7 +1414,19 @@ func (p *Producer) setTableState(sourceID, tableName, state string) {
 	p.muTableStates.Unlock()
 }
 
-func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
+// performChunkedSnapshot takes the already-derived TableRef (from
+// handleDynamicTables) rather than a bare/config-shaped string: ref.Table is
+// the bare SQL identifier (and what lands in the snapshot Message.Table,
+// which MUST stay bare -- MULTI_SCHEMA_PLAN.md §11.2 requirement 2; attempt
+// 1's worst regression here was putting a qualified string into it), while
+// ref itself builds the ingress checkpoint key.
+func (p *Producer) performChunkedSnapshot(sourceID string, ref protocol.TableRef) error {
+	tableName := ref.Table
+	// qualifiedTable is the quoted "schema"."table" form used ONLY for SQL
+	// interpolation below. tableName (bare, ref.Table) is what lands in
+	// Message.Table and log fields -- MULTI_SCHEMA_PLAN.md §11.2 requirement
+	// 2 requires Message.Table stay bare with no exceptions.
+	qualifiedTable := quoteTableRef(ref)
 	p.mu.RLock()
 	cfg := p.sourceConfig
 	p.mu.RUnlock()
@@ -1297,7 +1443,7 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 	defer db.Close()
 
 	// 4. Determine Primary Key
-	pkCols, err := p.getPrimaryKey(db, tableName)
+	pkCols, err := p.getPrimaryKey(db, ref)
 	if err != nil {
 		return fmt.Errorf("failed to get primary key: %w", err)
 	}
@@ -1312,7 +1458,7 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 		chunkSize = cfg.SnapshotChunkSize
 	}
 
-	cpKey := protocol.IngressCheckpointKey(p.pipelineID, sourceID, tableName)
+	cpKey := protocol.IngressCheckpointKey(p.pipelineID, sourceID, ref)
 	var lastPKValues []interface{}
 
 	entry, err := p.kv.Get(cpKey)
@@ -1348,18 +1494,18 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 		var args []interface{}
 		if len(lastPKValues) > 0 {
 			if len(pkCols) == 1 {
-				query = fmt.Sprintf("SELECT * FROM %s WHERE %s > $1 ORDER BY %s LIMIT %d", tableName, pkCols[0], pkStr, chunkSize)
+				query = fmt.Sprintf("SELECT * FROM %s WHERE %s > $1 ORDER BY %s LIMIT %d", qualifiedTable, pkCols[0], pkStr, chunkSize)
 				args = append(args, lastPKValues[0])
 			} else {
 				placeholders := make([]string, len(pkCols))
 				for i := range pkCols {
 					placeholders[i] = fmt.Sprintf("$%d", i+1)
 				}
-				query = fmt.Sprintf("SELECT * FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d", tableName, pkStr, strings.Join(placeholders, ", "), pkStr, chunkSize)
+				query = fmt.Sprintf("SELECT * FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d", qualifiedTable, pkStr, strings.Join(placeholders, ", "), pkStr, chunkSize)
 				args = lastPKValues
 			}
 		} else {
-			query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT %d", tableName, pkStr, chunkSize)
+			query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT %d", qualifiedTable, pkStr, chunkSize)
 		}
 
 		rows, err := db.Query(query, args...)
@@ -1405,12 +1551,13 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 
 			pkJSON, _ := json.Marshal(pkData)
 			batch = append(batch, protocol.Message{
-				SourceID:  sourceID,
-				Table:     tableName,
-				Op:        protocol.OpSnapshot,
-				Timestamp: time.Now(),
-				Data:      data,
-				PK:        string(pkJSON),
+				SourceID:    sourceID,
+				Table:       tableName,
+				TableSchema: ref.Schema,
+				Op:          protocol.OpSnapshot,
+				Timestamp:   time.Now(),
+				Data:        data,
+				PK:          string(pkJSON),
 			})
 		}
 		rows.Close()
@@ -1471,7 +1618,23 @@ func (p *Producer) performChunkedSnapshot(sourceID, tableName string) error {
 	return nil
 }
 
-func (p *Producer) getPrimaryKey(db *sql.DB, tableName string) ([]string, error) {
+// quoteTableRef renders ref as a quoted, schema-qualified SQL identifier
+// (e.g. `"sales"."orders"`) suitable for interpolation into a query string.
+// Every information_schema query and every snapshot SELECT built from a
+// TableRef MUST go through this (or an equivalent schema-predicated query)
+// rather than the bare table name -- see MULTI_SCHEMA_PLAN.md §11.2
+// requirement 6: unqualified information_schema queries silently return the
+// wrong (or a unioned) result once the same table name exists in two
+// schemas.
+func quoteTableRef(ref protocol.TableRef) string {
+	return pq.QuoteIdentifier(protocol.NormalizeSchema(ref.Schema)) + "." + pq.QuoteIdentifier(ref.Table)
+}
+
+// getPrimaryKey looks up the primary-key columns for ref, schema-qualified
+// (MULTI_SCHEMA_PLAN.md §11.2 requirement 6). Filtering on tc.table_name
+// alone -- the pre-multi-schema behaviour -- returns the wrong constraint
+// whenever the same table name exists in two schemas.
+func (p *Producer) getPrimaryKey(db *sql.DB, ref protocol.TableRef) ([]string, error) {
 	query := `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
@@ -1479,10 +1642,11 @@ func (p *Producer) getPrimaryKey(db *sql.DB, tableName string) ([]string, error)
 		  ON tc.constraint_name = kcu.constraint_name
 		  AND tc.table_schema = kcu.table_schema
 		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_name = $1
+		  AND tc.table_schema = $1
+		  AND tc.table_name = $2
 		ORDER BY kcu.ordinal_position;
 	`
-	rows, err := db.Query(query, tableName)
+	rows, err := db.Query(query, protocol.NormalizeSchema(ref.Schema), ref.Table)
 	if err != nil {
 		return nil, err
 	}

@@ -55,7 +55,7 @@ func TestE2E_GracefulShutdown_ZeroMessageLoss(t *testing.T) {
 	env.Mgr.Stop(context.Background())
 
 	var finalCount int
-	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 	require.Equal(t, rowCount, finalCount, "Zero message loss: expected %d rows, got %d", rowCount, finalCount)
 }
@@ -98,7 +98,7 @@ func TestE2E_GracefulShutdown_ExactlyOnceOnRestart(t *testing.T) {
 	env.EventuallyCountDatabend(tableName, initialRows, 30*time.Second)
 
 	initialCounts := make(map[string]int)
-	rows, err := env.Databend.Query(fmt.Sprintf("SELECT name, age FROM %s", tableName))
+	rows, err := env.Databend.Query(fmt.Sprintf("SELECT name, age FROM %s", qualifyTarget(tableName)))
 	require.NoError(t, err)
 	for rows.Next() {
 		var name string
@@ -118,7 +118,7 @@ func TestE2E_GracefulShutdown_ExactlyOnceOnRestart(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	postRestartCounts := make(map[string]int)
-	rows2, err := env.Databend.Query(fmt.Sprintf("SELECT name, age FROM %s", tableName))
+	rows2, err := env.Databend.Query(fmt.Sprintf("SELECT name, age FROM %s", qualifyTarget(tableName)))
 	require.NoError(t, err)
 	for rows2.Next() {
 		var name string
@@ -137,7 +137,7 @@ func TestE2E_GracefulShutdown_ExactlyOnceOnRestart(t *testing.T) {
 	}
 
 	distinctNames := make(map[string]bool)
-	rows3, err := env.Databend.Query(fmt.Sprintf("SELECT name FROM %s", tableName))
+	rows3, err := env.Databend.Query(fmt.Sprintf("SELECT name FROM %s", qualifyTarget(tableName)))
 	require.NoError(t, err)
 	for rows3.Next() {
 		var name string
@@ -193,7 +193,7 @@ func TestE2E_GracefulShutdown_PreSyncedDataPreserved(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	var finalCount int
-	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 	require.Equal(t, rowCount, finalCount, "Pre-synced data should be preserved after shutdown: expected %d, got %d", rowCount, finalCount)
 }
@@ -254,7 +254,7 @@ func TestE2E_CDCCrashRecovery_ResumeFromCheckpoint(t *testing.T) {
 	env.EventuallyCountDatabend(tableName, phase1+phase2+1, 60*time.Second)
 
 	var finalCount int
-	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 
 	phase2Recovered := finalCount - phase1
@@ -311,7 +311,7 @@ func TestE2E_CDCCrashRecovery_ExactlyOnceGuarantee(t *testing.T) {
 	distinctNames := make(map[string]bool)
 	duplicates := make(map[string]int)
 
-	rows2, err := env.Databend.Query(fmt.Sprintf("SELECT name FROM %s", tableName))
+	rows2, err := env.Databend.Query(fmt.Sprintf("SELECT name FROM %s", qualifyTarget(tableName)))
 	require.NoError(t, err)
 	for rows2.Next() {
 		var name string

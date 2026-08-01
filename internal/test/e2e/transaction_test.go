@@ -107,11 +107,11 @@ func TestE2E_MultiTableTransactions(t *testing.T) {
 	// Verify state in Databend
 	require.Eventually(t, func() bool {
 		var name string
-		err := env.Databend.QueryRow("SELECT customer_name FROM orders WHERE customer_name = 'Alice Smith'").Scan(&name)
+		err := env.Databend.QueryRow("SELECT customer_name FROM public.orders WHERE customer_name = 'Alice Smith'").Scan(&name)
 		if err != nil { return false }
 		
 		var count uint64
-		err = env.Databend.QueryRow("SELECT count(*) FROM order_items").Scan(&count)
+		err = env.Databend.QueryRow("SELECT count(*) FROM public.order_items").Scan(&count)
 		if err != nil { return false }
 		
 		return name == "Alice Smith" && count == 2

@@ -14,6 +14,9 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/message/format"
 	"github.com/Trendyol/go-pq-cdc/pq/publication"
 	"github.com/go-playground/errors"
+	// vendored-patch: MS-2 - QuoteLiteral for tableExists/indexExists; aliased
+	// to avoid colliding with this package's own "github.com/Trendyol/go-pq-cdc/pq" import.
+	libpq "github.com/lib/pq"
 )
 
 type primaryKeyColumn struct {
@@ -227,8 +230,17 @@ func (s *Snapshotter) setupJob(ctx context.Context, slotName, instanceID string)
 
 //nolint:funlen
 func (s *Snapshotter) initTables(ctx context.Context) error {
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - both the
+	// CREATE TABLE statements below and the tableExists/indexExists checks now
+	// qualify against s.metadataSchema instead of the table landing wherever
+	// search_path resolves it unqualified while the check hardcoded 'public'.
+	// See s.metadataSchema's doc for why that mismatch was a re-run-CREATE-TABLE
+	// bug on every restart once a caller pins a non-public search_path.
+	qualifiedJobTable := s.metadataSchema + "." + jobTableName
+	qualifiedChunksTable := s.metadataSchema + "." + chunksTableName
+
 	// Check if job table exists
-	jobTableExists, err := s.tableExists(ctx, jobTableName)
+	jobTableExists, err := s.tableExists(ctx, s.metadataSchema, jobTableName)
 	if err != nil {
 		return errors.Wrap(err, "check job table existence")
 	}
@@ -244,7 +256,7 @@ func (s *Snapshotter) initTables(ctx context.Context) error {
 				total_chunks INT NOT NULL DEFAULT 0,
 				completed_chunks INT NOT NULL DEFAULT 0
 			)
-		`, jobTableName)
+		`, qualifiedJobTable)
 
 		if err := s.execSQL(ctx, s.metadataConn, jobTableSQL); err != nil {
 			return errors.Wrap(err, "create job table")
@@ -255,7 +267,7 @@ func (s *Snapshotter) initTables(ctx context.Context) error {
 	}
 
 	// Check if chunks table exists
-	chunksTableExists, err := s.tableExists(ctx, chunksTableName)
+	chunksTableExists, err := s.tableExists(ctx, s.metadataSchema, chunksTableName)
 	if err != nil {
 		return errors.Wrap(err, "check chunks table existence")
 	}
@@ -284,7 +296,7 @@ func (s *Snapshotter) initTables(ctx context.Context) error {
 				rows_processed BIGINT DEFAULT 0,
 				UNIQUE(slot_name, table_schema, table_name, chunk_index)
 			)
-		`, chunksTableName)
+		`, qualifiedChunksTable)
 
 		if err := s.execSQL(ctx, s.metadataConn, chunksTableSQL); err != nil {
 			return errors.Wrap(err, "create chunks table")
@@ -294,14 +306,17 @@ func (s *Snapshotter) initTables(ctx context.Context) error {
 		logger.Debug("[metadata] chunks table already exists, skipping creation")
 	}
 
-	// Create indexes for efficient queries
+	// Create indexes for efficient queries. Indexes always live in the same
+	// schema as the table they index, so only the table reference in the DDL
+	// needs qualifying -- but the existence check below still needs the schema
+	// explicitly (pg_indexes has no unqualified-name notion to fall back on).
 	indexes := map[string]string{
-		"idx_chunks_claim":  fmt.Sprintf("CREATE INDEX idx_chunks_claim ON %s(slot_name, status, claimed_at) WHERE status IN ('pending', 'in_progress')", chunksTableName),
-		"idx_chunks_status": fmt.Sprintf("CREATE INDEX idx_chunks_status ON %s(slot_name, status)", chunksTableName),
+		"idx_chunks_claim":  fmt.Sprintf("CREATE INDEX idx_chunks_claim ON %s(slot_name, status, claimed_at) WHERE status IN ('pending', 'in_progress')", qualifiedChunksTable),
+		"idx_chunks_status": fmt.Sprintf("CREATE INDEX idx_chunks_status ON %s(slot_name, status)", qualifiedChunksTable),
 	}
 
 	for indexName, indexSQL := range indexes {
-		indexExists, err := s.indexExists(ctx, indexName)
+		indexExists, err := s.indexExists(ctx, s.metadataSchema, indexName)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("check index %s existence", indexName))
 		}
@@ -1198,15 +1213,26 @@ func hashString(s string) int64 {
 
 // tableExists checks if a table exists using information_schema
 // This approach only requires SELECT permission on information_schema
-func (s *Snapshotter) tableExists(ctx context.Context, tableName string) (bool, error) {
+//
+// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - gained the
+// schema parameter (was hardcoded 'public', see s.metadataSchema's doc for
+// why that was actively wrong once a caller pins a non-public search_path)
+// and both schema and tableName are now escaped through libpq.QuoteLiteral
+// instead of interpolated raw into the query string. tableName/indexName are
+// internal Go constants today (jobTableName, chunksTableName, the index-name
+// map keys in initTables), never user input, so this is defence-in-depth
+// rather than a fix for a reachable injection today -- but s.metadataSchema
+// is derived from Config.SearchPath, which does originate from configuration,
+// so the schema argument gets the same treatment for consistency.
+func (s *Snapshotter) tableExists(ctx context.Context, schema, tableName string) (bool, error) {
 	query := fmt.Sprintf(`
 		SELECT EXISTS (
-			SELECT 1 
-			FROM information_schema.tables 
-			WHERE table_schema = 'public' 
-			AND table_name = '%s'
+			SELECT 1
+			FROM information_schema.tables
+			WHERE table_schema = %s
+			AND table_name = %s
 		)
-	`, tableName)
+	`, libpq.QuoteLiteral(schema), libpq.QuoteLiteral(tableName))
 
 	results, err := s.execQuery(ctx, s.metadataConn, query)
 	if err != nil {
@@ -1224,15 +1250,18 @@ func (s *Snapshotter) tableExists(ctx context.Context, tableName string) (bool, 
 
 // indexExists checks if an index exists using pg_indexes
 // This approach only requires SELECT permission on pg_indexes
-func (s *Snapshotter) indexExists(ctx context.Context, indexName string) (bool, error) {
+//
+// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - same schema
+// parameter and QuoteLiteral treatment as tableExists above.
+func (s *Snapshotter) indexExists(ctx context.Context, schema, indexName string) (bool, error) {
 	query := fmt.Sprintf(`
 		SELECT EXISTS (
-			SELECT 1 
-			FROM pg_indexes 
-			WHERE schemaname = 'public' 
-			AND indexname = '%s'
+			SELECT 1
+			FROM pg_indexes
+			WHERE schemaname = %s
+			AND indexname = %s
 		)
-	`, indexName)
+	`, libpq.QuoteLiteral(schema), libpq.QuoteLiteral(indexName))
 
 	results, err := s.execQuery(ctx, s.metadataConn, query)
 	if err != nil {

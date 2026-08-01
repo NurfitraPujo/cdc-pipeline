@@ -421,6 +421,7 @@ func TableMetadataFromProtocol(p protocol.TableMetadata) TableMetadata {
 	return TableMetadata{
 		Id:        strPtrOrNil(p.ID),
 		Name:      strPtrOrNil(p.Name),
+		Schema:    strPtrOrNil(protocol.NormalizeSchema(p.Schema)),
 		Columns:   strSlicePtrOrNil(p.Columns),
 		Types:     strSlicePtrOrNil(p.Types),
 		PkColumns: strSlicePtrOrNil(p.PKColumns),
@@ -431,6 +432,7 @@ func TableMetadataToProtocol(a TableMetadata) protocol.TableMetadata {
 	return protocol.TableMetadata{
 		ID:        stringValueOrEmpty(a.Id),
 		Name:      stringValueOrEmpty(a.Name),
+		Schema:    protocol.NormalizeSchema(stringValueOrEmpty(a.Schema)),
 		Columns:   stringSliceValueOrNil(a.Columns),
 		Types:     stringSliceValueOrNil(a.Types),
 		PKColumns: stringSliceValueOrNil(a.PkColumns),

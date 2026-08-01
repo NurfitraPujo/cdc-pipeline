@@ -276,7 +276,7 @@ type SourceConfig struct {
 	// PublicationName Postgres publication name.
 	PublicationName *string `json:"publication_name,omitempty"`
 
-	// Schemas Schema whitelist. Empty/null means all schemas.
+	// Schemas Schema whitelist. Empty/null means "public" only, NOT all schemas -- see MULTI_SCHEMA_PLAN.md §2.4/§8 item 4.
 	Schemas *[]string `json:"schemas,omitempty"`
 
 	// SlotName Postgres replication slot name.
@@ -328,7 +328,10 @@ type TableMetadata struct {
 	Id        *string   `json:"id,omitempty"`
 	Name      *string   `json:"name,omitempty"`
 	PkColumns *[]string `json:"pk_columns,omitempty"`
-	Types     *[]string `json:"types,omitempty"`
+
+	// Schema The Postgres schema this table lives in. "public" for bare/unqualified tables -- see MULTI_SCHEMA_PLAN.md §2.4.
+	Schema *string   `json:"schema,omitempty"`
+	Types  *[]string `json:"types,omitempty"`
 }
 
 // TableStats Per-table runtime statistics. Used in the `tables` and `sinks`

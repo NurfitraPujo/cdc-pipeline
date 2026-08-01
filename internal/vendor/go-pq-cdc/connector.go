@@ -211,7 +211,11 @@ func initializeSnapshot(cfg config.Config, tables publication.Tables, m metric.M
 	if !cfg.Snapshot.Enabled {
 		return nil
 	}
-	return snapshot.New(cfg.Snapshot, tables, cfg.DSN(), m)
+	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - pass
+	// cfg.SearchPath through so the snapshotter's bookkeeping-table existence
+	// checks agree with where its own CREATE TABLE statements land. See
+	// snapshot.New's doc and resolveMetadataSchema.
+	return snapshot.New(cfg.Snapshot, tables, cfg.DSN(), cfg.SearchPath, m)
 }
 
 func (c *connector) AddRelation(rel *format.Relation) {

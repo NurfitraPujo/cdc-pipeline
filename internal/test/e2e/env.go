@@ -221,11 +221,30 @@ func (e *Environment) SeedPostgres(table string, rows int) {
 	}
 }
 
+// qualifyTarget maps a bare source table name to the Databend target the sink
+// actually writes to.
+//
+// A Postgres SCHEMA maps to a Databend DATABASE (MULTI_SCHEMA_PLAN.md §7.4), so
+// a table seeded into Postgres' "public" schema lands in Databend's "public"
+// database -- NOT in the database the DSN selects. An unqualified assertion
+// query therefore resolves against the DSN's default database and fails with
+// Databend error 1025 (unknown table) even though the row synced correctly.
+//
+// Tests pass bare names ("users_cdc"); this renders the qualified target
+// ("public.users_cdc") the same way protocol.TableRef.String() does.
+func qualifyTarget(table string) string {
+	ref, err := protocol.ParseTableRef(table)
+	if err != nil {
+		return table // let the query fail loudly rather than silently rewriting
+	}
+	return ref.String()
+}
+
 func (e *Environment) EventuallyCountDatabend(table string, expected int, timeout time.Duration) {
 	start := time.Now()
 	require.Eventually(e.T, func() bool {
 		var count uint64
-		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
+		err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(table))).Scan(&count)
 		if err != nil {
 			log.Printf("Databend query failed for %s (elapsed %v): %v", table, time.Since(start), err)
 			return false
@@ -276,7 +295,9 @@ func (e *Environment) EventuallyAssertHeartbeat(pipelineID, expectedStatus strin
 
 func (e *Environment) EventuallyAssertTableState(pipelineID, sourceID, table, expectedState string, timeout time.Duration) {
 	require.Eventually(e.T, func() bool {
-		key := protocol.TableStateKey(pipelineID, sourceID, table)
+		ref, refErr := protocol.ParseTableRef(table)
+		require.NoError(e.T, refErr, "invalid table reference %q", table)
+		key := protocol.TableStateKey(pipelineID, sourceID, ref)
 		entry, err := e.KV.Get(key)
 		if err != nil {
 			log.Printf("Failed to get table state key %s: %v", key, err)
@@ -304,7 +325,7 @@ func (e *Environment) EventuallyMatchDatabendRow(table string, filterCol string,
 }
 
 func (e *Environment) checkMatch(table string, filterCol string, filterVal any, expected map[string]any) bool {
-	query := fmt.Sprintf("SELECT * FROM %s", table)
+	query := fmt.Sprintf("SELECT * FROM %s", qualifyTarget(table))
 	var args []any
 	if filterCol != "" {
 		query += fmt.Sprintf(" WHERE %s = ?", filterCol)
@@ -411,7 +432,7 @@ func numericToFloat(v any) (float64, bool) {
 
 func (e *Environment) GetDatabendRowCount(table string) (uint64, error) {
 	var count uint64
-	err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
+	err := e.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(table))).Scan(&count)
 	return count, err
 }
 

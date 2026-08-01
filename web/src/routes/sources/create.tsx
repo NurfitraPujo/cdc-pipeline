@@ -577,6 +577,11 @@ export function CreateSourcePage() {
 									>
 										Whitelisted Schemas
 									</label>
+									<p className="text-xs text-muted-foreground">
+										Empty means "public" only, not all schemas. Schema discovery
+										from the live database is available after the source is
+										created, on its Edit page.
+									</p>
 									<div className="flex flex-wrap gap-2 mb-2">
 										{schemas.map((s, index) => (
 											<Badge

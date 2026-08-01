@@ -363,14 +363,61 @@ func TestAPI_Full(t *testing.T) {
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusAccepted, w.Code)
 
-		// Source Schema
+		// Source Schema: GetSourceSchema now loads the source config from KV
+		// and dials the real database (MULTI_SCHEMA_PLAN.md §3 Stage 3) --
+		// it is no longer a hardcoded stub. This unit test has no real
+		// Postgres to connect to, so it exercises the KV-lookup wiring and
+		// asserts the failure surfaces as 502 rather than a fabricated 200.
+		// If GetSourceSchema regresses to the old unconditional mock, this
+		// mockKV.Get expectation goes unfulfilled and the test fails.
+		s1 := protocol.SourceConfig{ID: "s1", Type: "postgres", Host: "h", Port: 5432, User: "u", Database: "d"}
+		s1Data, _ := json.Marshal(s1)
+		mockKV.EXPECT().Get(protocol.SourceConfigKey("s1")).Return(mockEntry{value: s1Data}, nil)
+
 		req, _ = http.NewRequest("GET", "/api/v1/sources/s1/schema", nil)
 		req.Header.Set("Authorization", authHeader)
 		w = httptest.NewRecorder()
 		router.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+	})
+
+	t.Run("Source Schema 404 when source unknown", func(t *testing.T) {
+		mockKV := mocks.NewMockKeyValue(ctrl)
+		router := setupTestRouter(mockKV)
+		token := getTestToken(t, router, mockKV)
+		authHeader := "Bearer " + token
+
+		mockKV.EXPECT().Get(protocol.SourceConfigKey("nope")).Return(nil, fmt.Errorf("not found"))
+
+		req, _ := http.NewRequest("GET", "/api/v1/sources/nope/schema", nil)
+		req.Header.Set("Authorization", authHeader)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 	}
+
+// TestDiscoverySchemas_EmptyMeansPublicOnly pins MULTI_SCHEMA_PLAN.md §2.4/§8
+// item 4: an empty/unset Schemas whitelist must query "public" only, never a
+// wildcard. Every pre-Stage-3 source config has Schemas empty (the field was
+// dead), so treating empty as "all schemas" would silently start
+// discovering every schema on the database the moment this stage lands.
+
+func TestDiscoverySchemas_EmptyMeansPublicOnly(t *testing.T) {
+	got := discoverySchemas(nil)
+	if len(got) != 1 || got[0] != "public" {
+		t.Fatalf("nil Schemas should discover public only, got %v", got)
+	}
+	got = discoverySchemas([]string{})
+	if len(got) != 1 || got[0] != "public" {
+		t.Fatalf("empty Schemas should discover public only, got %v", got)
+	}
+	got = discoverySchemas([]string{"sales", "inventory"})
+	if len(got) != 2 || got[0] != "sales" || got[1] != "inventory" {
+		t.Fatalf("configured Schemas should pass through unchanged, got %v", got)
+	}
+}
+
 
 func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
 	ctrl := gomock.NewController(t)

@@ -138,6 +138,43 @@ func TestMatchesWildcard(t *testing.T) {
 	}
 }
 
+// TestMatchesWildcard_DotNotTreatedAsRegexAny is the regression guard for
+// MULTI_SCHEMA_PLAN.md §7.4 item 10. The old implementation built its regex
+// as "^" + strings.ReplaceAll(pattern, "*", ".*") + "$" without escaping any
+// other character first, so a literal "." in an operator-supplied filter
+// pattern was interpreted as "any character" by the underlying regexp
+// engine. A filter for "order." (e.g. an operator trying to match a table
+// literally named "order.staging", or simply typing a stray dot) would then
+// also match "orderX", "orderZ", etc. -- calling the real matchesWildcard
+// function, not a recomputed pattern, so reverting the QuoteMeta fix makes
+// this fail.
+func TestMatchesWildcard_DotNotTreatedAsRegexAny(t *testing.T) {
+	assert.True(t, matchesWildcard("order.", "order."), "exact literal match must still work")
+	assert.False(t, matchesWildcard("order.", "orderX"), "a literal \".\" must not match an arbitrary character")
+	assert.False(t, matchesWildcard("order.", "orders"), "a literal \".\" must not match an arbitrary character")
+
+	// Combined with a real wildcard: only the "*" should behave as regex-any;
+	// the "." stays literal.
+	assert.True(t, matchesWildcard("sales.*", "sales.orders"))
+	assert.False(t, matchesWildcard("sales.*", "salesXorders"), "the literal \".\" between sales and * must not match \"X\"")
+}
+
+// TestMatchesWildcard_SpecialCharsStayLiteralInWildcardPath forces the
+// regex-building path (a "*" is present) with other regex-special
+// characters in the same pattern, and asserts they are treated as literal
+// text rather than regex syntax -- e.g. "(unclosed" would make
+// `regexp.MustCompile`/`regexp.MatchString` return a compile error under the
+// old "^"+ReplaceAll(pattern,"*",".*")+"$" construction; the fixed version
+// quotes every non-"*" segment via regexp.QuoteMeta first, so it can never
+// produce an invalid pattern from arbitrary operator input.
+func TestMatchesWildcard_SpecialCharsStayLiteralInWildcardPath(t *testing.T) {
+	assert.True(t, matchesWildcard("a(b*", "a(bXYZ"), "\"(\" must be literal, not regex-grouping")
+	assert.False(t, matchesWildcard("a(b*", "aQbXYZ"))
+
+	assert.True(t, matchesWildcard("(unclosed*", "(unclosedXYZ"), "an unbalanced \"(\" must not error out or panic")
+	assert.False(t, matchesWildcard("(unclosed*", "unclosedXYZ"))
+}
+
 func TestExtractPayload_FromData(t *testing.T) {
 	msg := protocol.Message{
 		Data: map[string]interface{}{

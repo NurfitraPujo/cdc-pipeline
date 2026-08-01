@@ -1105,7 +1105,9 @@ components:
           nullable: true
           items:
             type: string
-          description: Schema whitelist. Empty/null means all schemas.
+          description: >-
+            Schema whitelist. Empty/null means "public" only, NOT all
+            schemas -- see MULTI_SCHEMA_PLAN.md §2.4/§8 item 4.
         tables:
           type: array
           nullable: true
@@ -1191,6 +1193,11 @@ components:
           type: string
         name:
           type: string
+        schema:
+          type: string
+          description: >-
+            The Postgres schema this table lives in. "public" for
+            bare/unqualified tables -- see MULTI_SCHEMA_PLAN.md §2.4.
         columns:
           type: array
           items:

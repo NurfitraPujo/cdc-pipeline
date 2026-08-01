@@ -88,10 +88,19 @@ function PipelineDetailPage() {
 			if (key.endsWith(".stats")) {
 				setLastUpdate(new Date().toISOString());
 
-				// Extract table name from key or data if available
-				// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats
+				// Extract table name from key or data if available.
+				// Format: cdc.pipeline.{pid}.sources.{sid}.sinks.{sinkID}.tables.{token}.stats
+				// Parsed from BOTH ENDS (fixed prefix tokens 0..7, terminal
+				// "stats") rather than a fixed positional index -- a schema-
+				// qualified KeyToken (e.g. "sales=orders") is still one
+				// token, but this stays correct even if the token itself
+				// ever contains a "." (see ParseTableStatsKey in
+				// internal/protocol/config.go and MULTI_SCHEMA_PLAN.md §2.3).
 				const parts = key.split(".");
-				const tableName = parts[8] || data.tableName;
+				const tableName =
+					(parts.length >= 10 && parts[parts.length - 1] === "stats"
+						? parts.slice(8, parts.length - 1).join(".")
+						: undefined) || data.tableName;
 				const sinkID = msg.sinkId;
 
 				if (sinkID) {

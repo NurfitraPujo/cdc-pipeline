@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, ArrowLeft, Loader2, Save, X } from "lucide-react";
+import {
+	AlertCircle,
+	ArrowLeft,
+	Loader2,
+	RefreshCw,
+	Save,
+	X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { sourcesApi, type UpdateSourceRequest } from "@/api/sources";
 import { Badge } from "@/components/ui/badge";
@@ -80,6 +87,27 @@ export function EditSourcePage() {
 			});
 		},
 	});
+
+	// Discovery runs against the already-persisted source (it dials the
+	// database directly with the saved credentials), so it is only
+	// available here on the edit page, not on create -- there is no source
+	// row in KV yet for a real GET /sources/{id}/schema to discover against.
+	const discoverSchemasMutation = useMutation({
+		mutationFn: () => sourcesApi.getSchema(id),
+		onSuccess: (result) => {
+			setDiscoveredSchemas(result.availableSchemas);
+		},
+	});
+
+	const discoverTablesMutation = useMutation({
+		mutationFn: () => sourcesApi.getTables(id),
+		onSuccess: (result) => {
+			setDiscoveredTables(result);
+		},
+	});
+
+	const [discoveredSchemas, setDiscoveredSchemas] = useState<string[]>([]);
+	const [discoveredTables, setDiscoveredTables] = useState<string[]>([]);
 
 	// Initialize form when data is loaded
 	useEffect(() => {
@@ -642,12 +670,31 @@ export function EditSourcePage() {
 
 							<div className="space-y-4">
 								<div className="space-y-2">
-									<label
-										htmlFor="source-schemas-input"
-										className="text-sm font-medium"
-									>
-										Whitelisted Schemas
-									</label>
+									<div className="flex items-center justify-between">
+										<label
+											htmlFor="source-schemas-input"
+											className="text-sm font-medium"
+										>
+											Whitelisted Schemas
+										</label>
+										<Button
+											type="button"
+											variant="ghost"
+											size="sm"
+											disabled={discoverSchemasMutation.isPending}
+											onClick={() => discoverSchemasMutation.mutate()}
+										>
+											{discoverSchemasMutation.isPending ? (
+												<Loader2 className="mr-1 h-3 w-3 animate-spin" />
+											) : (
+												<RefreshCw className="mr-1 h-3 w-3" />
+											)}
+											Discover
+										</Button>
+									</div>
+									<p className="text-xs text-muted-foreground">
+										Empty means "public" only, not all schemas.
+									</p>
 									<div className="flex flex-wrap gap-2 mb-2">
 										{schemas.map((s, index) => (
 											<Badge
@@ -673,15 +720,64 @@ export function EditSourcePage() {
 										onChange={(e) => setSchemaInput(e.target.value)}
 										onKeyDown={handleAddSchema}
 									/>
+									{discoverSchemasMutation.isError && (
+										<p className="text-xs text-destructive">
+											Discovery failed:{" "}
+											{discoverSchemasMutation.error instanceof Error
+												? discoverSchemasMutation.error.message
+												: "unknown error"}
+										</p>
+									)}
+									{discoveredSchemas.length > 0 && (
+										<div className="rounded-md border p-2 space-y-1">
+											<p className="text-xs text-muted-foreground">
+												Discovered on the source database -- click to add:
+											</p>
+											<div className="flex flex-wrap gap-2">
+												{discoveredSchemas
+													.filter((s) => !schemas.includes(s))
+													.map((s) => (
+														<button
+															key={s}
+															type="button"
+															onClick={() => setSchemas([...schemas, s])}
+															className="rounded-full border px-2 py-0.5 text-xs hover:bg-muted"
+														>
+															+ {s}
+														</button>
+													))}
+											</div>
+										</div>
+									)}
 								</div>
 
 								<div className="space-y-2">
-									<label
-										htmlFor="source-tables-input"
-										className="text-sm font-medium"
-									>
-										Whitelisted Tables
-									</label>
+									<div className="flex items-center justify-between">
+										<label
+											htmlFor="source-tables-input"
+											className="text-sm font-medium"
+										>
+											Whitelisted Tables
+										</label>
+										<Button
+											type="button"
+											variant="ghost"
+											size="sm"
+											disabled={discoverTablesMutation.isPending}
+											onClick={() => discoverTablesMutation.mutate()}
+										>
+											{discoverTablesMutation.isPending ? (
+												<Loader2 className="mr-1 h-3 w-3 animate-spin" />
+											) : (
+												<RefreshCw className="mr-1 h-3 w-3" />
+											)}
+											Discover
+										</Button>
+									</div>
+									<p className="text-xs text-muted-foreground">
+										Discovery is limited to the whitelisted schemas above (saved
+										on the server).
+									</p>
 									<div className="flex flex-wrap gap-2 mb-2">
 										{tables.map((t, index) => (
 											<Badge
@@ -707,6 +803,36 @@ export function EditSourcePage() {
 										onChange={(e) => setTableInput(e.target.value)}
 										onKeyDown={handleAddTable}
 									/>
+									{discoverTablesMutation.isError && (
+										<p className="text-xs text-destructive">
+											Discovery failed:{" "}
+											{discoverTablesMutation.error instanceof Error
+												? discoverTablesMutation.error.message
+												: "unknown error"}
+										</p>
+									)}
+									{discoveredTables.length > 0 && (
+										<div className="rounded-md border p-2 space-y-1">
+											<p className="text-xs text-muted-foreground">
+												Discovered on the source database (schema-qualified
+												except for "public") -- click to add:
+											</p>
+											<div className="flex flex-wrap gap-2">
+												{discoveredTables
+													.filter((t) => !tables.includes(t))
+													.map((t) => (
+														<button
+															key={t}
+															type="button"
+															onClick={() => setTables([...tables, t])}
+															className="rounded-full border px-2 py-0.5 text-xs hover:bg-muted"
+														>
+															+ {t}
+														</button>
+													))}
+											</div>
+										</div>
+									)}
 								</div>
 							</div>
 						</CardContent>

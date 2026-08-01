@@ -673,7 +673,7 @@ export interface components {
 			snapshot_chunk_size?: number | null;
 			/** @example 1s */
 			snapshot_interval?: string | null;
-			/** @description Schema whitelist. Empty/null means all schemas. */
+			/** @description Schema whitelist. Empty/null means "public" only, NOT all schemas -- see MULTI_SCHEMA_PLAN.md §2.4/§8 item 4. */
 			schemas?: string[] | null;
 			/** @description Table whitelist within the selected schemas. */
 			tables?: string[] | null;
@@ -742,6 +742,8 @@ export interface components {
 		TableMetadata: {
 			id?: string;
 			name?: string;
+			/** @description The Postgres schema this table lives in. "public" for bare/unqualified tables -- see MULTI_SCHEMA_PLAN.md §2.4. */
+			schema?: string;
 			columns?: string[];
 			types?: string[];
 			pk_columns?: string[];

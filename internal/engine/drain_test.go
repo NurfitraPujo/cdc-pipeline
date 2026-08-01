@@ -443,7 +443,7 @@ func TestTransitionTableToCDC_RetriesPastOneUnluckyRecheck_ThenSucceeds(t *testi
 		sourceID   = "s1"
 		table      = "t1"
 	)
-	stateKey := protocol.TableStateKey(pipelineID, sourceID, table)
+	stateKey := protocol.TableStateKey(pipelineID, sourceID, protocol.TableRef{Schema: "public", Table: table})
 	kv.EXPECT().Put(stateKey, []byte(protocol.TableStateCDC)).Return(uint64(1), nil)
 
 	p := &Producer{

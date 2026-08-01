@@ -39,6 +39,29 @@ type Config struct {
 	// ServerWALEnd from primary keepalive messages instead of the internal fast-forward.
 	// Excluded from serialization (func values are not marshalable).
 	KeepaliveFunc func(pq.LSN) `json:"-" yaml:"-"`
+	// vendored-patch: MS-1 (MULTI_SCHEMA_PLAN.md §3 Stage 2) - when non-empty,
+	// DSN()/DSNWithoutSSL() append a libpq "options=-c search_path=..."
+	// startup parameter pinning the regular (non-replication) connection's
+	// search_path to this value. Comma-separated schema list, caller's
+	// responsibility to order/normalise (see PostgresSource.Start, which
+	// derives it from SourceConfig.Schemas, falling back to "public").
+	//
+	// Deliberately NOT applied to ReplicationDSN(): that connection opens
+	// with "replication=database" and only ever issues the logical
+	// replication protocol commands (IDENTIFY_SYSTEM, START_REPLICATION),
+	// never arbitrary SQL, so search_path has no unqualified identifier to
+	// resolve there.
+	//
+	// WARNING (plan §11.2 requirement 7): pinning this makes
+	// pq/snapshot/coordinator.go's hardcoded 'public' checks actively wrong
+	// once SearchPath names a non-public schema first -- CREATE TABLE
+	// cdc_snapshot_job (unqualified) lands in the pinned schema while the
+	// coordinator's own existence checks still hardcode table_schema =
+	// 'public', so initTables never finds it and re-runs CREATE TABLE (and
+	// errors) on every restart. Fixing that hardcoding is Stage 4's job,
+	// not this patch's -- SearchPath is applied here regardless because
+	// Stage 2 must pin it now for Stage 4 to have something to fix.
+	SearchPath string `json:"searchPath" yaml:"searchPath"`
 }
 
 type MetricConfig struct {
@@ -63,17 +86,35 @@ type HeartbeatConfig struct {
 // DSN returns a normal PostgreSQL connection string for regular database operations
 // (publication, metadata, snapshot chunks, etc.)
 func (c *Config) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s", url.QueryEscape(c.Username), url.QueryEscape(c.Password), c.Host, c.Port, c.Database)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s", url.QueryEscape(c.Username), url.QueryEscape(c.Password), c.Host, c.Port, c.Database)
+	return c.withSearchPath(dsn, "?")
 }
 
 // ReplicationDSN returns a replication connection string for CDC streaming
 // This connection counts against max_wal_senders limit
+//
+// vendored-patch: MS-1 - deliberately NOT search-path-pinned, see the
+// SearchPath field doc.
 func (c *Config) ReplicationDSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?replication=database", url.QueryEscape(c.Username), url.QueryEscape(c.Password), c.Host, c.Port, c.Database)
 }
 
 func (c *Config) DSNWithoutSSL() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", url.QueryEscape(c.Username), url.QueryEscape(c.Password), c.Host, c.Port, c.Database)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", url.QueryEscape(c.Username), url.QueryEscape(c.Password), c.Host, c.Port, c.Database)
+	return c.withSearchPath(dsn, "&")
+}
+
+// withSearchPath appends the "options=-c search_path=..." libpq startup
+// parameter to dsn when c.SearchPath is set (vendored-patch: MS-1). sep is
+// "?" or "&" depending on whether dsn already has a query string, matching
+// the two call sites above. url.QueryEscape handles the space and comma
+// characters inside "-c search_path=a,b" the same way it already handles
+// the username/password above.
+func (c *Config) withSearchPath(dsn, sep string) string {
+	if c.SearchPath == "" {
+		return dsn
+	}
+	return dsn + sep + "options=" + url.QueryEscape("-c search_path="+c.SearchPath)
 }
 
 func (c *Config) SetDefault() {

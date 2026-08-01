@@ -81,12 +81,12 @@ func TestE2E_ExactlyOnce_Idempotency(t *testing.T) {
 	t.Log("Waiting for partial sync before crashing...")
 	require.Eventually(t, func() bool {
 		var count int
-		env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&count)
+		env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&count)
 		return count > 0 && count < rowCount
 	}, 30*time.Second, 100*time.Millisecond)
 
 	var countBeforeCrash int
-	env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&countBeforeCrash)
+	env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&countBeforeCrash)
 	t.Logf("CRASHING worker mid-sync (count was %d) to force redelivery...", countBeforeCrash)
 	mgr.InternalCrashWorker(context.Background(), pipelineID)
 
@@ -99,7 +99,7 @@ func TestE2E_ExactlyOnce_Idempotency(t *testing.T) {
 
 	// 7. Verify EXACTLY-ONCE (no duplicates)
 	var finalCount int
-	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", tableName)).Scan(&finalCount)
+	err := env.Databend.QueryRow(fmt.Sprintf("SELECT count(*) FROM %s", qualifyTarget(tableName))).Scan(&finalCount)
 	require.NoError(t, err)
 	
 	require.Equal(t, rowCount, finalCount, "Exactly-once verification failed: expected %d, got %d", rowCount, finalCount)

@@ -30,14 +30,8 @@ export interface Source {
 }
 
 export interface SourceSchema {
-	tables: Array<{
-		name: string;
-		columns: Array<{ name: string; type: string }>;
-	}>;
-}
-
-export interface SourceTables {
-	tables: Array<{ name: string; type: string; comment?: string }>;
+	availableSchemas: string[];
+	discoveryStatus: string;
 }
 
 export type CreateSourceRequest = Omit<Source, "id"> & { id?: string };
@@ -86,12 +80,23 @@ export const sourcesApi = {
 		return snakeToCamel<SourceSchema>(unwrap<WireSourceSchema>(result));
 	},
 
+	// getTables returns the config-shaped table identity: bare ("orders")
+	// for tables in the "public" schema, "schema.table" (dot-qualified)
+	// otherwise. This is deliberately NOT the backend's internal KeyToken()
+	// id (which uses "=" as separator) -- callers feed this string straight
+	// into PipelineConfig.Tables, and only the dot form is accepted by
+	// protocol.ParseTableRef on the backend. See MULTI_SCHEMA_PLAN.md §2.1-2.3
+	// and the Stage 3 caution about attempt 1's qualified-id regression.
 	async getTables(id: string): Promise<string[]> {
 		const result = await apiClient.GET("/sources/{id}/tables", {
 			params: { path: { id } },
 		});
 		const data = unwrap<WireSourceTables>(result);
-		return (data.tables ?? []).map((t) => t.name ?? "");
+		return (data.tables ?? []).map((t) => {
+			const name = t.name ?? "";
+			const schema = t.schema ?? "public";
+			return schema === "public" || schema === "" ? name : `${schema}.${name}`;
+		});
 	},
 
 	async testConnection(

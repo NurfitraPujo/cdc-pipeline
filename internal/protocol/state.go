@@ -24,6 +24,7 @@ type PipelineTransitionState struct {
 type TableMetadata struct {
 	ID        string   `msg:"id" json:"id"`
 	Name      string   `msg:"name" json:"name"`
+	Schema    string   `msg:"schema,omitempty" json:"schema"` // "public" for bare/unqualified tables; see MULTI_SCHEMA_PLAN.md §2.4.
 	Columns   []string `msg:"cols" json:"columns"`
 	Types     []string `msg:"types" json:"types"`
 	PKColumns []string `msg:"pk" json:"pk_columns"`
@@ -87,10 +88,10 @@ type SchemaEvolutionState struct {
 	LastChangeAt   time.Time         `msg:"l_at" json:"last_change_at"`
 }
 
-func TableStateKey(pipelineID, sourceID, table string) string {
-	return fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.state", pipelineID, sourceID, table)
+func TableStateKey(pipelineID, sourceID string, table TableRef) string {
+	return fmt.Sprintf("cdc.pipeline.%s.sources.%s.tables.%s.state", pipelineID, sourceID, table.KeyToken())
 }
 
-func SchemaEvolutionKey(pipelineID, table string) string {
-	return fmt.Sprintf("cdc.pipeline.%s.schema_evolution.%s", pipelineID, table)
+func SchemaEvolutionKey(pipelineID string, table TableRef) string {
+	return fmt.Sprintf("cdc.pipeline.%s.schema_evolution.%s", pipelineID, table.KeyToken())
 }

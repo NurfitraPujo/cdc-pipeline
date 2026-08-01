@@ -301,7 +301,7 @@ func TestStop_WaitsForBackgroundGoroutines(t *testing.T) {
 
 	var mu sync.Mutex
 	var msgs []protocol.Message
-	knownTables := map[string]bool{"public.t1": true}
+	knownTables := map[protocol.TableRef]bool{{Schema: "public", Table: "t1"}: true}
 	var flushWg sync.WaitGroup
 	var flushClosed bool
 
@@ -470,15 +470,15 @@ func TestHandler_NeverAcksOrAdvances_UntilCoordinatorConfirmed(t *testing.T) {
 	// cannot confound the watermark assertions below; the point of this
 	// block is purely that they never call Ack.
 	handler(&replication.ListenerContext{Message: &format.Relation{OID: 1, Name: "t1"}, Ack: countingAck, LSN: 0})
-	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
-	handler(&replication.ListenerContext{Message: &format.Update{TableName: "public.other", NewDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
-	handler(&replication.ListenerContext{Message: &format.Delete{TableName: "public.other", OldDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
-	handler(&replication.ListenerContext{Message: &format.Snapshot{EventType: "BEGIN", Table: "public.t1"}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableNamespace: "public", TableName: "other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Update{TableNamespace: "public", TableName: "other", NewDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Delete{TableNamespace: "public", TableName: "other", OldDecoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 0})
+	handler(&replication.ListenerContext{Message: &format.Snapshot{EventType: "BEGIN", Schema: "public", Table: "t1"}, Ack: countingAck, LSN: 0})
 
 	// Data events against the known table.
-	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
-	handler(&replication.ListenerContext{Message: &format.Update{TableName: "public.t1", NewDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 101})
-	handler(&replication.ListenerContext{Message: &format.Delete{TableName: "public.t1", OldDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 102})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
+	handler(&replication.ListenerContext{Message: &format.Update{TableNamespace: "public", TableName: "t1", NewDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 101})
+	handler(&replication.ListenerContext{Message: &format.Delete{TableNamespace: "public", TableName: "t1", OldDecoded: map[string]any{"a": 2}}, Ack: countingAck, LSN: 102})
 
 	assert.Equal(t, int32(0), ackCalls.Load(), "the handler must never call lc.Ack under ManualCommit")
 
@@ -525,9 +525,12 @@ func TestHandler_PanicSafety_MuNotStranded(t *testing.T) {
 	// nil map panics. This exercises the exact failure mode the plan
 	// describes (a panic between Lock and Unlock) because the write
 	// happens while mu (buildMessage's message-construction mutex) is
-	// held via the deferred Unlock.
+	// held via the deferred Unlock. cacheRelation writes to relationCache
+	// (not oidCache, which is a separate pg_type-OID cache -- see the
+	// field doc on PostgresSource.oidCache), so that is the map this test
+	// must nil to force the panic.
 	s.oidMu.Lock()
-	s.oidCache = nil
+	s.relationCache = nil
 	s.oidMu.Unlock()
 
 	require.NotPanics(t, func() {
@@ -536,7 +539,7 @@ func TestHandler_PanicSafety_MuNotStranded(t *testing.T) {
 
 	// Restore a valid map so the subsequent, real event can proceed.
 	s.oidMu.Lock()
-	s.oidCache = make(map[uint32]string)
+	s.relationCache = make(map[uint32]protocol.TableRef)
 	s.oidMu.Unlock()
 
 	got := make(chan []protocol.Message, 1)
@@ -549,7 +552,7 @@ func TestHandler_PanicSafety_MuNotStranded(t *testing.T) {
 		}
 	}()
 
-	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: func() error { return nil }, LSN: 200})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"a": 1}}, Ack: func() error { return nil }, LSN: 200})
 
 	select {
 	case batch := <-got:
@@ -584,7 +587,7 @@ func TestCoordinator_AckIngestion_NoLossUnderBurst(t *testing.T) {
 	const n = 200
 	for i := 1; i <= n; i++ {
 		handler(&replication.ListenerContext{
-			Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"i": i}},
+			Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"i": i}},
 			Ack:     func() error { return nil },
 			LSN:     pq.LSN(i),
 		})
@@ -777,7 +780,7 @@ func TestWI5aGauges_ShareIdenticalLabelSet(t *testing.T) {
 	handler := factory.Handler()
 	require.NotNil(t, handler)
 	handler(&replication.ListenerContext{
-		Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}},
+		Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"a": 1}},
 		Ack:     func() error { return nil },
 		LSN:     pq.LSN(1),
 	})
@@ -929,14 +932,14 @@ func TestHandler_StrictAckOff_RestoresLegacyPerEventAck(t *testing.T) {
 	countingAck := func() error { ackCalls.Add(1); return nil }
 
 	// Filtered event (unknown table): must still ack, same as pre-WI-4.
-	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 50})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableNamespace: "public", TableName: "other", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 50})
 	require.Eventually(t, func() bool { return ackCalls.Load() == 1 }, time.Second, 5*time.Millisecond,
 		"a filtered event must call lc.Ack under strict_ack off")
 
 	// Data event against the known table: must also ack immediately,
 	// without waiting for any SourceAck from the engine -- that is
 	// precisely the legacy (pre-plan-01a) contract this flag restores.
-	handler(&replication.ListenerContext{Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
+	handler(&replication.ListenerContext{Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"a": 1}}, Ack: countingAck, LSN: 100})
 	require.Eventually(t, func() bool { return ackCalls.Load() == 2 }, time.Second, 5*time.Millisecond,
 		"a data event must call lc.Ack under strict_ack off, without waiting for a SourceAck")
 
@@ -947,7 +950,7 @@ func TestHandler_StrictAckOff_RestoresLegacyPerEventAck(t *testing.T) {
 	// dropped -- without this case, deleting that ack would leave the test
 	// green while the escape hatch was quietly broken for snapshot rows.
 	handler(&replication.ListenerContext{
-		Message: &format.Snapshot{EventType: format.SnapshotEventTypeData, Table: "public.t1", Data: map[string]any{"a": 1}},
+		Message: &format.Snapshot{EventType: format.SnapshotEventTypeData, Schema: "public", Table: "t1", Data: map[string]any{"a": 1}},
 		Ack:     countingAck,
 		LSN:     150,
 	})
@@ -1094,7 +1097,7 @@ func TestR9_TriggerFlushDoesNotRaceChannelClose(t *testing.T) {
 					default:
 					}
 					handler(&replication.ListenerContext{
-						Message: &format.Insert{TableName: "public.t1", Decoded: map[string]any{"a": id}},
+						Message: &format.Insert{TableNamespace: "public", TableName: "t1", Decoded: map[string]any{"a": id}},
 						Ack:     func() error { return nil },
 						LSN:     pq.LSN(lsn),
 					})

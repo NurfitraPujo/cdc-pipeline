@@ -130,7 +130,7 @@ func TestPipeline_RunProducer_StaleTableDoesNotFalseAlarm(t *testing.T) {
 	busyData, err := busyCP.MarshalMsg(nil)
 	require.NoError(t, err)
 	mockKV.EXPECT().
-		Get(protocol.EgressCheckpointKey(pipelineID, "s1", "sink1", "busy")).
+		Get(protocol.EgressCheckpointKey(pipelineID, "s1", "sink1", protocol.TableRef{Schema: "public", Table: "busy"})).
 		Return(mockEntry{value: busyData}, nil).AnyTimes()
 
 	// stale table: sink1's checkpoint is old/low -- this is what pins
@@ -139,7 +139,7 @@ func TestPipeline_RunProducer_StaleTableDoesNotFalseAlarm(t *testing.T) {
 	staleData, err := staleCP.MarshalMsg(nil)
 	require.NoError(t, err)
 	mockKV.EXPECT().
-		Get(protocol.EgressCheckpointKey(pipelineID, "s1", "sink1", "stale")).
+		Get(protocol.EgressCheckpointKey(pipelineID, "s1", "sink1", protocol.TableRef{Schema: "public", Table: "stale"})).
 		Return(mockEntry{value: staleData}, nil).AnyTimes()
 
 	mockKV.EXPECT().Get(gomock.Any()).Return(nil, errors.New("no checkpoint")).AnyTimes()

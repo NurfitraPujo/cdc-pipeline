@@ -71,7 +71,7 @@ func TestE2E_ConfigHotReload(t *testing.T) {
 	// Verify the record is masked in Databend
 	require.Eventually(t, func() bool {
 		var secret string
-		err := env.Databend.QueryRow("SELECT secret FROM reload_t2").Scan(&secret)
+		err := env.Databend.QueryRow("SELECT secret FROM public.reload_t2").Scan(&secret)
 		if err != nil { return false }
 		
 		// Masked values are SHA256 hex strings (64 chars)

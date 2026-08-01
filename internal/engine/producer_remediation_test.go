@@ -21,7 +21,7 @@ func TestProducerPersistEvoStateRetriesCASFailures(t *testing.T) {
 	kv := mocks.NewMockKeyValue(ctrl)
 
 	const table = "orders"
-	key := protocol.SchemaEvolutionKey("pipeline-1", table)
+	key := protocol.SchemaEvolutionKey("pipeline-1", protocol.TableRef{Schema: "public", Table: table})
 	state := &tableEvolution{
 		Status:            protocol.SchemaStatusFrozen,
 		Revision:          10,
@@ -59,7 +59,7 @@ func TestProducerDrainToCDCRoutesConcurrentInsertToMainStream(t *testing.T) {
 		table      = "orders"
 	)
 	mainTopic := "cdc_pipeline_pipeline-1_ingest"
-	stateKey := protocol.TableStateKey(pipelineID, sourceID, table)
+	stateKey := protocol.TableStateKey(pipelineID, sourceID, protocol.TableRef{Schema: "public", Table: table})
 
 	publisher.EXPECT().Publish(mainTopic, gomock.Any()).Return(nil)
 	kv.EXPECT().Put(stateKey, []byte(protocol.TableStateCDC)).Return(uint64(2), nil)

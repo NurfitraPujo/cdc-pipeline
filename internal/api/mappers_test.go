@@ -210,18 +210,40 @@ func TestRoundTrip_TableStats(t *testing.T) {
 
 func TestRoundTrip_TableMetadata(t *testing.T) {
 	p := protocol.TableMetadata{
-		ID: "t1", Name: "users",
+		ID: "sales=orders", Name: "orders", Schema: "sales",
 		Columns: []string{"id", "name"},
 		Types: []string{"int", "text"},
 		PKColumns: []string{"id"},
 	}
 	a := TableMetadataFromProtocol(p)
-	if a.Id == nil || *a.Id != "t1" {
+	if a.Id == nil || *a.Id != "sales=orders" {
 		t.Fatalf("id: %v", a.Id)
 	}
+	if a.Schema == nil || *a.Schema != "sales" {
+		t.Fatalf("schema: %v", a.Schema)
+	}
 	back := TableMetadataToProtocol(a)
-	if back.ID != "t1" || back.Name != "users" || len(back.PKColumns) != 1 {
+	if back.ID != "sales=orders" || back.Name != "orders" || back.Schema != "sales" || len(back.PKColumns) != 1 {
 		t.Fatalf("roundtrip mismatch: %+v", back)
+	}
+}
+
+// TestTableMetadata_SchemaDefaultsToPublic pins the mapper's use of
+// protocol.NormalizeSchema (MULTI_SCHEMA_PLAN.md §2.4): a metadata blob
+// persisted before this stage (or by any writer that forgot to set Schema)
+// must present as "public" over the wire and on the way back in, not "".
+// A UI that special-cases "" as "no schema" would mis-render such rows.
+func TestTableMetadata_SchemaDefaultsToPublic(t *testing.T) {
+	p := protocol.TableMetadata{ID: "orders", Name: "orders"} // Schema left zero-value
+	a := TableMetadataFromProtocol(p)
+	if a.Schema == nil || *a.Schema != "public" {
+		t.Fatalf("expected FromProtocol to default empty Schema to \"public\", got %v", a.Schema)
+	}
+
+	a2 := TableMetadata{Id: strPtr("orders"), Name: strPtr("orders")} // Schema left nil
+	back := TableMetadataToProtocol(a2)
+	if back.Schema != "public" {
+		t.Fatalf("expected ToProtocol to default nil/empty Schema to \"public\", got %q", back.Schema)
 	}
 }
 
