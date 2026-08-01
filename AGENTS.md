@@ -76,7 +76,8 @@ Detailed technical documentation is organized by directory:
 > **Terminology.** "Schema" is used in two senses in this codebase. *Table shape* (columns/types),
 > as in schema evolution; and *PostgreSQL namespace* (`public`, `sales`), as in multi-schema
 > support. `protocol.TableRef.Schema` and `Message.TableSchema` always mean the **namespace**.
-> See [`MULTI_SCHEMA_PLAN.md`](MULTI_SCHEMA_PLAN.md), the normative reference cited by ~30 code comments.
+> See [`MULTI_SCHEMA_PLAN.md`](MULTI_SCHEMA_PLAN.md), the normative reference cited by ~30 code comments,
+> and [`docs/decisions/`](docs/decisions/) for the ADRs behind it.
 
 ## Patched Dependencies
 
