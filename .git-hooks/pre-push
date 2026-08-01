@@ -118,7 +118,14 @@ for i in {1..30}; do
 done
 
 echo "Starting API server..."
-JWT_SECRET="my-super-secret-jwt-key!" ENCRYPTION_KEY="my-super-secret-key-32-chars-long!" NATS_URL="nats://localhost:4222" go run ./cmd/api/main.go > api.log 2>&1 &
+# Both values are length-validated by the API at startup: JWT_SECRET must be
+# >= 32 bytes, and ENCRYPTION_KEY must be exactly 16/24/32 bytes (AES). The
+# previous literals were 24 and 34 bytes, so the API refused to start and this
+# gate could never pass. ENCRYPTION_KEY matches docker-compose.yaml.
+JWT_SECRET="local-pre-push-jwt-secret-32-bytes-min" \
+ENCRYPTION_KEY="my-super-secret-key-32-chars-lon" \
+NATS_URL="nats://localhost:4222" \
+go run ./cmd/api/main.go > api.log 2>&1 &
 API_PID=$!
 
 echo "Waiting for API server to be healthy..."
