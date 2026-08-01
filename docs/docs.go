@@ -829,7 +829,7 @@ const docTemplate = `{
                         "Bearer": []
                     }
                 ],
-                "description": "Discover available tables and schemas directly from the source database",
+                "description": "Discover available schemas directly from the source database",
                 "produces": [
                     "application/json"
                 ],

@@ -757,8 +757,7 @@ paths:
       - sources
   /sources/{id}/schema:
     get:
-      description: Discover available tables and schemas directly from the source
-        database
+      description: Discover available schemas directly from the source database
       parameters:
       - description: Source ID
         in: path

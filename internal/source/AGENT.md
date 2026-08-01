@@ -14,7 +14,7 @@ Located in `provider.go`, the interface defines the contract for any ingress bac
 - **PostgreSQL CDC (`postgres/`)**:
     - Leverages logical replication via `go-pq-cdc`.
     - Handles snapshots and real-time CDC.
-    - Implements dynamic table discovery.
+    - Implements dynamic table discovery, **restricted to `SourceConfig.Schemas`**. An empty/nil whitelist means `public` ONLY -- never "all schemas" (defaulting to all would silently replicate unrelated schemas on upgrade).
 
 ## Plugging in New Backends
 

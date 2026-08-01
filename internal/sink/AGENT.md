@@ -28,4 +28,6 @@ To support a new sink (e.g., ClickHouse, BigQuery, Snowflake):
 
 - **Batched Upserts**: PnP implementations should prioritize bulk operations (`VALUES (..), (..), ..`) for performance.
 - **Idempotency**: Must use `UPSERT`, `REPLACE INTO`, or `ON CONFLICT` logic to ensure "at-least-once" message delivery does not create duplicates.
-- **Column Sanitization**: Always quote column and table names to handle case-sensitivity and reserved keywords.
+- **Column Sanitization**: Always quote column and table names to handle case-sensitivity and reserved keywords. Table names are **schema-qualified** (`"public"."orders"`); quote each component separately.
+- **Schema/database mapping (Databend)**: a Postgres **schema** maps to a Databend **DATABASE** -- Databend is `catalog.database.table` with no schema layer. `public.orders` is written to database `public`, **not** to the database the DSN selects. The `auto_create_schema` option (default **true**) issues `CREATE DATABASE IF NOT EXISTS`; when false, `PipelineFactory` validates every target at startup via the `SchemaValidator` interface and refuses to start rather than retrying per message.
+- **DDL error classification** (`databend/errors.go`): permanent failures (unknown database, syntax, privilege) set the table Failed and dead-letter; transient ones (connection, timeout) retry. Never let a permanently-unsatisfiable DDL error redeliver forever.

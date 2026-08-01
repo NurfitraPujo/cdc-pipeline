@@ -1,3 +1,10 @@
+> **STATUS (2026-08-01): OBSOLETE — will not fix as written.**
+> This TODO assumes a single `panic`-to-`logger.Error` patch. The fork now carries **eight**
+> patches (see `internal/vendor/go-pq-cdc/PATCHES.md`), several load-bearing for correctness:
+> T0-3 guards a real data-loss bug, and T0-2 is API-breaking across three exported interfaces.
+> "Remove the patched dependency" is no longer feasible. The live option is the one VENDOR.md
+> already recommends: promote the in-tree fork to a real fork repo and point `replace` at it.
+
 # TODO: Resolve Patched Upstream Dependency (`go-pq-cdc`)
 
 ## Context

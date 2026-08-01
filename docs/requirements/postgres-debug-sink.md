@@ -351,7 +351,10 @@ CREATE TABLE cdc_debug_messages (
     source_id VARCHAR(255) NOT NULL,
     sink_id VARCHAR(255) NOT NULL,
     table_name VARCHAR(255) NOT NULL,
-    schema_name VARCHAR(255),
+    schema_name VARCHAR(255),   -- source Postgres schema, from Message.TableSchema
+                                -- (populated on every row). Left EMPTY, not
+                                -- defaulted to "public", when the message
+                                -- carries no schema information at all.
     operation_type VARCHAR(20) NOT NULL,
     lsn BIGINT,
     primary_key TEXT,
@@ -461,6 +464,10 @@ sinks:
         cleanup_interval: "1h"
       
       filters:
+        # NOTE: these match the BARE table name, so they cannot distinguish
+        # public.orders from sales.orders -- a rule applies in every schema.
+        # "*" is glob; every other character (including ".") is escaped, and
+        # an invalid pattern logs a warning and matches nothing.
         include_tables: ["orders", "order_items"]
         exclude_tables: ["logs", "temp_*"]
         include_operations: ["insert", "update", "delete", "snapshot"]

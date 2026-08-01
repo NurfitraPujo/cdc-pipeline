@@ -1004,7 +1004,7 @@ func (h *Handler) openSourceDB(c *gin.Context, id string) (*sql.DB, bool) {
 
 // GetSourceSchema triggers or retrieves table schema discovery for a source.
 // @Summary      Get source schema
-// @Description  Discover available tables and schemas directly from the source database
+// @Description  Discover available schemas directly from the source database
 // @Tags         sources
 // @Produce      json
 // @Security     Bearer

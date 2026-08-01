@@ -539,9 +539,12 @@ paths:
       tags: [Sources]
       summary: List available schemas for a source
       description: |
-        Returns the schemas discoverable on the source database. The
-        current implementation returns a static list; in a future
-        release this may trigger live discovery via a worker.
+        Queries pg_namespace on the source database live, excluding
+        system schemas (pg_catalog, information_schema, pg_*).
+
+        Note the whitelist semantic this feeds: an empty or omitted
+        `schemas` list on a source means "public" ONLY, never "all
+        schemas".
       operationId: getSourceSchema
       responses:
         '200':
@@ -552,6 +555,8 @@ paths:
                 $ref: '#/components/schemas/SourceSchemaResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: Source database unreachable or schema discovery failed
 
   /sources/{id}/tables:
     parameters:
@@ -1022,7 +1027,11 @@ components:
           minItems: 1
           items:
             type: string
-          description: Tables to replicate (whitelist).
+          description: >-
+            Tables to replicate (whitelist). Entries may be bare
+            ("orders" means "public.orders") or schema-qualified
+            ("sales.orders"). Names containing "=" or more than one
+            "." are rejected.
         batch_size:
           type: integer
           nullable: true
@@ -1247,7 +1256,7 @@ components:
           description: |
             Raw key/value snapshot of all NATS KV entries under the
             pipeline's status prefix. Keys are full NATS KV keys
-            (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats`),
+            (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{token}.stats`, where token is the bare table name for the `public` schema and `schema=table` otherwise),
             values are the deserialized worker-internal type
             (`Checkpoint`, `TableStats`, or `PipelineTransitionState`).
             Modeled as `additionalProperties: true` (maps to

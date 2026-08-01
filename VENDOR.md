@@ -1,6 +1,6 @@
 # Maintaining Patched Dependencies
 
-This project contains a locally patched version of `github.com/Trendyol/go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. This was done to address a specific `panic` issue during connection shutdown.
+This project contains a locally patched version of `github.com/Trendyol/go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. It began as a single `panic`-on-shutdown fix, but has since grown into a hand-maintained fork carrying **eight** patches (T0-1..T0-3, T1-4, T1-5, T2-6, MS-1, MS-2) — see [`internal/vendor/go-pq-cdc/PATCHES.md`](internal/vendor/go-pq-cdc/PATCHES.md) for the authoritative catalogue.
 
 ## **Why a Local Vendor?**
 The `vendor/` directory was removed from Git to reduce the repository size from ~13MB to <1MB. However, since we need to keep our custom fix for `go-pq-cdc`, we've isolated only that dependency into the `internal/vendor/` directory and used a Go `replace` directive in `go.mod`.

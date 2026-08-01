@@ -10,7 +10,7 @@ The `internal/engine` package contains the core streaming logic of the CDC Data 
     - Wraps NATS publishing in a **Circuit Breaker** (using `gobreaker`) to prevent head-of-line blocking during transient failures.
     - **Chaotic-Safe Dynamic Discovery**:
         - **Chunked Dynamic Snapshots**: When a new table is discovered, the Producer performs an automatic catch-up snapshot using paginated `SELECT` queries to bridge the gap before replication starts.
-        - **Snapshot Isolation**: While a table is snapshotting or draining, concurrent CDC data is automatically buffered to a dedicated NATS JetStream topic (`cdc_pipeline_{id}_buffer_{table}`).
+        - **Snapshot Isolation**: While a table is snapshotting or draining, concurrent CDC data is automatically buffered to a dedicated NATS JetStream topic (`cdc_pipeline_{id}_buffer_{token}`, where token is `TableRef.KeyToken()` -- the bare name for `public`, `schema=table` otherwise).
     - **Cache Warming**: Initial discovery now warms the producer's memory cache, preventing false-positive evolution freezes on startup.
 - **`Consumer`**:
     - Interfaces with egress sinks (e.g., `internal/sink`).

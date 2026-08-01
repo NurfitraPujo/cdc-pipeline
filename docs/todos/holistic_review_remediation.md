@@ -134,7 +134,7 @@ Sequencing rationale (TL;DR): Tier 0 must land before any production restart bec
   1. Split the qualified name on `.`:
      ```go
      schema, table := splitQualified(tableName)
-     // query: WHERE table_schema = ? AND table_name = ?
+     // query: WHERE table_schema = ? AND table_name = ?   [DONE 2026-08-01: shipped in getCurrentColumns]
      ```
   2. Tokenize `quoteIdentifier` per part, joining with `.`. Pair this with T1-13 which has the same root cause for the DDL path.
   3. After `getCurrentColumns` returns its result, log the count of columns found for observability.

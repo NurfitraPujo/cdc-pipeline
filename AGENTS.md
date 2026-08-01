@@ -73,19 +73,35 @@ Detailed technical documentation is organized by directory:
 - **Chaotic-Safe Dynamic Discovery**: Bridges the "Gap of Uncertainty" for new tables using **paginated SELECT snapshots** and **JetStream buffering** to prevent data loss even when inserts immediately follow table creation.
 - **Schema**: Auto-evolves based on source DDL changes with a Schema Circuit Breaker for stability.
 
+> **Terminology.** "Schema" is used in two senses in this codebase. *Table shape* (columns/types),
+> as in schema evolution; and *PostgreSQL namespace* (`public`, `sales`), as in multi-schema
+> support. `protocol.TableRef.Schema` and `Message.TableSchema` always mean the **namespace**.
+> See [`MULTI_SCHEMA_PLAN.md`](MULTI_SCHEMA_PLAN.md), the normative reference cited by ~30 code comments.
+
 ## Patched Dependencies
 
-This project includes a **critical patch** for `go-pq-cdc` (PostgreSQL CDC library) located in `internal/vendor/go-pq-cdc/`.
+`go-pq-cdc` (the PostgreSQL CDC library) is a **hand-maintained fork in-tree** at
+`internal/vendor/go-pq-cdc/`, wired up by a `replace` directive in `go.mod`. It carries **eight**
+local patches, not one.
 
-### The Patch
+**The authoritative catalogue is [`internal/vendor/go-pq-cdc/PATCHES.md`](internal/vendor/go-pq-cdc/PATCHES.md)** —
+read it before touching that tree. Summary of the series:
 
-**File**: `internal/vendor/go-pq-cdc/pq/replication/stream.go:211`
+| ID | Concern |
+|----|---------|
+| T0-1 | `ManualCommit` / `KeepaliveFunc`; monotonic `UpdateXLogPos` |
+| T0-2 | `UpdateXLogPos` widened to `(ctx, lsn) error` — **API-breaking across three exported interfaces** |
+| T0-3 | In-band keepalive marker on `messageCH` (guards a real data-loss bug) |
+| T1-4 | Lazy `Snapshotter.Connect` |
+| T1-5 | `isClosed` → `sync.Once` |
+| T2-6 | Retry `If` filter ignored / inverted callback |
+| MS-1 | `search_path` pinning on the regular connection |
+| MS-2 | Schema-aware `cdc_snapshot_*` bookkeeping (**must be replayed with MS-1**) |
 
-**Change**: Replaced `panic("corrupted connection")` with `logger.Error("corrupted connection")`
+**Conventions**: every edit carries a `// vendored-patch: <ID>` marker AND a `PATCHES.md` entry.
+Re-syncing upstream without replaying the full set silently reintroduces the bugs these fix.
 
-**Why**: The original library would panic on connection EOF during shutdown, causing the entire stateful worker process to crash. This is a deficiency in the upstream library design. The patch ensures graceful handling of connection issues without bringing down all pipelines.
-
-**Maintenance**: See [`VENDOR.md`](VENDOR.md) for instructions on updating the patched dependency.
+**Maintenance**: see [`VENDOR.md`](VENDOR.md).
 
 ## Observability: Four Golden Signals
 

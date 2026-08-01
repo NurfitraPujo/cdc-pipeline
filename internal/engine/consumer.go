@@ -549,7 +549,7 @@ func (c *Consumer) updateTableError(sourceID string, ref protocol.TableRef) {
 	s.Status = "ERROR"
 	s.UpdatedAt = time.Now()
 
-	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, ref.Table).Inc()
+	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, ref.String()).Inc()
 	statsData, _ := json.Marshal(s)
 	statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, ref)
 	if _, err := c.kv.Put(statsKey, statsData); err != nil {
@@ -746,7 +746,7 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 		s.Status = "ERROR"
 		s.UpdatedAt = time.Now()
 
-		metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Inc()
+		metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, msgTableRef(m).String()).Inc()
 		statsData, _ := s.MarshalMsg(nil)
 		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 		if _, err := c.kv.Put(statsKey, statsData); err != nil {
@@ -860,14 +860,16 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 		count := uint64(countsByTable[key])
 		if count > 0 {
 			s.TotalSynced += count
-			metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Add(float64(count))
+			// Qualified label (MULTI_SCHEMA_PLAN.md §7.5): a bare m.Table would
+			// collapse public.orders and sales.orders into one time series.
+			metrics.RecordsSynced.WithLabelValues(c.pipelineID, m.SourceID, msgTableRef(m).String()).Add(float64(count))
 		}
 		s.LastSourceTS = m.Timestamp
 		s.LastProcessedTS = now
 		s.LagMS = now.Sub(m.Timestamp).Milliseconds()
 		s.UpdatedAt = now
 
-		metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, m.Table).Set(float64(s.LagMS))
+		metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, msgTableRef(m).String()).Set(float64(s.LagMS))
 
 		statsData, err := s.MarshalMsg(nil)
 		if err == nil {

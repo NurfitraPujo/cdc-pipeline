@@ -143,7 +143,7 @@ To verify that Change Data Capture (CDC) replication is executing end-to-end:
 2. **Verify Analytical Replication in Databend**:
    Query Databend to confirm the change records were captured, batched, and replicated:
    ```bash
-   podman exec -it cdc-databend bendctl query "SELECT * FROM users;"
+   podman exec -it cdc-databend bendctl query 'SELECT * FROM "public"."users";'  # a Postgres schema maps to a Databend DATABASE
    ```
 
 3. **Verify Debug Logs in the Debug Sink**:

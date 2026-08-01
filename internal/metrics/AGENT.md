@@ -10,7 +10,7 @@ The `internal/metrics` package provides Prometheus-compatible metrics for monito
 
 **Type**: Gauge
 
-**Labels**: `pipeline_id`, `source_id`, `table`
+**Labels**: `pipeline_id`, `source_id`, `table` (the **schema-qualified** `TableRef.String()`, e.g. `public.orders` -- a bare name would collapse `public.orders` and `sales.orders` into one series)
 
 **Description**: The current time delay between the source database transaction commit and the successful write to the sink. This represents the end-to-end latency of the pipeline.
 
@@ -26,7 +26,7 @@ The `internal/metrics` package provides Prometheus-compatible metrics for monito
 
 **Type**: Counter
 
-**Labels**: `pipeline_id`, `source_id`, `table`
+**Labels**: `pipeline_id`, `source_id`, `table` (the **schema-qualified** `TableRef.String()`, e.g. `public.orders` -- a bare name would collapse `public.orders` and `sales.orders` into one series)
 
 **Description**: The total number of records successfully synced to the sink. This represents the throughput/volume of data flowing through the pipeline.
 
@@ -42,7 +42,7 @@ The `internal/metrics` package provides Prometheus-compatible metrics for monito
 
 **Type**: Counter
 
-**Labels**: `pipeline_id`, `source_id`, `table`
+**Labels**: `pipeline_id`, `source_id`, `table` (the **schema-qualified** `TableRef.String()`, e.g. `public.orders` -- a bare name would collapse `public.orders` and `sales.orders` into one series)
 
 **Description**: The total number of errors encountered during sync operations, including:
 - Sink upload failures
@@ -121,6 +121,6 @@ time() - cdc_pipeline_worker_heartbeat_timestamp > 60
 ## Implementation Notes
 
 - Metrics use `promauto.NewCounterVec` and `promauto.NewGaugeVec` for automatic registration
-- Label cardinality is bounded by pipeline/table count
+- Label cardinality is bounded by pipeline/table count (tables counted per schema, since the label is qualified)
 - No custom histograms are currently implemented (lag uses gauge, not histogram)
 - Consider adding histogram buckets for latency distribution if p50/p99 percentiles are needed
