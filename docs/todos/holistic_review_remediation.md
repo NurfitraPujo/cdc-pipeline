@@ -362,7 +362,7 @@ Sequencing rationale (TL;DR): Tier 0 must land before any production restart bec
 | T2-2 | Missing HTTP timeouts | `cmd/api/main.go` lines 150-160 | Set ReadTimeout/WriteTimeout/IdleTimeout on `http.Server`. |
 | T2-3 | Silent decryption fallbacks | `internal/protocol/config.go` lines 270-300 | Return errors instead of falling through; fail-fast in bootstrap. |
 | T2-4 | Lossy type mapping (decimal/array) | `internal/sink/databend/sink.go` lines 200-235, 320-325; `docs/todos/lossy_type_mappings.md` | Map decimals to DECIMAL(38,9), arrays to VARIANT/ARRAY; expand Go primitive switch. |
-| T2-5 | Patched upstream dep risk | `internal/vendor/go-pq-cdc/**` | Open upstream PRs; track patches in `vendor/PATCHES.md`; evaluate pglogrepl. |
+| T2-5 | Patched upstream dep risk | `internal/vendor/go-pq-cdc/**` | Open upstream PRs; track patches in `internal/vendor/go-pq-cdc/PATCHES.md`; evaluate pglogrepl. |
 | T2-6 | Retry filter ignored | `internal/vendor/go-pq-cdc/internal/retry/retry.go` | Register `RetryIf(rc.If)` in options array inside `retry.go`'s `Do` method, and correct connection.go's check filter callback from `err == nil` to `err != nil`. |
 | T2-7 | Slice index overflow in pagination | `internal/api/handler.go` lines 285-345 | Cap `limit <= 100`; verify `start >= 0 && start <= total`. |
 | T2-8 | Frontend JSON `//` comments | `web/src/lib/jsonToUpdateRequest.ts` | Strip both `#` and `//` lines before `JSON.parse`. |
@@ -392,7 +392,7 @@ Sequencing rationale (TL;DR): Tier 0 must land before any production restart bec
 5. **Vendor patch tracking**: Maintain `internal/vendor/go-pq-cdc/PATCHES.md` listing each local divergence and the upstream issue/PR.
 6. **Rate limit policy**: Document the API rate limit defaults in `docs/` so operators know what to tune.
 7. **Atomic-level tests**: Add `-race` to CI; the loop and channel bugs are caught reliably by the race detector.
-8. **Failure-mode runbook**: Produce `docs/runbooks/incident_recovery.md` covering restart, WAL replay, schema re-apply.
+8. **Failure-mode runbook**: Produce `docs/runbooks/incident_recovery.md` covering restart, WAL replay, schema re-apply. <!-- hygiene:planned -->
 
 ---
 

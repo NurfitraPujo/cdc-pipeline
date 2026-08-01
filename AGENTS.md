@@ -88,9 +88,14 @@ Docs go stale silently. Two mechanisms exist so that they do not.
 resolve and that the line exists, that ADR cross-links and the ADR index agree, and that generated
 swagger matches its source annotations.
 
-It deliberately ignores `summaries/`, `docs/todos/` and `docs/requirements/` — those are
-point-in-time records that legitimately cite files which were proposed but never built. Rewriting
-them would falsify history.
+It deliberately ignores `summaries/`, `docs/requirements/` and `*INVESTIGATION*.md` — those are
+point-in-time records that legitimately cite files proposed but never built. Rewriting them would
+falsify history.
+
+**Escape hatch.** A living doc may legitimately cite a path that does not exist yet — a backlog
+entry saying "produce `docs/runbooks/foo.md`", for instance. Mark that line <!-- hygiene:ignore -->
+`<!-- hygiene:planned -->` (or `hygiene:ignore`). It renders invisibly in Markdown and is greppable,
+so the exception is a deliberate, reviewable act rather than a silent directory-wide exclusion.
 
 **Judgement-based.** The `/docs-hygiene` skill reviews a diff for what a script cannot decide: is a
 documented *claim* still true, does this change deserve an ADR, does something belong in memory, has
@@ -108,12 +113,22 @@ template in [`docs/decisions/README.md`](docs/decisions/README.md).
 
 ### Document types
 
-| Location | Kind | Expected to stay true? |
-|---|---|---|
-| `README.md`, `AGENTS.md`, `**/AGENT.md`, `LOCAL_DEVELOPMENT.md`, `VENDOR.md` | living | yes — sensor enforces citations |
-| `docs/decisions/` | immutable decisions | yes, superseded not edited |
-| `rfc/` | broad architecture | yes |
-| `docs/requirements/`, `docs/todos/`, `summaries/`, `docs/*INVESTIGATION*.md` | point-in-time record | no — leave as written |
+| Location | Kind | Purpose | Sensor |
+|---|---|---|---|
+| `README.md`, `AGENTS.md`, `**/AGENT.md`, `LOCAL_DEVELOPMENT.md`, `VENDOR.md`, `PATCHES.md` | living | how the system works now | enforced |
+| `rfc/` | living | significant changes needing options weighed before a decision | enforced |
+| `docs/decisions/` | living, immutable | the decision and why; superseded, never edited | enforced |
+| `docs/todos/` | living | **the backlog** — deferred work, known defects, design flaws, missing tests, tech debt | enforced |
+| `docs/requirements/` | historical | specs as written at the time; superseded by ADRs | ignored |
+| `summaries/`, `docs/*INVESTIGATION*.md` | historical | review output and findings as they stood | ignored |
+
+`docs/todos/` is the designated home for anything found and **deliberately not fixed**: a bug, a
+design flaw, a missing test, tech debt. Deferring is fine; deferring silently is not. Record it
+there with enough context to act on later, and cite real paths — a TODO whose references have
+rotted is a TODO nobody can pick up.
+
+An `rfc/` document is warranted when a change is significant enough that the options need weighing
+before one is chosen. The resulting decision belongs in an ADR; the RFC keeps the exploration.
 
 ## Patched Dependencies
 

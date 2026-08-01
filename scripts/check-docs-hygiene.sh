@@ -27,22 +27,27 @@ note() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAILED=1; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 skip() { printf '  \033[33m-\033[0m %s\n' "$1"; }
 
-# LIVING docs only -- documents that describe how the system works *now* and
-# are expected to be kept true.
+# LIVING docs -- documents expected to be kept true. Includes:
+#   - README / AGENTS / **/AGENT.md / LOCAL_DEVELOPMENT / VENDOR / PATCHES
+#   - docs/decisions/  (ADRs; immutable, but their citations must resolve)
+#   - rfc/             (design records for significant changes; kept current)
+#   - docs/todos/      (the live backlog of deferred work -- a TODO that cites
+#                       a file which no longer exists is a TODO nobody can act
+#                       on, which is exactly the rot this sensor exists to catch)
 #
-# Deliberately excluded: summaries/, docs/todos/, docs/requirements/ and
-# docs/GRACEFUL_SHUTDOWN_INVESTIGATION.md. Those are point-in-time records
-# (review output, planning notes, investigations). They legitimately cite files
-# that were proposed but never built, or that have since moved -- rewriting them
-# would falsify history, so failing a commit over them is wrong. The
-# /docs-hygiene skill is where staleness in those is judged, not here.
+# Deliberately excluded, as point-in-time records that must NOT be rewritten:
+#   - summaries/                     (archived review output)
+#   - docs/requirements/             (as-written specs; superseded by ADRs)
+#   - docs/*INVESTIGATION*.md        (findings as they stood on the day)
+# These legitimately cite files that were proposed but never built. Failing a
+# commit over them would falsify history. Staleness there is a judgement call
+# for the /docs-hygiene skill.
 mapfile -t DOCS < <(git ls-files '*.md' \
   | grep -v '^web/node_modules/' \
   | grep -v '^\.kilo/' \
   | grep -v '^summaries/' \
-  | grep -v '^docs/todos/' \
   | grep -v '^docs/requirements/' \
-  | grep -v '^docs/GRACEFUL_SHUTDOWN_INVESTIGATION\.md$' \
+  | grep -v 'INVESTIGATION\.md$' \
   | grep -v '^internal/vendor/go-pq-cdc/\(README\|CONTRIBUTING\|CHANGELOG\)' )
 
 echo "🔍 Docs hygiene sensor (${#DOCS[@]} markdown files)"
@@ -51,40 +56,53 @@ echo "🔍 Docs hygiene sensor (${#DOCS[@]} markdown files)"
 MAP_OUT=$(python3 - "${DOCS[@]}" <<'PY'
 import os, re, sys
 docs = sys.argv[1:]
+
 # NOTE: alternation is ordered, so longer suffixes MUST come first -- with
 # "ts|tsx", ".ts" matches the prefix of "__root.tsx" and reports a false stale
 # reference. The trailing lookahead enforces the same boundary rule.
 PATH_RE = re.compile(r'`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_.-]+\.(?:go|md|yaml|yml|json|tsx|ts|sh|sql))(?![A-Za-z0-9])(:(\d+))?')
+
+# Escape hatch, per line. A backlog entry may legitimately cite a file that does
+# not exist yet ("create docs/runbooks/foo.md"), and an ADR may cite a path that
+# was deliberately removed. Marking the line is a deliberate, greppable act --
+# unlike a blanket directory exclusion, which silently stops checking everything.
+IGNORE_RE = re.compile(r'hygiene:(planned|ignore)')
+
 def lc(p):
     try:
         return sum(1 for _ in open(p, 'rb'))
     except OSError:
         return None
+
 bad = []
 for doc in docs:
     base = os.path.dirname(doc)
     try:
-        text = open(doc, encoding='utf-8', errors='replace').read()
+        lines = open(doc, encoding='utf-8', errors='replace').read().splitlines()
     except OSError:
         continue
-    for m in PATH_RE.finditer(text):
-        raw, ln = m.group(1), m.group(3)
-        # A citation may be written repo-root-relative, relative to the doc's own
-        # directory (PATCHES.md uses vendored-module-relative paths), or in the
-        # common shorthand that drops the leading "internal/".
-        cands = (
-            raw,
-            os.path.normpath(os.path.join(base, raw)),
-            os.path.join("internal", raw),
-            os.path.join("internal/vendor/go-pq-cdc", raw),
-        )
-        hit = next((c for c in cands if os.path.isfile(c)), None)
-        if hit is None:
-            bad.append(f"{doc}: cites `{raw}` which does not exist")
-        elif ln:
-            n = lc(hit)
-            if n is not None and int(ln) > n:
-                bad.append(f"{doc}: cites `{raw}` but that file has only {n} lines")
+    for i, line in enumerate(lines, 1):
+        if IGNORE_RE.search(line):
+            continue
+        for m in PATH_RE.finditer(line):
+            raw, ln = m.group(1), m.group(3)
+            # A citation may be repo-root-relative, relative to the doc's own
+            # directory (PATCHES.md uses vendored-module-relative paths), or in
+            # the common shorthand that drops the leading "internal/".
+            cands = (
+                raw,
+                os.path.normpath(os.path.join(base, raw)),
+                os.path.join("internal", raw),
+                os.path.join("internal/vendor/go-pq-cdc", raw),
+            )
+            hit = next((c for c in cands if os.path.isfile(c)), None)
+            if hit is None:
+                bad.append(f"{doc}:{i}: cites `{raw}` which does not exist "
+                           f"(if intentional, mark the line hygiene:planned)")
+            elif ln:
+                n = lc(hit)
+                if n is not None and int(ln) > n:
+                    bad.append(f"{doc}:{i}: cites `{raw}` but that file has only {n} lines")
 for b in sorted(set(bad)):
     print(b)
 PY
