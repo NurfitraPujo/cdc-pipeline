@@ -31,5 +31,10 @@ if [ -f "go.mod" ]; then
     go test -short $(go list ./... | grep -v /test/e2e)
 fi
 
+# 5. Docs hygiene (documentation staleness sensor)
+if [ -x "scripts/check-docs-hygiene.sh" ]; then
+    scripts/check-docs-hygiene.sh
+fi
+
 echo "✅ All sensors passed! Commit allowed."
 echo "========================================="

@@ -79,6 +79,42 @@ Detailed technical documentation is organized by directory:
 > See [`MULTI_SCHEMA_PLAN.md`](MULTI_SCHEMA_PLAN.md), the normative reference cited by ~30 code comments,
 > and [`docs/decisions/`](docs/decisions/) for the ADRs behind it.
 
+## Documentation Hygiene
+
+Docs go stale silently. Two mechanisms exist so that they do not.
+
+**Mechanical, blocking.** `scripts/check-docs-hygiene.sh` runs in the pre-commit harness and in CI
+(`make check-docs` to run it directly). It verifies that `file.go:NNN` citations in *living* docs
+resolve and that the line exists, that ADR cross-links and the ADR index agree, and that generated
+swagger matches its source annotations.
+
+It deliberately ignores `summaries/`, `docs/todos/` and `docs/requirements/` — those are
+point-in-time records that legitimately cite files which were proposed but never built. Rewriting
+them would falsify history.
+
+**Judgement-based.** The `/docs-hygiene` skill reviews a diff for what a script cannot decide: is a
+documented *claim* still true, does this change deserve an ADR, does something belong in memory, has
+the code drifted from an existing ADR. Run it before opening a PR.
+
+### When to write an ADR
+
+Write one when the change is a **decision**, not an implementation: hard to reverse, contradicts an
+obvious default, rejects a reasonable alternative for a non-obvious reason, or trades one failure
+mode for another. Not for bug fixes or refactors.
+
+Record the rejected options and the *bad* consequences — that is the part with lasting value. ADRs
+are **immutable**: supersede with a new one, never edit a decision to match new reality. Index and
+template in [`docs/decisions/README.md`](docs/decisions/README.md).
+
+### Document types
+
+| Location | Kind | Expected to stay true? |
+|---|---|---|
+| `README.md`, `AGENTS.md`, `**/AGENT.md`, `LOCAL_DEVELOPMENT.md`, `VENDOR.md` | living | yes — sensor enforces citations |
+| `docs/decisions/` | immutable decisions | yes, superseded not edited |
+| `rfc/` | broad architecture | yes |
+| `docs/requirements/`, `docs/todos/`, `summaries/`, `docs/*INVESTIGATION*.md` | point-in-time record | no — leave as written |
+
 ## Patched Dependencies
 
 `go-pq-cdc` (the PostgreSQL CDC library) is a **hand-maintained fork in-tree** at

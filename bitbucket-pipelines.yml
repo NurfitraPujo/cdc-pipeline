@@ -187,6 +187,17 @@ pipelines:
                   includePaths:
                     - deploy/helm-chart/**
               <<: *lintKubeYaml
+          - step:
+              name: Docs Hygiene
+              image: alpine:3.20
+              max-time: 5
+              script:
+                # Mechanical documentation staleness checks: dead file:line
+                # references in living docs, broken ADR links, ADRs missing from
+                # the index. Blocking -- see docs/decisions/README.md and the
+                # /docs-hygiene skill for the judgement-based counterpart.
+                - apk add --no-cache bash python3 git
+                - bash scripts/check-docs-hygiene.sh
 
   tags:
     "v*-staging":

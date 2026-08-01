@@ -10,7 +10,7 @@ This document tracks local divergences from the upstream `go-pq-cdc` library.
 
 **Files Modified**:
 - `pq/snapshot/snapshot.go`
-- `pq/replication/connector.go`
+- `connector.go`
 
 **Problem**: `Snapshotter.New()` opened 7 database connections (metadata, healthcheck, 5 connection pool) even when snapshot is skipped, wasting resources.
 
@@ -28,7 +28,7 @@ This document tracks local divergences from the upstream `go-pq-cdc` library.
 
 **Files Modified**:
 - `pq/replication/stream.go`
-- `pq/replication/connector.go`
+- `connector.go`
 
 **Problem**: The `isClosed(ch)` helper used `select { case <-ch: return true; default: return false }` which drains buffered channel values when called, causing signal loss.
 

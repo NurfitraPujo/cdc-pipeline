@@ -132,3 +132,6 @@ setup-hooks:
 	git config core.hooksPath .git-hooks
 	chmod +x .git-hooks/pre-commit .git-hooks/pre-push
 	@echo "Hooks installed successfully!"
+
+check-docs: ## Run the documentation hygiene sensor (mechanical staleness checks)
+	@scripts/check-docs-hygiene.sh
