@@ -29,9 +29,13 @@ trap finish EXIT
 # If the commit being pushed contains [E2E NOT CHECKED] in its subject line,
 # skip the slow container rebuild + E2E run (but still enforce fast unit tests).
 ESCAPE=false
-while read -r ref oid; do
-    if [ "$ref" = "refs/heads/$(git symbolic-ref --short HEAD 2>/dev/null)" ]; then
-        SUBJECT=$(git log -1 --format=%s "$oid")
+# git feeds pre-push FOUR fields per line on stdin:
+#   <local ref> <local oid> <remote ref> <remote oid>
+# Reading only two put the remaining fields into $oid, so `git log "$oid"`
+# died with "ambiguous argument" and set -e blocked every push.
+while read -r local_ref local_oid remote_ref remote_oid; do
+    if [ "$local_ref" = "refs/heads/$(git symbolic-ref --short HEAD 2>/dev/null)" ]; then
+        SUBJECT=$(git log -1 --format=%s "$local_oid")
         if echo "$SUBJECT" | grep -qi "\[E2E NOT CHECKED\]"; then
             ESCAPE=true
         fi
