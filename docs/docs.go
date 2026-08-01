@@ -34,7 +34,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.GlobalConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig"
                         }
                     },
                     "404": {
@@ -72,7 +72,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.GlobalConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig"
                         }
                     }
                 ],
@@ -80,7 +80,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.GlobalConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig"
                         }
                     },
                     "429": {
@@ -216,7 +216,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.PipelineConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig"
                         }
                     }
                 ],
@@ -224,7 +224,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/protocol.PipelineConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig"
                         }
                     },
                     "429": {
@@ -267,7 +267,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.PipelineConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig"
                         }
                     },
                     "404": {
@@ -312,7 +312,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.PipelineConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig"
                         }
                     }
                 ],
@@ -320,7 +320,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.PipelineConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig"
                         }
                     },
                     "429": {
@@ -483,7 +483,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/protocol.SinkConfig"
+                                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                                 }
                             }
                         }
@@ -514,7 +514,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.SinkConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                         }
                     }
                 ],
@@ -522,7 +522,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SinkConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                         }
                     }
                 }
@@ -556,7 +556,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SinkConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                         }
                     },
                     "404": {
@@ -601,7 +601,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.SinkConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                         }
                     }
                 ],
@@ -609,7 +609,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SinkConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig"
                         }
                     }
                 }
@@ -664,7 +664,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/protocol.SourceConfig"
+                                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                                 }
                             }
                         }
@@ -695,7 +695,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.SourceConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                         }
                     }
                 ],
@@ -703,7 +703,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SourceConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                         }
                     }
                 }
@@ -737,7 +737,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SourceConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                         }
                     },
                     "404": {
@@ -782,7 +782,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/protocol.SourceConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                         }
                     }
                 ],
@@ -790,7 +790,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.SourceConfig"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig"
                         }
                     }
                 }
@@ -889,7 +889,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/protocol.TableMetadata"
+                                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.TableMetadata"
                                 }
                             }
                         }
@@ -918,7 +918,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/protocol.HistoryPoint"
+                                "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.HistoryPoint"
                             }
                         }
                     }
@@ -944,7 +944,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.StatsSummary"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary"
                         }
                     }
                 }
@@ -978,7 +978,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/protocol.WorkerHeartbeat"
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.WorkerHeartbeat"
                         }
                     }
                 }
@@ -986,7 +986,7 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "protocol.GlobalConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig": {
             "type": "object",
             "properties": {
                 "batch_size": {
@@ -996,12 +996,33 @@ const docTemplate = `{
                     "type": "string",
                     "example": "5s"
                 },
+                "crash_recovery_delay": {
+                    "type": "string",
+                    "example": "5s"
+                },
+                "drain_timeout": {
+                    "description": "Timeout configurations",
+                    "type": "string",
+                    "example": "30s"
+                },
+                "global_reload_delay": {
+                    "type": "string",
+                    "example": "2s"
+                },
                 "retry": {
-                    "$ref": "#/definitions/protocol.RetryConfig"
+                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig"
+                },
+                "shutdown_timeout": {
+                    "type": "string",
+                    "example": "30s"
+                },
+                "stabilization_delay": {
+                    "type": "string",
+                    "example": "2s"
                 }
             }
         },
-        "protocol.HistoryPoint": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.HistoryPoint": {
             "type": "object",
             "properties": {
                 "lag_ms": {
@@ -1015,7 +1036,43 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.PipelineConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.OperationType": {
+            "type": "string",
+            "enum": [
+                "insert",
+                "update",
+                "delete",
+                "snapshot",
+                "schema_change",
+                "schema_change_ack",
+                "record_ack",
+                "drain_marker"
+            ],
+            "x-enum-comments": {
+                "OpRecordAck": "replaces the bare \"ack\" string literal"
+            },
+            "x-enum-descriptions": [
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "replaces the bare \"ack\" string literal",
+                ""
+            ],
+            "x-enum-varnames": [
+                "OpInsert",
+                "OpUpdate",
+                "OpDelete",
+                "OpSnapshot",
+                "OpSchemaChange",
+                "OpSchemaChangeAck",
+                "OpRecordAck",
+                "OpDrainMarker"
+            ]
+        },
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig": {
             "type": "object",
             "properties": {
                 "batch_size": {
@@ -1036,11 +1093,11 @@ const docTemplate = `{
                 "processors": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/protocol.ProcessorConfig"
+                        "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig"
                     }
                 },
                 "retry": {
-                    "$ref": "#/definitions/protocol.RetryConfig"
+                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig"
                 },
                 "sinks": {
                     "type": "array",
@@ -1062,11 +1119,17 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.ProcessorConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string"
+                },
+                "operation_types": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.OperationType"
+                    }
                 },
                 "options": {
                     "type": "object",
@@ -1078,7 +1141,7 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.RetryConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig": {
             "type": "object",
             "properties": {
                 "enable_dlq": {
@@ -1097,7 +1160,7 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.SinkConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig": {
             "type": "object",
             "properties": {
                 "dsn": {
@@ -1107,13 +1170,20 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "max_ack_pending": {
+                    "type": "integer"
+                },
+                "options": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
                 "type": {
-                    "description": "e.g., \"databend\"",
+                    "description": "e.g., \"databend\", \"postgres_debug\"",
                     "type": "string"
                 }
             }
         },
-        "protocol.SourceConfig": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig": {
             "type": "object",
             "properties": {
                 "batch_size": {
@@ -1146,6 +1216,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "schemas": {
+                    "description": "Schemas restricts table discovery to these PostgreSQL schemas.\nEmpty or nil means \"public\" ONLY -- deliberately not \"all schemas\":\nevery config predating multi-schema support has this field empty, and\ndefaulting to all would silently begin replicating unrelated schemas on\nupgrade (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 item 4).",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -1176,7 +1247,7 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.StatsSummary": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary": {
             "type": "object",
             "properties": {
                 "avg_lag_ms": {
@@ -1199,7 +1270,7 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.TableMetadata": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.TableMetadata": {
             "type": "object",
             "properties": {
                 "columns": {
@@ -1220,6 +1291,10 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "schema": {
+                    "description": "\"public\" for bare/unqualified tables; see MULTI_SCHEMA_PLAN.md §2.4.",
+                    "type": "string"
+                },
                 "types": {
                     "type": "array",
                     "items": {
@@ -1228,7 +1303,7 @@ const docTemplate = `{
                 }
             }
         },
-        "protocol.WorkerHeartbeat": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.WorkerHeartbeat": {
             "type": "object",
             "properties": {
                 "status": {

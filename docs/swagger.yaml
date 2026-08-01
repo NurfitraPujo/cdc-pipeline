@@ -1,16 +1,32 @@
 basePath: /api/v1
 definitions:
-  protocol.GlobalConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig:
     properties:
       batch_size:
         type: integer
       batch_wait:
         example: 5s
         type: string
+      crash_recovery_delay:
+        example: 5s
+        type: string
+      drain_timeout:
+        description: Timeout configurations
+        example: 30s
+        type: string
+      global_reload_delay:
+        example: 2s
+        type: string
       retry:
-        $ref: '#/definitions/protocol.RetryConfig'
+        $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig'
+      shutdown_timeout:
+        example: 30s
+        type: string
+      stabilization_delay:
+        example: 2s
+        type: string
     type: object
-  protocol.HistoryPoint:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.HistoryPoint:
     properties:
       lag_ms:
         type: integer
@@ -19,7 +35,38 @@ definitions:
       timestamp:
         type: string
     type: object
-  protocol.PipelineConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.OperationType:
+    enum:
+    - insert
+    - update
+    - delete
+    - snapshot
+    - schema_change
+    - schema_change_ack
+    - record_ack
+    - drain_marker
+    type: string
+    x-enum-comments:
+      OpRecordAck: replaces the bare "ack" string literal
+    x-enum-descriptions:
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - replaces the bare "ack" string literal
+    - ""
+    x-enum-varnames:
+    - OpInsert
+    - OpUpdate
+    - OpDelete
+    - OpSnapshot
+    - OpSchemaChange
+    - OpSchemaChangeAck
+    - OpRecordAck
+    - OpDrainMarker
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig:
     properties:
       batch_size:
         description: Override
@@ -34,10 +81,10 @@ definitions:
         type: string
       processors:
         items:
-          $ref: '#/definitions/protocol.ProcessorConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig'
         type: array
       retry:
-        $ref: '#/definitions/protocol.RetryConfig'
+        $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig'
       sinks:
         items:
           type: string
@@ -51,10 +98,14 @@ definitions:
           type: string
         type: array
     type: object
-  protocol.ProcessorConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig:
     properties:
       name:
         type: string
+      operation_types:
+        items:
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.OperationType'
+        type: array
       options:
         additionalProperties: true
         type: object
@@ -62,7 +113,7 @@ definitions:
         description: e.g., "mask", "filter", "custom"
         type: string
     type: object
-  protocol.RetryConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig:
     properties:
       enable_dlq:
         type: boolean
@@ -75,18 +126,23 @@ definitions:
       max_retries:
         type: integer
     type: object
-  protocol.SinkConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig:
     properties:
       dsn:
         description: Data Source Name
         type: string
       id:
         type: string
+      max_ack_pending:
+        type: integer
+      options:
+        additionalProperties: true
+        type: object
       type:
-        description: e.g., "databend"
+        description: e.g., "databend", "postgres_debug"
         type: string
     type: object
-  protocol.SourceConfig:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig:
     properties:
       batch_size:
         type: integer
@@ -109,6 +165,12 @@ definitions:
       publication_name:
         type: string
       schemas:
+        description: |-
+          Schemas restricts table discovery to these PostgreSQL schemas.
+          Empty or nil means "public" ONLY -- deliberately not "all schemas":
+          every config predating multi-schema support has this field empty, and
+          defaulting to all would silently begin replicating unrelated schemas on
+          upgrade (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 item 4).
         items:
           type: string
         type: array
@@ -129,7 +191,7 @@ definitions:
       user:
         type: string
     type: object
-  protocol.StatsSummary:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary:
     properties:
       avg_lag_ms:
         type: integer
@@ -144,7 +206,7 @@ definitions:
       transitioning_count:
         type: integer
     type: object
-  protocol.TableMetadata:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.TableMetadata:
     properties:
       columns:
         items:
@@ -158,12 +220,16 @@ definitions:
         items:
           type: string
         type: array
+      schema:
+        description: '"public" for bare/unqualified tables; see MULTI_SCHEMA_PLAN.md
+          §2.4.'
+        type: string
       types:
         items:
           type: string
         type: array
     type: object
-  protocol.WorkerHeartbeat:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.WorkerHeartbeat:
     properties:
       status:
         type: string
@@ -190,7 +256,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.GlobalConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig'
         "404":
           description: not found
           schema:
@@ -212,14 +278,14 @@ paths:
         name: config
         required: true
         schema:
-          $ref: '#/definitions/protocol.GlobalConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.GlobalConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig'
         "429":
           description: too many requests
           schema:
@@ -305,14 +371,14 @@ paths:
         name: pipeline
         required: true
         schema:
-          $ref: '#/definitions/protocol.PipelineConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/protocol.PipelineConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig'
         "429":
           description: too many requests
           schema:
@@ -355,7 +421,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.PipelineConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig'
         "404":
           description: not found
           schema:
@@ -382,14 +448,14 @@ paths:
         name: pipeline
         required: true
         schema:
-          $ref: '#/definitions/protocol.PipelineConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.PipelineConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineConfig'
         "429":
           description: too many requests
           schema:
@@ -474,7 +540,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/protocol.SinkConfig'
+                $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
               type: array
             type: object
       security:
@@ -492,14 +558,14 @@ paths:
         name: sink
         required: true
         schema:
-          $ref: '#/definitions/protocol.SinkConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/protocol.SinkConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
       security:
       - Bearer: []
       summary: Create sink
@@ -536,7 +602,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.SinkConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
         "404":
           description: not found
           schema:
@@ -563,14 +629,14 @@ paths:
         name: sink
         required: true
         schema:
-          $ref: '#/definitions/protocol.SinkConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.SinkConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SinkConfig'
       security:
       - Bearer: []
       summary: Update sink
@@ -587,7 +653,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/protocol.SourceConfig'
+                $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
               type: array
             type: object
       security:
@@ -605,14 +671,14 @@ paths:
         name: source
         required: true
         schema:
-          $ref: '#/definitions/protocol.SourceConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/protocol.SourceConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
       security:
       - Bearer: []
       summary: Create source
@@ -649,7 +715,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.SourceConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
         "404":
           description: not found
           schema:
@@ -676,14 +742,14 @@ paths:
         name: source
         required: true
         schema:
-          $ref: '#/definitions/protocol.SourceConfig'
+          $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.SourceConfig'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.SourceConfig'
       security:
       - Bearer: []
       summary: Update source
@@ -729,7 +795,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/protocol.TableMetadata'
+                $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.TableMetadata'
               type: array
             type: object
       security:
@@ -747,7 +813,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/protocol.HistoryPoint'
+              $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.HistoryPoint'
             type: array
       security:
       - Bearer: []
@@ -763,7 +829,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.StatsSummary'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary'
       security:
       - Bearer: []
       summary: Get dashboard summary
@@ -784,7 +850,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/protocol.WorkerHeartbeat'
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.WorkerHeartbeat'
       security:
       - Bearer: []
       summary: Get worker status

@@ -22,6 +22,13 @@ sources:
     database: "production_db"
     slot_name: "cdc_slot"
     publication_name: "cdc_pub"
+    # Schema whitelist. Tables are discovered only in these schemas.
+    # Empty or omitted means "public only" -- NOT all schemas. Discovering
+    # every schema by default would silently start replicating unrelated
+    # tables on upgrade, so the whitelist is opt-in.
+    schemas:
+      - "public"
+      - "sales"
     batch_size: 100
 
 # Sink Configurations (Stored in NATS KV as 'cdc.config.sinks.{id}')
@@ -30,6 +37,15 @@ sinks:
   - id: "databend-analytics"
     type: "databend"
     dsn: "http://root:@localhost:8000"
+    # A Postgres schema maps to a Databend DATABASE (Databend has no schema
+    # layer), so public.orders is written to the "public" database, NOT to
+    # the database the DSN selects.
+    # options:
+    #   auto_create_schema: true   # default true; issues CREATE DATABASE IF
+    #                              # NOT EXISTS for each target database.
+    #                              # When false, the pipeline validates every
+    #                              # target at startup and refuses to start
+    #                              # if one is missing.
   
   - id: "postgres-debug"
     type: "postgres_debug"

@@ -260,7 +260,12 @@ type SourceConfig struct {
 	DiscoveryInterval time.Duration `msg:"disc_int" yaml:"discovery_interval" json:"discovery_interval" swaggertype:"string" example:"30s"`
 	SnapshotChunkSize int           `msg:"snap_size" yaml:"snapshot_chunk_size" json:"snapshot_chunk_size"`
 	SnapshotInterval  time.Duration `msg:"snap_int" yaml:"snapshot_interval" json:"snapshot_interval" swaggertype:"string" example:"1s"`
-	Schemas           []string      `msg:"schemas" yaml:"schemas" json:"schemas"`
+	// Schemas restricts table discovery to these PostgreSQL schemas.
+	// Empty or nil means "public" ONLY -- deliberately not "all schemas":
+	// every config predating multi-schema support has this field empty, and
+	// defaulting to all would silently begin replicating unrelated schemas on
+	// upgrade (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 item 4).
+	Schemas []string `msg:"schemas" yaml:"schemas" json:"schemas"`
 	Tables            []string      `msg:"tables" yaml:"tables" json:"tables"`
 }
 
