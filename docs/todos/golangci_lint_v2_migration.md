@@ -1,7 +1,7 @@
 # TODO: Migrate `.golangci.yml` to golangci-lint v2 config format
 
 **Found:** 2026-08-01, while wiring the docs hygiene sensor into the pre-commit harness.
-**Status:** deferred — deliberately not fixed at discovery time.
+**Status:** config migration DONE 2026-08-01. Follow-up items below remain open.
 
 ## The problem
 
@@ -39,13 +39,18 @@ worth less than nothing in that state, because it creates false confidence that 
 
 ## Action items
 
-- [ ] Migrate `.golangci.yml` to v2 format (`version: "2"`, `linters.settings`, and the v2
-      `linters.exclusions` replacement for `issues.exclude-use-default`).
-- [ ] Verify each depguard rule still fires: `main` allow-list, `core_architecture`,
-      `domain_isolation_sink`, `domain_isolation_source`. A rule that silently stops matching is
-      the failure mode to guard against — test with a deliberate bad import.
-- [ ] Confirm `golangci-lint run ./...` is clean, or record the remaining findings here.
-- [ ] Pin the golangci-lint version in the harness and CI so v1/v2 drift cannot recur.
+- [x] Migrate `.golangci.yml` to v2 format. Used the official `golangci-lint migrate`, which needed
+      `--skip-validation` because the v1 config carried a `listMode` key that golangci-lint's own v1
+      schema rejects — so the config had been invalid for longer than the v2 release. Backup left at
+      `.golangci.bck.yml`.
+- [x] Close the allow-list gaps the working linter exposed: `github.com/ThreeDotsLabs/watermill/message`
+      and `golang.org/x/time` were denied. 18 findings, all false alarms from an incomplete list.
+- [x] Verify each depguard rule still fires — **they do not**, and did not before the migration
+      either. Tracked in `docs/todos/depguard_architecture_rules_never_fire.md`.
+- [x] Record the remaining findings — 517, tracked in `docs/todos/golangci_lint_backlog.md`. The
+      pre-commit hook is scoped to `--new-from-rev=HEAD` meanwhile.
+- [ ] Pin the golangci-lint version in the harness and in CI so v1/v2 drift cannot recur.
+- [ ] Delete `.golangci.bck.yml` once the v2 config has proven itself.
 
 ## Related
 

@@ -42,7 +42,10 @@ skip() { printf '  \033[33m-\033[0m %s\n' "$1"; }
 # These legitimately cite files that were proposed but never built. Failing a
 # commit over them would falsify history. Staleness there is a judgement call
 # for the /docs-hygiene skill.
-mapfile -t DOCS < <(git ls-files '*.md' \
+# `git ls-files` lists tracked files only, so a brand-new doc would go
+# unchecked until it was staged -- exactly when a mistake is most likely. Include
+# untracked-but-not-ignored Markdown too.
+mapfile -t DOCS < <( { git ls-files '*.md'; git ls-files --others --exclude-standard '*.md'; } \
   | grep -v '^web/node_modules/' \
   | grep -v '^\.kilo/' \
   | grep -v '^summaries/' \
