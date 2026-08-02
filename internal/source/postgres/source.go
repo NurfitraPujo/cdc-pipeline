@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/Trendyol/go-pq-cdc/pq/replication"
 	"github.com/Trendyol/go-pq-cdc/pq/slot"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	// libpq is aliased (not "pq") because that name is already taken by the
 	// vendored github.com/Trendyol/go-pq-cdc/pq package above; only
@@ -163,6 +165,26 @@ func resolveStrictAck() bool {
 		log.Warn().Str(strictAckEnvVar, raw).Msg("PostgresSource: unrecognized CDC_STRICT_ACK value, falling back to the ENV-based default")
 	}
 	return os.Getenv("ENV") != "production"
+}
+
+// vendorDefaultSnapshotChunkSize mirrors the vendored connector's own
+// fallback (internal/vendor/go-pq-cdc/config/config.go: c.Snapshot.ChunkSize
+// defaults to 8_000 when unset) so that leaving SourceConfig.SnapshotChunkSize
+// at its zero value reproduces exactly today's behaviour.
+const vendorDefaultSnapshotChunkSize = 8000
+
+// snapshotChunkSize resolves the vendored snapshot ChunkSize from
+// SourceConfig.SnapshotChunkSize (WS-2B item 3): previously this field was
+// parsed and validated but never reached the connector, which always used a
+// hardcoded 8000 regardless of what was configured. A non-positive value
+// (the common case: field left unset in existing configs) falls back to the
+// same 8000 the vendored default would have applied, so this is a pure
+// wiring fix with no behavioural change for configs that don't set it.
+func snapshotChunkSize(configured int) int64 {
+	if configured <= 0 {
+		return vendorDefaultSnapshotChunkSize
+	}
+	return int64(configured)
 }
 
 // connectorFactoryFunc is the pluggable factory used by PostgresSource to
@@ -532,8 +554,8 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
-		sani := sanitizePayload(msg.Decoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpInsert, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		sani, kinds := sanitizePayload(msg.Decoded)
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpInsert, Data: sani, ColumnKinds: kinds, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 
@@ -542,8 +564,23 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
-		sani := sanitizePayload(msg.NewDecoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpUpdate, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		sani, kinds := sanitizePayload(msg.NewDecoded)
+		// WS-7: any column Postgres omitted from this UPDATE's new tuple
+		// because it is an unchanged TOASTed value (never sent, never
+		// decoded, genuinely absent from sani/Data) must be flagged via
+		// ColumnKinds so a downstream consumer doing a wholesale row
+		// replace does not treat the absence as NULL. sanitizePayload never
+		// produces these keys (they were never in msg.NewDecoded to begin
+		// with), so merge them in here.
+		if len(msg.NewToastedColumns) > 0 {
+			if kinds == nil {
+				kinds = make(map[string]string, len(msg.NewToastedColumns))
+			}
+			for _, col := range msg.NewToastedColumns {
+				kinds[col] = protocol.ColumnKindToastedUnchanged
+			}
+		}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpUpdate, Data: sani, ColumnKinds: kinds, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 
@@ -561,12 +598,12 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		if !knownTables[ref] {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
-		sani := sanitizePayload(msg.Data)
+		sani, kinds := sanitizePayload(msg.Data)
 		// Snapshot rows bypass the watermark entirely: LSN is zeroed on
 		// the emitted message and this kind is never Observed. Their
 		// durability story is JetStream + the vendored chunk-job state,
 		// not the replication watermark.
-		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpSnapshot, Data: sani, Timestamp: msg.ServerTime, LSN: 0, UUID: uuid.New().String()}
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpSnapshot, Data: sani, ColumnKinds: kinds, Timestamp: msg.ServerTime, LSN: 0, UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindSnapshot}
 
@@ -575,8 +612,8 @@ func (s *PostgresSource) buildMessage(lc *replication.ListenerContext, mu *sync.
 		if !ok {
 			return handlerResult{kind: handlerKindFiltered, lsn: uint64(lc.LSN)}
 		}
-		sani := sanitizePayload(msg.OldDecoded)
-		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpDelete, Data: sani, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
+		sani, kinds := sanitizePayload(msg.OldDecoded)
+		m := protocol.Message{SourceID: s.config.ID, Table: ref.Table, TableSchema: ref.Schema, Op: protocol.OpDelete, Data: sani, ColumnKinds: kinds, Timestamp: msg.MessageTime, LSN: uint64(lc.LSN), UUID: uuid.New().String()}
 		*msgs = append(*msgs, m)
 		return handlerResult{kind: handlerKindData, lsn: uint64(lc.LSN)}
 	}
@@ -875,9 +912,17 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			// against the cdc_snapshot_job/cdc_snapshot_chunks state, so
 			// gating it here just prevented resume from ever being tried
 			// after the first snapshot chunk had been published.
-			Enabled:           true,
-			Mode:              config.SnapshotModeInitial,
-			ChunkSize:         8000,
+			Enabled: true,
+			Mode:    config.SnapshotModeInitial,
+			// ChunkSize (WS-2B item 3 / docs/todos/custom_object_cdc_followups.md
+			// item 5): previously hardcoded 8000 regardless of
+			// srcConfig.SnapshotChunkSize, so the config field existed but
+			// silently did nothing for the snapshot path (it only affected
+			// the producer's dynamic-table path). Falls back to the
+			// vendored connector's own default (config.go: 8_000) when
+			// unset, preserving today's behaviour for every existing
+			// deployment that doesn't set snapshot_chunk_size.
+			ChunkSize:         snapshotChunkSize(srcConfig.SnapshotChunkSize),
 			ClaimTimeout:      30 * time.Second,
 			HeartbeatInterval: 5 * time.Second,
 		},
@@ -1700,22 +1745,165 @@ func (s *PostgresSource) discoverTables(ctx context.Context, db *sql.DB, srcConf
 	}
 }
 
-func sanitizePayload(in map[string]any) map[string]any {
+// sanitizePayload normalizes a decoded row into (a) a plain,
+// transport-and-sink-safe Data map -- byte-identical in shape and content to
+// what every sink reads today, whether or not the pipeline runs the
+// nats/protobuf processor -- and (b) an optional ColumnKinds side-channel
+// naming which Data entries carry a source type that can't itself survive
+// protocol.Message's internal NATS JetStream transport (msgpack via
+// generated WriteIntf/ReadIntf, whose reflection fallback only supports
+// Ptr/Slice/Map -- a struct like pgtype.Numeric is msgp.ErrUnsupportedType
+// and hard-fails MarshalMsg outright, not "silently corrupts").
+//
+// Earlier revisions of this fix tried tagging the decimal text itself with
+// an in-band string marker (a NUL-prefixed prefix baked into the Data
+// value). That was rejected on review: Data is read by every sink
+// unconditionally (sink/databend, sink/postgresdebug), by
+// transformer/builtin.go's masking, and by the delete-PK WHERE-clause path
+// -- none of which know about a transformer-private encoding, so the marker
+// leaked a literal NUL byte into every consumer that isn't the
+// nats/protobuf transformer, which is a hard Postgres encoding error for
+// sink/postgresdebug and a silent regression (wrong stored text, or a
+// PK WHERE clause that matches zero rows) everywhere else. ColumnKinds
+// keeps Data exactly as every existing consumer already reads it and
+// carries the extra information the *few* consumers that need it
+// (currently just internal/transformer/nats/protobuf.go's encodeTypedValue)
+// out-of-band instead.
+func sanitizePayload(in map[string]any) (map[string]any, map[string]string) {
 	if in == nil {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]any, len(in))
+	var kinds map[string]string
 	for k, v := range in {
-		if valuer, ok := v.(driver.Valuer); ok {
-			val, err := valuer.Value()
-			if err == nil {
-				out[k] = val
-			} else {
-				out[k] = nil
+		val, kind := sanitizeValue(v)
+		out[k] = val
+		if kind != "" {
+			if kinds == nil {
+				kinds = make(map[string]string, len(in))
 			}
-		} else {
-			out[k] = v
+			kinds[k] = kind
 		}
 	}
-	return out
+	return out, kinds
+}
+
+// sanitizeValue normalizes one decoded column value into a form that
+// survives protocol.Message's internal NATS JetStream transport (see
+// sanitizePayload's doc comment), returning the transport/sink-safe value
+// and an optional kind hint (currently only protocol.ColumnKindDecimal) for
+// callers that want to populate ColumnKinds.
+//
+// Two scalar shapes need help:
+//
+//   - [16]byte (pgtype.UUIDCodec.DecodeValue's TextFormatCode result,
+//     pgtype.UUID.Bytes verbatim -- not uuid.UUID, not driver.Valuer) is a
+//     fixed-size array: msgp.WriteIntf has no case for reflect.Array at all,
+//     so this used to hard-fail message encoding for every uuid column
+//     (batch stall, not corruption). Converted here to its canonical UUID
+//     string, which is both msgpack-safe and what encodeTypedValue's
+//     string_value case expects. No kind hint needed -- a UUID string is
+//     exactly what every consumer, including encodeTypedValue, already
+//     wants for this column.
+//
+//   - pgtype.Numeric *does* implement driver.Valuer (so the generic branch
+//     below would handle it without crashing), but its Value() collapses
+//     straight to a plain Go string -- indistinguishable, once it crosses
+//     the msgpack hop, from a genuine text/CITEXT column. Converted here to
+//     its exact decimal text via Value() (the codec's own TextFormatCode
+//     encoder, never a float) -- identical to what every sink already
+//     stores today -- with protocol.ColumnKindDecimal returned as the kind
+//     hint so a kind-aware encoder can still route it to decimal_value
+//     without the value itself needing to change.
+//
+// pgtype.Interval and pgtype.Bits are deliberately NOT special-cased the
+// same way as Numeric: TypedValue has no interval_value/bits_value oneof
+// kind, so there is no routing distinction worth preserving, and their
+// driver.Valuer.Value() (also exact canonical text, not lossy) is exactly
+// the right msgpack-safe form to send as string_value. They fall through to
+// the generic driver.Valuer branch below like every other pgtype scalar
+// (timestamptz, date, etc.).
+//
+// Also recurses into slices/maps, since pgx decodes an array-typed column
+// (uuid[], numeric[], ...) as []interface{} of these same scalar types, and
+// they need identical transport-safety treatment one level down. Per-element
+// kind hints are not propagated (ColumnKinds is keyed by top-level column
+// name only) -- an array-typed decimal column already goes through
+// encodeTypedValue's json_value path today, which is unaffected by this
+// fix either way; only the scalar decimal_value routing is in scope here.
+// sanitizeNumeric renders a pgtype.Numeric as its canonical decimal text (or
+// nil for SQL NULL / an unrepresentable value), tagged with
+// protocol.ColumnKindDecimal so the encoder can route it to decimal_value.
+// Split out of sanitizeValue purely to keep that function's dispatch
+// readable -- see the sanitizeValue doc comment above for why this case
+// exists.
+func sanitizeNumeric(n pgtype.Numeric) (any, string) {
+	if !n.Valid {
+		return nil, ""
+	}
+	val, err := n.Value()
+	if err != nil {
+		return nil, ""
+	}
+	text, ok := val.(string)
+	if !ok {
+		return fmt.Sprintf("%v", val), ""
+	}
+	return text, protocol.ColumnKindDecimal
+}
+
+func sanitizeValue(v any) (any, string) {
+	if v == nil {
+		return nil, ""
+	}
+
+	if n, ok := v.(pgtype.Numeric); ok {
+		return sanitizeNumeric(n)
+	}
+
+	if valuer, ok := v.(driver.Valuer); ok {
+		val, err := valuer.Value()
+		if err != nil {
+			return nil, ""
+		}
+		return val, ""
+	}
+
+	if b, ok := v.([16]byte); ok {
+		return uuid.UUID(b).String(), ""
+	}
+
+	if _, ok := v.([]byte); ok {
+		// bytea and similar -- leave intact. encodeTypedValue's own []byte
+		// case handles UUID-shaped ([16]byte-length) and general binary
+		// data; recursing into it here would explode it into a []any of
+		// individual byte values instead.
+		return v, ""
+	}
+
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.IsNil() {
+			return v, ""
+		}
+		out := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			elem, _ := sanitizeValue(rv.Index(i).Interface())
+			out[i] = elem
+		}
+		return out, ""
+	case reflect.Map:
+		if rv.IsNil() {
+			return v, ""
+		}
+		out := make(map[string]any, rv.Len())
+		for _, key := range rv.MapKeys() {
+			elem, _ := sanitizeValue(rv.MapIndex(key).Interface())
+			out[fmt.Sprintf("%v", key.Interface())] = elem
+		}
+		return out, ""
+	default:
+		return v, ""
+	}
 }

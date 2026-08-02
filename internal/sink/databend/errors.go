@@ -61,12 +61,46 @@ var permanentDDLMarkers = []string{
 	"access denied",
 	"permission denied",
 	"privilege",
+	// Defense in depth for WS-4's soft-delete UPDATE against a table
+	// missing deleted_at (ApplySchema now synthesizes that column on every
+	// synced table, so this should be structurally unreachable in normal
+	// operation -- but a table created by an older process instance, or any
+	// other unknown-column DDL/DML mismatch, must DLQ on attempt 1 rather
+	// than retry-loop forever against a frozen replication slot).
+	"unknown column",
+	"column not found",
+	"no such column",
+	// Round-5 review: verified against a live datafuselabs/databend:latest
+	// container (podman), not just reasoned. code 1006's actual message is
+	// "Table \"db.table\" does not have a column with name \"col\"" -- none
+	// of the three markers above match that exact wording, so without this
+	// entry the real error text would have been misclassified transient.
+	"does not have a column with name",
+}
+
+// permanentDDLMarkerPairs are conjunctions of substrings that, TOGETHER,
+// indicate a permanent failure -- used when neither half is safe to match
+// alone. classifyDDLError is applied to DML as well as DDL (REPLACE INTO,
+// the soft-delete UPDATE), so a single-word marker here is matched against
+// arbitrary write-path driver text, and permanent means DLQ means dropped
+// data.
+//
+// Round-5c review LOW: round-5's standalone "already exist" marker is
+// exactly that hazard -- it is not DDL-scoped, and while no plausible
+// transient message containing it was found, that was reasoned, not
+// verified live (unlike the other markers in this file). Require "add
+// column" alongside it instead, matching only the real duplicate-ADD-COLUMN
+// wording verified live against datafuselabs/databend:latest ("add column
+// deleted_at already exist", code 1108) while excluding any other message
+// that merely happens to contain "already exist" on its own.
+var permanentDDLMarkerPairs = [][2]string{
+	{"add column", "already exist"},
 }
 
 // classifyDDLError inspects a raw driver error and wraps it as a DDLError,
-// classified permanent or transient per permanentDDLMarkers. Returns nil for
-// a nil input so callers can use it unconditionally on the result of
-// ExecContext/QueryContext.
+// classified permanent or transient per permanentDDLMarkers and
+// permanentDDLMarkerPairs. Returns nil for a nil input so callers can use it
+// unconditionally on the result of ExecContext/QueryContext.
 func classifyDDLError(target string, err error) error {
 	if err == nil {
 		return nil
@@ -77,6 +111,14 @@ func classifyDDLError(target string, err error) error {
 		if strings.Contains(msg, marker) {
 			permanent = true
 			break
+		}
+	}
+	if !permanent {
+		for _, pair := range permanentDDLMarkerPairs {
+			if strings.Contains(msg, pair[0]) && strings.Contains(msg, pair[1]) {
+				permanent = true
+				break
+			}
 		}
 	}
 	return &DDLError{Target: target, Permanent: permanent, Err: err}

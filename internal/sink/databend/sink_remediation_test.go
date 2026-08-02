@@ -157,6 +157,7 @@ func newTestSink(db DBExec, opts ...map[string]interface{}) *DatabendSink {
 		db:               db,
 		pkCache:          make(map[string][]string),
 		pkLoaded:         make(map[string]struct{}),
+		colTypeCache:     make(map[string]map[string]string),
 		autoCreateSchema: true,
 		provisionedDB:    make(map[string]struct{}),
 		validatedDB:      make(map[string]struct{}),
@@ -546,7 +547,15 @@ func TestRefreshPrimaryKey_FallbackOnError(t *testing.T) {
 
 func TestRefreshPrimaryKey_NoPrimaryKeyFallsBack(t *testing.T) {
 	db := newFakeDB()
-	db.scanFn = func(_ string, _ []any, dest ...any) error {
+	db.scanFn = func(query string, _ []any, dest ...any) error {
+		// WS-4.6: refreshPrimaryKey now consults cdc_meta.pk_columns before
+		// SHOW CREATE TABLE; this fake has no durable metadata, so that
+		// lookup must miss (sql.ErrNoRows) and fall through to the
+		// SHOW CREATE TABLE canned response below, exactly as it did before
+		// that lookup existed.
+		if !strings.Contains(strings.ToUpper(query), "SHOW CREATE TABLE") {
+			return sql.ErrNoRows
+		}
 		if len(dest) > 0 {
 			if p, ok := dest[0].(*string); ok {
 				*p = "CREATE TABLE t (id INT, val STRING)" // no PRIMARY KEY
@@ -575,6 +584,12 @@ func TestRefreshPrimaryKey_QualifiesNonPublicSchema(t *testing.T) {
 	db := newFakeDB()
 	var lastQuery string
 	db.scanFn = func(query string, _ []any, dest ...any) error {
+		// WS-4.6: see TestRefreshPrimaryKey_NoPrimaryKeyFallsBack -- the
+		// cdc_meta.pk_columns lookup must miss first so this test still
+		// exercises the SHOW CREATE TABLE fallback it is named for.
+		if !strings.Contains(strings.ToUpper(query), "SHOW CREATE TABLE") {
+			return sql.ErrNoRows
+		}
 		lastQuery = query
 		if p, ok := dest[0].(*string); ok {
 			*p = "CREATE TABLE t (id INT, PRIMARY KEY (id))"

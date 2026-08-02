@@ -584,6 +584,18 @@ func TestConsumer_DLQRoute_EmitsRecordAckBeforeAck(t *testing.T) {
 	require.NoError(t, err)
 	wmMsg := message.NewMessage("wm-1", batchData)
 
+	// WS-2 item 5: isolatePoisonBatch's transform-failure branch now honours
+	// the same MaxRetries/EnableDLQ gate as the sink-failure branch, instead
+	// of DLQing unconditionally. In production isolatePoisonBatch is only
+	// ever entered via handleSinkError's shouldIsolate path, which has
+	// already incremented c.retries[uuid].count past MaxRetries by the time
+	// isolatePoisonBatch runs -- this direct unit-test call bypasses that
+	// warm-up, so seed the same precondition here rather than testing a
+	// call shape that cannot occur for real.
+	c.retryMu.Lock()
+	c.retries[wmMsg.UUID] = retryEntry{count: 4}
+	c.retryMu.Unlock()
+
 	// processMessages fails (transformer error) -> routeToDLQWithAck path.
 	c.isolatePoisonBatch(context.Background(), []*message.Message{wmMsg})
 

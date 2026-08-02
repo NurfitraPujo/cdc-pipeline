@@ -31,6 +31,12 @@ re-litigated by whoever reads the code next.
 | [0015](0015-buffer-to-jetstream-across-the-discovery-gap.md) | Rows arriving during snapshot buffer to durable JetStream, not memory | accepted |
 | [0016](0016-credentials-encrypted-at-rest-with-fail-fast-decrypt.md) | Credentials AES-GCM encrypted in KV; decryption failure is fatal | accepted |
 | [0017](0017-msgpack-for-state-json-for-config.md) | MessagePack for the data plane, JSON for the control plane | accepted |
+| [0018](0018-toast-unchanged-signalled-via-columnkinds.md) | An unchanged TOASTed column is signalled out-of-band via `ColumnKinds`, never inferred from absence in `Data` | accepted |
+| [0019](0019-columnkinds-typed-side-channel.md) | Type/routing hints travel in a typed `ColumnKinds` side-channel, not an in-band marker | accepted |
+| [0020](0020-sink-synthesizes-deleted-at-with-read-before-write-preservation.md) | The Databend sink synthesizes `deleted_at` on every table, preserved via read-before-write | accepted |
+| [0021](0021-durable-pk-metadata-in-cdc-meta.md) | A table's resolved primary key is persisted durably in `cdc_meta.pk_columns` | accepted |
+| [0022](0022-ackwait-ceiling-ten-minutes.md) | `deriveAckWait`'s derived worst case is clamped to a configurable ceiling, default 10 minutes | accepted |
+| [0023](0023-processor-filter-schemas-tables-or-semantics.md) | A processor's `schemas` and `tables` filters OR together, not AND | accepted |
 
 **0001–0007** came out of multi-schema support; the full narrative, including two refuted
 assumptions and a failed first implementation, is in [`MULTI_SCHEMA_PLAN.md`](../../MULTI_SCHEMA_PLAN.md).
@@ -40,6 +46,13 @@ rationale existed only in code comments and vendored patch notes. They were reco
 code, and each cites the evidence it rests on. Where a rationale was inferred rather than stated,
 the ADR says so. [`rfc/RFC-001-Architecture-and-Design.md`](../../rfc/RFC-001-Architecture-and-Design.md)
 remains the broad architecture document; these ADRs complement it rather than replace it.
+
+**0018–0022** came out of `plans/cdc_custom_object_transform_remediation.md`'s WS-5/WS-6/WS-7
+remediation pass (see `summaries/ws5_ws6_ws7_implementation.md`). 0020 and 0021 record decisions
+made earlier in that same effort (WS-4) but not yet written up as ADRs until this pass. 0022 records
+a fix made during Opus validation review of the WS-5/WS-6/WS-7 pass itself. 0023 came out of the
+following WS-1B/WS-2B/WS-4C/WS-10 pass (see
+`summaries/ws1b_ws2b_ws4c_ws10_implementation.md`).
 
 Several record a **known deviation between the decision and the current code** (notably 0014's
 unimplemented `type_conflict` state and 0017's msgp/JSON boundary violation). That is deliberate —

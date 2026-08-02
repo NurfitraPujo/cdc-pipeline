@@ -104,6 +104,34 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 				}
 				z.Data[za0001] = za0002
 			}
+		case "ckinds":
+			var zb0004 uint32
+			zb0004, err = dc.ReadMapHeader()
+			if err != nil {
+				err = msgp.WrapError(err, "ColumnKinds")
+				return
+			}
+			if z.ColumnKinds == nil {
+				z.ColumnKinds = make(map[string]string, zb0004)
+			} else if len(z.ColumnKinds) > 0 {
+				clear(z.ColumnKinds)
+			}
+			for zb0004 > 0 {
+				zb0004--
+				var za0003 string
+				za0003, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds")
+					return
+				}
+				var za0004 string
+				za0004, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds", za0003)
+					return
+				}
+				z.ColumnKinds[za0003] = za0004
+			}
 		case "pay":
 			z.Payload, err = dc.ReadBytes(z.Payload)
 			if err != nil {
@@ -172,8 +200,8 @@ func (z *Message) DecodeMsg(dc *msgp.Reader) (err error) {
 // EncodeMsg implements msgp.Encodable
 func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 	// check for omitted fields
-	zb0001Len := uint32(14)
-	var zb0001Mask uint16 /* 14 bits */
+	zb0001Len := uint32(15)
+	var zb0001Mask uint16 /* 15 bits */
 	_ = zb0001Mask
 	if z.SinkID == "" {
 		zb0001Len--
@@ -187,17 +215,21 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 		zb0001Len--
 		zb0001Mask |= 0x100
 	}
-	if z.Schema == nil {
+	if z.ColumnKinds == nil {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x200
 	}
-	if z.CorrelationID == "" {
+	if z.Schema == nil {
 		zb0001Len--
 		zb0001Mask |= 0x1000
 	}
-	if z.Diff == nil {
+	if z.CorrelationID == "" {
 		zb0001Len--
 		zb0001Mask |= 0x2000
+	}
+	if z.Diff == nil {
+		zb0001Len--
+		zb0001Mask |= 0x4000
 	}
 	// variable map header, size zb0001Len
 	err = en.Append(0x80 | uint8(zb0001Len))
@@ -315,6 +347,30 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				}
 			}
 		}
+		if (zb0001Mask & 0x200) == 0 { // if not omitted
+			// write "ckinds"
+			err = en.Append(0xa6, 0x63, 0x6b, 0x69, 0x6e, 0x64, 0x73)
+			if err != nil {
+				return
+			}
+			err = en.WriteMapHeader(uint32(len(z.ColumnKinds)))
+			if err != nil {
+				err = msgp.WrapError(err, "ColumnKinds")
+				return
+			}
+			for za0003, za0004 := range z.ColumnKinds {
+				err = en.WriteString(za0003)
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds")
+					return
+				}
+				err = en.WriteString(za0004)
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds", za0003)
+					return
+				}
+			}
+		}
 		// write "pay"
 		err = en.Append(0xa3, 0x70, 0x61, 0x79)
 		if err != nil {
@@ -335,7 +391,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 			err = msgp.WrapError(err, "Timestamp")
 			return
 		}
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// write "meta"
 			err = en.Append(0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if err != nil {
@@ -354,7 +410,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x1000) == 0 { // if not omitted
+		if (zb0001Mask & 0x2000) == 0 { // if not omitted
 			// write "c_id"
 			err = en.Append(0xa4, 0x63, 0x5f, 0x69, 0x64)
 			if err != nil {
@@ -366,7 +422,7 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 				return
 			}
 		}
-		if (zb0001Mask & 0x2000) == 0 { // if not omitted
+		if (zb0001Mask & 0x4000) == 0 { // if not omitted
 			// write "diff"
 			err = en.Append(0xa4, 0x64, 0x69, 0x66, 0x66)
 			if err != nil {
@@ -393,8 +449,8 @@ func (z *Message) EncodeMsg(en *msgp.Writer) (err error) {
 func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// check for omitted fields
-	zb0001Len := uint32(14)
-	var zb0001Mask uint16 /* 14 bits */
+	zb0001Len := uint32(15)
+	var zb0001Mask uint16 /* 15 bits */
 	_ = zb0001Mask
 	if z.SinkID == "" {
 		zb0001Len--
@@ -408,17 +464,21 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 		zb0001Len--
 		zb0001Mask |= 0x100
 	}
-	if z.Schema == nil {
+	if z.ColumnKinds == nil {
 		zb0001Len--
-		zb0001Mask |= 0x800
+		zb0001Mask |= 0x200
 	}
-	if z.CorrelationID == "" {
+	if z.Schema == nil {
 		zb0001Len--
 		zb0001Mask |= 0x1000
 	}
-	if z.Diff == nil {
+	if z.CorrelationID == "" {
 		zb0001Len--
 		zb0001Mask |= 0x2000
+	}
+	if z.Diff == nil {
+		zb0001Len--
+		zb0001Mask |= 0x4000
 	}
 	// variable map header, size zb0001Len
 	o = append(o, 0x80|uint8(zb0001Len))
@@ -466,13 +526,22 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 				}
 			}
 		}
+		if (zb0001Mask & 0x200) == 0 { // if not omitted
+			// string "ckinds"
+			o = append(o, 0xa6, 0x63, 0x6b, 0x69, 0x6e, 0x64, 0x73)
+			o = msgp.AppendMapHeader(o, uint32(len(z.ColumnKinds)))
+			for za0003, za0004 := range z.ColumnKinds {
+				o = msgp.AppendString(o, za0003)
+				o = msgp.AppendString(o, za0004)
+			}
+		}
 		// string "pay"
 		o = append(o, 0xa3, 0x70, 0x61, 0x79)
 		o = msgp.AppendBytes(o, z.Payload)
 		// string "ts"
 		o = append(o, 0xa2, 0x74, 0x73)
 		o = msgp.AppendTime(o, z.Timestamp)
-		if (zb0001Mask & 0x800) == 0 { // if not omitted
+		if (zb0001Mask & 0x1000) == 0 { // if not omitted
 			// string "meta"
 			o = append(o, 0xa4, 0x6d, 0x65, 0x74, 0x61)
 			if z.Schema == nil {
@@ -485,12 +554,12 @@ func (z *Message) MarshalMsg(b []byte) (o []byte, err error) {
 				}
 			}
 		}
-		if (zb0001Mask & 0x1000) == 0 { // if not omitted
+		if (zb0001Mask & 0x2000) == 0 { // if not omitted
 			// string "c_id"
 			o = append(o, 0xa4, 0x63, 0x5f, 0x69, 0x64)
 			o = msgp.AppendString(o, z.CorrelationID)
 		}
-		if (zb0001Mask & 0x2000) == 0 { // if not omitted
+		if (zb0001Mask & 0x4000) == 0 { // if not omitted
 			// string "diff"
 			o = append(o, 0xa4, 0x64, 0x69, 0x66, 0x66)
 			if z.Diff == nil {
@@ -605,6 +674,34 @@ func (z *Message) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				}
 				z.Data[za0001] = za0002
 			}
+		case "ckinds":
+			var zb0004 uint32
+			zb0004, bts, err = msgp.ReadMapHeaderBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "ColumnKinds")
+				return
+			}
+			if z.ColumnKinds == nil {
+				z.ColumnKinds = make(map[string]string, zb0004)
+			} else if len(z.ColumnKinds) > 0 {
+				clear(z.ColumnKinds)
+			}
+			for zb0004 > 0 {
+				var za0004 string
+				zb0004--
+				var za0003 string
+				za0003, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds")
+					return
+				}
+				za0004, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnKinds", za0003)
+					return
+				}
+				z.ColumnKinds[za0003] = za0004
+			}
 		case "pay":
 			z.Payload, bts, err = msgp.ReadBytesBytes(bts, z.Payload)
 			if err != nil {
@@ -676,6 +773,13 @@ func (z *Message) Msgsize() (s int) {
 		for za0001, za0002 := range z.Data {
 			_ = za0002
 			s += msgp.StringPrefixSize + len(za0001) + msgp.GuessSize(za0002)
+		}
+	}
+	s += 7 + msgp.MapHeaderSize
+	if z.ColumnKinds != nil {
+		for za0003, za0004 := range z.ColumnKinds {
+			_ = za0004
+			s += msgp.StringPrefixSize + len(za0003) + msgp.StringPrefixSize + len(za0004)
 		}
 	}
 	s += 4 + msgp.BytesPrefixSize + len(z.Payload) + 3 + msgp.TimeSize + 5

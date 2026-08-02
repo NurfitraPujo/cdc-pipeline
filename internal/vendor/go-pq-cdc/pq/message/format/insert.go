@@ -41,7 +41,10 @@ func NewInsert(data []byte, streamedTransaction bool, relation map[uint32]*Relat
 	msg.Decoded = make(map[string]any)
 
 	var err error
-	msg.Decoded, err = msg.TupleData.DecodeWithColumn(rel.Columns)
+	// An INSERT's tuple is always the full row -- there is no prior value
+	// for Postgres to elide as unchanged-TOAST, so the toasted return is
+	// always empty here and intentionally discarded.
+	msg.Decoded, _, err = msg.TupleData.DecodeWithColumn(rel.Columns)
 	if err != nil {
 		return nil, err
 	}

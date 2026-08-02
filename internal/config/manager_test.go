@@ -119,7 +119,7 @@ func TestConfigManager_Transitions(t *testing.T) {
 
 	// 2. Trigger initial start (No overrides)
 	log.Info().Msg("Test: Sending initial config (no overrides)")
-	cfg := protocol.PipelineConfig{ID: "p1", Name: "Test Pipeline"}
+	cfg := protocol.PipelineConfig{ID: "p1", Name: "Test Pipeline", Sources: []string{"src1"}, Sinks: []string{"sink1"}}
 	data, _ := json.Marshal(cfg)
 	kv.Put(protocol.PipelineConfigKey("p1"), data)
 
@@ -248,7 +248,7 @@ func TestConfigManager_RetrySupervisor(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 
-	cfg := protocol.PipelineConfig{ID: "p-retry", Name: "Test Pipeline Retry"}
+	cfg := protocol.PipelineConfig{ID: "p-retry", Name: "Test Pipeline Retry", Sources: []string{"src1"}, Sinks: []string{"sink1"}}
 	data, _ := json.Marshal(cfg)
 	kv.Put(protocol.PipelineConfigKey("p-retry"), data)
 
@@ -364,7 +364,7 @@ func TestConfigManager_CrashAndRetryFailure(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 
-	cfg := protocol.PipelineConfig{ID: "p-crash", Name: "Test Pipeline Crash"}
+	cfg := protocol.PipelineConfig{ID: "p-crash", Name: "Test Pipeline Crash", Sources: []string{"src1"}, Sinks: []string{"sink1"}}
 	data, _ := json.Marshal(cfg)
 	kv.Put(protocol.PipelineConfigKey("p-crash"), data)
 
@@ -372,6 +372,9 @@ func TestConfigManager_CrashAndRetryFailure(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Simulate crash of the first worker
+	if activeMockWorker == nil {
+		t.Fatalf("activeMockWorker is nil; worker never started (check config validation)")
+	}
 	activeMockWorker.Drain() // This closes finished channel in mock
 
 	// Wait for retry attempt (which fails)

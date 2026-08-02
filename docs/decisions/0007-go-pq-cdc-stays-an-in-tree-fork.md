@@ -16,6 +16,14 @@ It is not a vendor copy but a **fork**: no submodule, no upstream remote, syncin
 Multi-schema support required two further patches, raising the count to eight. That prompted the
 question of whether to promote it to a real fork repository now.
 
+**Update (2026-08-02)**: WS-7 (the TOAST hazard, `plans/cdc_custom_object_transform_remediation.md`)
+required a ninth patch, `WS7-1`, to `Data.DecodeWithColumn`/`format.Update` — see
+`internal/vendor/go-pq-cdc/PATCHES.md`'s WS7-1 entry and
+`docs/decisions/0018-toast-unchanged-signalled-via-columnkinds.md` for the pipeline-side contract
+it feeds. This does not change the decision below (option 1, in-tree, was re-confirmed rather than
+revisited for this addition), but the patch count referenced throughout this ADR and `VENDOR.md`
+is now **nine**, not eight.
+
 ## Decision Drivers
 
 * Divergence is already substantial and load-bearing: T0-3 guards a real data-loss bug, and T0-2 is
@@ -49,7 +57,8 @@ cross-patch dependency is recorded in both `PATCHES.md` sections.
 ### Consequences
 
 * Good: no migration blocking the feature; patches follow the established convention.
-* Bad: divergence grows to eight patches, making the next upstream sync harder.
+* Bad: divergence grows to eight patches (nine as of the 2026-08-02 WS7-1 addition above), making
+  the next upstream sync harder.
 * Bad: the vendored module cannot be tested standalone (`missing go.sum entry`), so its logic has no
   executable unit coverage in its own module — it is only exercised through the parent.
 

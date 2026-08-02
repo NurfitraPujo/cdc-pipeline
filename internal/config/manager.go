@@ -49,7 +49,12 @@ type ConfigManager struct {
 	configs        map[string]protocol.PipelineConfig // Track current configs for comparison
 	revisions      map[string]uint64                  // Track last seen revision per pipeline
 	supervisors    map[string]context.CancelFunc      // Track supervisor cancel functions
-	workersMu      sync.RWMutex
+	// invalidCfgAttempts tracks consecutive validation-failure retries per
+	// pipeline so the retry loop backs off instead of hammering KV/logs every
+	// ~5s forever for a permanently-broken config (WS-9 round-3 LOW fix).
+	// Reset once the pipeline validates successfully (see startNewWorker).
+	invalidCfgAttempts map[string]int
+	workersMu          sync.RWMutex
 	globalConfig   protocol.GlobalConfig
 	globalConfigMu sync.RWMutex
 
@@ -81,6 +86,7 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 		configs:      make(map[string]protocol.PipelineConfig),
 		revisions:    make(map[string]uint64),
 		supervisors:  make(map[string]context.CancelFunc),
+		invalidCfgAttempts: make(map[string]int),
 		globalConfig: cfg,
 	}
 }
@@ -369,8 +375,14 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			// captured under the WRITE lock so we never observe a torn or stale
 			// reference between releasing the write lock and reacquiring read.
 			// This addresses T1-28's "concurrently-confused map lookup".
+			// WS-9 round-3 fix: the smart-reload path used to mutate a live
+			// worker via SignalDynamicTables without ever calling cfg.Validate(),
+			// bypassing validateTableIdentifier for the very Tables field this
+			// path exists to change. Validate first; on failure, fall through to
+			// the normal transition path below, which routes through
+			// startNewWorker's validation gate and its invalid-config retry loop.
 			var newTables []string
-			if exists && m.onlyTablesChanged(currentCfg, cfg, &newTables) {
+			if exists && cfg.Validate() == nil && m.onlyTablesChanged(currentCfg, cfg, &newTables) {
 				worker, workerExists := m.workers[pipelineID]
 				m.configs[pipelineID] = cfg
 				m.revisions[pipelineID] = entry.Revision()
@@ -571,7 +583,33 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 		parentCtx = ctx
 	}
 
+	// WS-9: every config-load path (initial bootstrap, KV read-back on reload,
+	// watcher-driven updates) funnels through startNewWorker before a worker is
+	// spun up, so this is the single choke point to enforce PipelineConfig.Validate().
+	// Without this, a config that bypassed validation at write time (e.g. YAML
+	// bootstrap in cmd/pipeline/main.go, or a config written directly to KV) would
+	// silently start a worker with invalid settings such as empty OperationTypes.
+	if err := cfg.Validate(); err != nil {
+		log.Error().Err(err).Str("pipeline_id", id).Msg("Refusing to start worker: invalid pipeline config")
+		supCtx, supCancel := context.WithCancel(parentCtx) //nolint:gosec // false positive: supCancel is stored in m.supervisors[id] below and invoked when that supervisor is superseded (see the `if cancel, exists := m.supervisors[id]` calls above/below) or when parentCtx is canceled; gosec's static check doesn't see the map storage
+		m.workersMu.Lock()
+		if cancel, exists := m.supervisors[id]; exists {
+			cancel()
+		}
+		m.supervisors[id] = supCancel
+		// Escalate the retry attempt on each consecutive validation failure
+		// (WS-9 round-3 LOW fix) instead of hardcoding attempt=1 forever, so
+		// getBackoffDelay actually backs off a permanently-invalid config
+		// instead of retrying every ~5s indefinitely.
+		m.invalidCfgAttempts[id]++
+		attempt := m.invalidCfgAttempts[id]
+		m.workersMu.Unlock()
+		go m.monitorWorker(supCtx, nil, id, cfg, attempt)
+		return
+	}
+
 	m.workersMu.Lock()
+	delete(m.invalidCfgAttempts, id)
 	if cancel, exists := m.supervisors[id]; exists {
 		cancel()
 	}

@@ -14,10 +14,128 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream/nats"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
-	_ "github.com/NurfitraPujo/cdc-pipeline/internal/transformer/nats"
+	transformernats "github.com/NurfitraPujo/cdc-pipeline/internal/transformer/nats"
 	go_nats "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 )
+
+// defaultRetryConfig is the RetryConfig CreateWorker falls back to when a
+// pipeline config carries no explicit Retry block. See the WS-5 comment at
+// its call site for why the Duration fields matter.
+func defaultRetryConfig() protocol.RetryConfig {
+	return protocol.RetryConfig{
+		MaxRetries:      3,
+		InitialInterval: time.Second,
+		MaxInterval:     30 * time.Second,
+	}
+}
+
+// sinkSubscriberLatencyMargin (WS-5 item 6 / followups.md item 3) is added
+// on top of the derived worst-case transform time in deriveAckWait, to
+// absorb the sink's own write latency after a transformer (if any) has
+// already returned -- deriveAckWait's batchSize*timeout term only bounds
+// time spent inside a chunked transformer round trip.
+const sinkSubscriberLatencyMargin = 10 * time.Second
+
+// defaultAckWait is both the historical flat AckWait this replaces and the
+// floor deriveAckWait never goes below -- a pipeline with no nats/protobuf
+// processor (nothing to derive a worst case from) keeps today's behaviour
+// exactly.
+const defaultAckWait = 30 * time.Second
+
+// defaultMaxAckWait is the default ceiling on deriveAckWait's output when
+// PipelineFactory.AckWaitCeiling is unset (see that field's doc comment),
+// and the value used throughout this file's comments as "the ceiling"
+// unless a specific override is under discussion. Ratified value: 10
+// minutes -- see docs/decisions/0022-ackwait-ceiling-ten-minutes.md for the
+// full trade-off (why not the original unbounded derivation, why not
+// something shorter).
+//
+// Summary of that ADR's reasoning: duplicate delivery is safe by design in
+// this system (0008-at-least-once-with-sink-side-idempotency.md --
+// REPLACE INTO ... ON (pk) rewrites the same row on a replayed LSN, and
+// AckManager.Confirm at or below the watermark is a no-op), so a long
+// AckWait buys no *correctness*, only avoided redundant work -- and that
+// is worth trading away past a certain point, because MaxAckPending =
+// BatchSize*2 means the entire pipeline queues behind one unacked batch
+// for the full AckWait if a consumer is hard-crashed, OOM-killed, or
+// network-partitioned (with no circuit breaker yet -- a separate, still-
+// open WS-5 gap -- that is the realistic failure this must be sized
+// against, not the pathological one-oversized-record-per-chunk case that
+// motivated the original unbounded derivation). Going shorter is also
+// wrong: during a degradation where the dependency is slow but not down, a
+// premature redelivery's own attempt also times out, which is a genuine
+// failure that counts toward MaxRetries/DLQ (consumer.go's
+// handleSinkError) -- amplifying failure at exactly the moment retries
+// should be patient, not aggressive.
+const defaultMaxAckWait = 10 * time.Minute
+
+// deriveAckWait computes the per-sink ingest subscriber's NATS AckWait
+// (WS-5 item 6, docs/todos/custom_object_cdc_followups.md item 3). Before
+// this, every subscriber used a flat 30s AckWait regardless of BatchSize or
+// WS-3 chunking: a batch chunked into several serial nats/protobuf requests
+// (or one held by a future circuit breaker) could still be "being worked"
+// past 30s, and JetStream would redeliver it to another consumer while the
+// first was still in flight -- duplicate in-flight work at exactly the
+// moment the dependency is already struggling.
+//
+// The worst case this derives from: WS-3's chunker can, in the pathological
+// case of one oversized record per chunk, split a BatchSize batch into up
+// to BatchSize serial requests against the nats/protobuf transformer, each
+// bounded by that transformer's own per-request timeout (its configured
+// timeout_ms, or the WS-5 item 4 default computed by
+// transformernats.DefaultTimeoutMs if unset). BatchSize * that timeout
+// bounds the whole batch's transform time; sinkSubscriberLatencyMargin
+// absorbs the sink's own write after the transformer returns. That product
+// is then clamped to [defaultAckWait, ceiling] -- ceiling defaults to
+// defaultMaxAckWait but is caller-configurable (PipelineFactory.AckWaitCeiling)
+// specifically because the realistic worst case (a handful of chunks, not
+// BatchSize of them -- see defaultMaxAckWait's comment) is much smaller
+// than the pathological one this derivation is mathematically bounded
+// against, and an operator may need to tune the trade-off for their own
+// workload without a code change.
+//
+// A pipeline with no nats/protobuf processor has nothing to derive a
+// worst case from and keeps defaultAckWait, matching pre-fix behaviour.
+func deriveAckWait(cfg protocol.PipelineConfig, ceiling time.Duration) time.Duration {
+	if ceiling <= 0 {
+		ceiling = defaultMaxAckWait
+	}
+
+	batchSize := cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	maxTimeoutMs := 0
+	for _, p := range cfg.Processors {
+		if p.Type != "nats/protobuf" {
+			continue
+		}
+		timeoutMs := transformernats.DefaultTimeoutMs(batchSize)
+		if raw, ok := p.Options["timeout_ms"]; ok {
+			if f, ok := raw.(float64); ok && f > 0 {
+				timeoutMs = int(f)
+			}
+		}
+		if timeoutMs > maxTimeoutMs {
+			maxTimeoutMs = timeoutMs
+		}
+	}
+
+	if maxTimeoutMs == 0 {
+		return defaultAckWait
+	}
+
+	worst := time.Duration(batchSize)*time.Duration(maxTimeoutMs)*time.Millisecond + sinkSubscriberLatencyMargin
+	if worst < defaultAckWait {
+		return defaultAckWait
+	}
+	if worst > ceiling {
+		return ceiling
+	}
+	return worst
+}
 
 // PipelineFactory creates PipelineWorker instances.
 type PipelineFactory struct {
@@ -25,6 +143,14 @@ type PipelineFactory struct {
 	Publisher   stream.Publisher
 	NatsURL     string
 	WorkerGroup string
+
+	// AckWaitCeiling overrides deriveAckWait's ceiling (defaultMaxAckWait,
+	// 10 minutes) for every pipeline this factory creates. Zero means "use
+	// the default" -- see docs/decisions/0022-ackwait-ceiling-ten-minutes.md
+	// for why 10 minutes and not something else; this field exists so an
+	// operator who needs a different trade-off for their own workload can
+	// tune it without a code change.
+	AckWaitCeiling time.Duration
 }
 
 // CreateWorker builds a full Pipeline from configuration.
@@ -34,6 +160,7 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 	var success bool
 	var subscribers []*nats.NatsSubscriber
 	var snks []sink.Sink
+	var allTransformers []ConfiguredTransformer
 
 	// Cleanup on failure
 	defer func() {
@@ -43,6 +170,18 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 			}
 			for _, snk := range snks {
 				snk.Stop()
+			}
+			// Close any transformers already constructed before the failure.
+			// NatsProtoTransformer (internal/transformer/nats/protobuf.go) opens a
+			// live nats.Connect in its constructor, so with >=2 sinks/processors a
+			// failure on a later processor previously leaked every earlier
+			// transformer's NATS connection, repeating on each retry cycle.
+			for _, ct := range allTransformers {
+				if closeable, ok := ct.Transformer.(transformer.CloseableTransformer); ok {
+					if err := closeable.Close(); err != nil {
+						log.Warn().Err(err).Str("pipeline_id", id).Str("transformer", ct.Transformer.Name()).Msg("Failed to close transformer during factory cleanup")
+					}
+				}
 			}
 		}
 	}()
@@ -156,14 +295,26 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 		}
 
 		streamName := fmt.Sprintf("cdc_pipeline_%s_ingest", id)
-		sub, err := nats.NewNatsSubscriber(f.NatsURL, durableName, streamName, maxAckPending, 30*time.Second)
+		sub, err := nats.NewNatsSubscriber(f.NatsURL, durableName, streamName, maxAckPending, deriveAckWait(cfg, f.AckWaitCeiling))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create subscriber for sink %s: %w", sinkID, err)
 		}
 		subscribers = append(subscribers, sub)
 	}
 
-	retry := protocol.RetryConfig{MaxRetries: 3}
+	// WS-5 item 3 / docs/todos/custom_object_cdc_followups.md item 4: the
+	// old default RetryConfig{MaxRetries: 3} left InitialInterval and
+	// MaxInterval at their zero value, so handleSinkError's doubling loop
+	// stayed at backoff=0 and fell through to a flat, un-jittered 5s retry
+	// -- a tight loop against a dependency that is, by construction,
+	// already degraded. defaultRetryConfig mirrors RetryConfig's own
+	// documented example values (config.go's swaggertype example:"1s" /
+	// example:"30s" tags). consumer.go's handleSinkError also floors a
+	// zero interval independently (defaultRetryInitialInterval /
+	// defaultRetryMaxInterval), so a pipeline-config-supplied *RetryConfig
+	// that leaves the Durations unset (permitted by RetryConfig.Validate's
+	// non-Required Min) is protected too, not just this default path.
+	retry := defaultRetryConfig()
 	if cfg.Retry != nil {
 		retry = *cfg.Retry
 	}
@@ -205,20 +356,56 @@ func (f *PipelineFactory) CreateWorker(workerCtx context.Context, id string, cfg
 
 		var consumerTransformers []ConfiguredTransformer
 		for _, pCfg := range cfg.Processors {
+			// WS-8 item 2: an unregistered processor type, or a factory that
+			// errors, used to only log and continue -- the pipeline then ran
+			// completely untransformed while still reporting "Running". Make
+			// it fatal for the whole pipeline instead: CreateWorker returning
+			// an error here means startNewWorker (config/manager.go) never
+			// registers a worker, and the supervisor's heartbeat loop stays
+			// in "Retrying" rather than ever claiming "Running".
 			tf, ok := transformer.GetTransformer(pCfg.Type)
 			if !ok {
-				log.Warn().Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Transformer type not registered")
-				continue
+				return nil, fmt.Errorf("pipeline %s: processor %q references unregistered transformer type %q", id, pCfg.Name, pCfg.Type)
 			}
-			t, err := tf(pCfg.Options)
+
+			// Plumb the pipeline ID into the processor's options (without
+			// mutating the caller's map) so transformers that report metrics
+			// per-pipeline (WS-9) can label them correctly.
+			opts := pCfg.Options
+			if _, exists := opts["pipeline_id"]; !exists {
+				merged := make(map[string]interface{}, len(opts)+1)
+				for k, v := range opts {
+					merged[k] = v
+				}
+				merged["pipeline_id"] = id
+				opts = merged
+			}
+			// WS-5 item 4: also plumb the pipeline's effective batch size so
+			// a transformer without an explicit timeout_ms (e.g.
+			// nats/protobuf) can scale its default request timeout with it
+			// (transformernats.DefaultTimeoutMs) instead of using a flat
+			// value regardless of how large a batch it might have to
+			// process. Options wins if the processor config already sets
+			// its own batch_size for some reason.
+			if _, exists := opts["batch_size"]; !exists {
+				merged := make(map[string]interface{}, len(opts)+1)
+				for k, v := range opts {
+					merged[k] = v
+				}
+				merged["batch_size"] = float64(cfg.BatchSize)
+				opts = merged
+			}
+
+			t, err := tf(opts)
 			if err != nil {
-				log.Error().Err(err).Str("pipeline_id", id).Str("type", pCfg.Type).Msg("Failed to create transformer")
-				continue
+				return nil, fmt.Errorf("pipeline %s: failed to create transformer %q for processor %q: %w", id, pCfg.Type, pCfg.Name, err)
 			}
-			consumerTransformers = append(consumerTransformers, ConfiguredTransformer{
+			ct := ConfiguredTransformer{
 				Transformer:    t,
 				OperationTypes: pCfg.OperationTypes,
-			})
+			}
+			consumerTransformers = append(consumerTransformers, ct)
+			allTransformers = append(allTransformers, ct)
 		}
 
 		cons := NewConsumer(id, sinkID, sub, f.Publisher, snk, consumerTransformers, f.KV, cfg.BatchSize, cfg.BatchWait, retry, preHook, postHook)

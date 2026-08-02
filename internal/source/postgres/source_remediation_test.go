@@ -453,7 +453,7 @@ func TestHandler_NeverAcksOrAdvances_UntilCoordinatorConfirmed(t *testing.T) {
 
 	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	stopDrain := drainMsgChan(msgChan)
 	defer stopDrain()
@@ -516,7 +516,7 @@ func TestHandler_PanicSafety_MuNotStranded(t *testing.T) {
 
 	msgChan, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	handler := factory.Handler()
 	require.NotNil(t, handler)
@@ -576,7 +576,7 @@ func TestCoordinator_AckIngestion_NoLossUnderBurst(t *testing.T) {
 
 	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	stopDrain := drainMsgChan(msgChan)
 	defer stopDrain()
@@ -625,7 +625,7 @@ func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
 
 	_, _, err := s.Start(context.Background(), cfg, checkpoint, nil)
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	got := factory.LastConfig()
 
@@ -638,6 +638,46 @@ func TestStart_SnapshotEnabledUnconditional(t *testing.T) {
 	// AckManager.Hydrate and (on resume) the B3 mitigation in
 	// startConnector, never via cfg.StartLSN.
 	assert.Equal(t, pq.LSN(0), got.StartLSN, "StartLSN must always be 0; the slot's confirmed_flush_lsn is the sole resume authority")
+}
+
+// TestStart_SnapshotChunkSize_Wired is WS-2B item 3 / docs/todos/
+// custom_object_cdc_followups.md item 5: SourceConfig.SnapshotChunkSize was
+// parsed and validated but never reached the vendored connector's
+// Snapshot.ChunkSize -- Start always hardcoded 8000 regardless of what the
+// config said. Asserts both directions through the real Start() path (not
+// the helper function in isolation): a configured value is honoured, and an
+// unset (zero) value falls back to the same 8000 the vendored default would
+// have applied, so every existing deployment that leaves the field unset is
+// unaffected.
+func TestStart_SnapshotChunkSize_Wired(t *testing.T) {
+	t.Run("configured value is honoured", func(t *testing.T) {
+		s := NewPostgresSource("chunk-size-configured")
+		factory := newStubFactory()
+		s.SetConnectorFactory(factory.Build)
+
+		cfg := validSourceConfig()
+		cfg.SnapshotChunkSize = 500
+
+		_, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+		require.NoError(t, err)
+		defer func() { _ = s.Stop() }()
+
+		assert.Equal(t, int64(500), factory.LastConfig().Snapshot.ChunkSize)
+	})
+
+	t.Run("unset falls back to the vendored default of 8000", func(t *testing.T) {
+		s := NewPostgresSource("chunk-size-unset")
+		factory := newStubFactory()
+		s.SetConnectorFactory(factory.Build)
+
+		cfg := validSourceConfig() // SnapshotChunkSize left at zero value
+
+		_, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+		require.NoError(t, err)
+		defer func() { _ = s.Stop() }()
+
+		assert.Equal(t, int64(8000), factory.LastConfig().Snapshot.ChunkSize)
+	})
 }
 
 // TestRunSlotLagProbe_EmitsGaugeValues is plan 01a WI-5a: the periodic
@@ -772,7 +812,7 @@ func TestWI5aGauges_ShareIdenticalLabelSet(t *testing.T) {
 
 	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	stopDrain := drainMsgChan(msgChan)
 	defer stopDrain()
@@ -916,7 +956,7 @@ func TestHandler_StrictAckOff_RestoresLegacyPerEventAck(t *testing.T) {
 
 	msgChan, ackChan, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, []string{"sink1"})
 	require.NoError(t, err)
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 	_ = ackChan
 
 	stopDrain := drainMsgChan(msgChan)

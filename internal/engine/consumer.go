@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -26,6 +27,29 @@ const (
 	// redelivery (plan §3.WI-5: "publish failure must not proceed silently").
 	recordAckMaxAttempts  = 3
 	recordAckRetryBackoff = 100 * time.Millisecond
+
+	// defaultRetryInitialInterval/defaultRetryMaxInterval (WS-5 item 3 /
+	// docs/todos/custom_object_cdc_followups.md item 4) are the backoff
+	// floors handleSinkError falls back to when c.retryConfig carries a
+	// zero InitialInterval/MaxInterval. Before this fix a RetryConfig{
+	// MaxRetries: 3} with the Duration fields left at their zero value
+	// made "backoff *= 2" stay 0 forever, so every retry fell through to
+	// the flat 5s branch below -- a tight retry loop against a dependency
+	// that is, by definition, already degraded. These floors apply
+	// regardless of how retryConfig was constructed (the factory's own
+	// default, or a pipeline config that validation allows to leave the
+	// Duration fields unset), so a zero interval can never silently
+	// degrade to the flat path again.
+	defaultRetryInitialInterval = 500 * time.Millisecond
+	defaultRetryMaxInterval     = 30 * time.Second
+
+	// backoffJitterFraction bounds the +/- jitter applied to each computed
+	// backoff (WS-5 item 3): a fixed exponential schedule shared by every
+	// consumer instance means every one of them retries in lockstep,
+	// turning "back off" into a synchronized thundering herd against the
+	// same already-degraded dependency. +/-20% desynchronizes retries
+	// across instances while keeping the schedule's overall shape intact.
+	backoffJitterFraction = 0.2
 )
 
 type ConfiguredTransformer struct {
@@ -133,6 +157,18 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 
 	for _, t := range c.transformers {
 		if len(t.OperationTypes) == 0 {
+			// WS-9: this should be unreachable now that PipelineConfig.Validate()
+			// rejects a processor with no operation_types at every config-load path
+			// (config/manager.go startNewWorker). If it fires anyway -- e.g. a
+			// config written before validation was enforced, or a bug in a future
+			// load path -- log loudly instead of silently dropping the transformer,
+			// and emit a metric so it's visible rather than indistinguishable from
+			// "not deployed".
+			log.Error().
+				Str("pipeline_id", c.pipelineID).
+				Str("transformer", t.Transformer.Name()).
+				Msg("Transformer has empty OperationTypes; skipping it entirely for this batch. This should have been rejected by config validation.")
+			metrics.ConsumerTransformInvocationsTotal.WithLabelValues(c.pipelineID, t.Transformer.Name(), "skipped_no_operation_types").Inc()
 			continue
 		}
 
@@ -151,8 +187,11 @@ func (c *Consumer) processMessages(ctx context.Context, msgs []protocol.Message)
 		}
 
 		if len(matchingIndices) == 0 {
+			metrics.ConsumerTransformInvocationsTotal.WithLabelValues(c.pipelineID, t.Transformer.Name(), "skipped_no_match").Inc()
 			continue
 		}
+
+		metrics.ConsumerTransformInvocationsTotal.WithLabelValues(c.pipelineID, t.Transformer.Name(), "invoked").Inc()
 
 		matchingMsgs := make([]protocol.Message, len(matchingIndices))
 		matchingUUIDs := make(map[string]bool, len(matchingMsgs))
@@ -780,6 +819,14 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 	log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
 
 	backoff := c.retryConfig.InitialInterval
+	if backoff <= 0 {
+		backoff = defaultRetryInitialInterval
+	}
+	maxInterval := c.retryConfig.MaxInterval
+	if maxInterval <= 0 {
+		maxInterval = defaultRetryMaxInterval
+	}
+
 	maxAttempts := 0
 	c.retryMu.Lock()
 	for _, m := range wmMsgs {
@@ -791,27 +838,37 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 
 	for i := 1; i < maxAttempts; i++ {
 		backoff *= 2
-		if backoff > c.retryConfig.MaxInterval {
-			backoff = c.retryConfig.MaxInterval
+		if backoff > maxInterval {
+			backoff = maxInterval
 			break
 		}
 	}
+
+	backoff = applyJitter(backoff)
 
 	for _, m := range wmMsgs {
 		m.Nack()
 	}
 
-	if backoff > 0 {
-		select {
-		case <-ctx.Done():
-		case <-time.After(backoff):
-		}
-	} else {
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-		}
+	select {
+	case <-ctx.Done():
+	case <-time.After(backoff):
 	}
+}
+
+// applyJitter returns d adjusted by a uniformly random +/-backoffJitterFraction,
+// floored at 1ms so a jittered-down backoff never collapses to a busy loop.
+func applyJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultRetryInitialInterval
+	}
+	span := float64(d) * backoffJitterFraction
+	delta := (rand.Float64()*2 - 1) * span //nolint:gosec // retry-backoff jitter, not a security context
+	jittered := time.Duration(float64(d) + delta)
+	if jittered < time.Millisecond {
+		return time.Millisecond
+	}
+	return jittered
 }
 
 func (c *Consumer) updateStats(batch []protocol.Message) {
@@ -916,8 +973,27 @@ func (c *Consumer) isolatePoisonBatch(ctx context.Context, wmMsgs []*message.Mes
 
 		toUpload, err := c.processMessages(ctx, msgs)
 		if err != nil {
-			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Transformation failed in isolation, routing to DLQ")
-			c.routeToDLQWithAck(ctx, wmMsg, msgs)
+			// WS-2 item 5: this branch used to DLQ unconditionally while the
+			// sink-failure branch below honours EnableDLQ -- the same
+			// isolatePoisonBatch loop treating two failure kinds
+			// inconsistently. A transformer error here is exactly the
+			// "retryable=true" / transport-degraded case WS-2 says must
+			// retry rather than DLQ (dropping a schema_change or poisoning
+			// a genuinely-transient daya-core blip), so it must go through
+			// the same MaxRetries/EnableDLQ gate as a sink failure, not
+			// bypass it.
+			c.retryMu.Lock()
+			entry := c.retries[wmMsg.UUID]
+			attempts := entry.count
+			c.retryMu.Unlock()
+
+			if attempts >= c.retryConfig.MaxRetries && c.retryConfig.EnableDLQ {
+				log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Transformation failed in isolation and exceeded MaxRetries, routing to DLQ")
+				c.routeToDLQWithAck(ctx, wmMsg, msgs)
+			} else {
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("msg_id", wmMsg.UUID).Msg("Transformation failed in isolation, retrying")
+				wmMsg.Nack()
+			}
 			continue
 		}
 		if len(toUpload) == 0 {

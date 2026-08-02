@@ -273,19 +273,10 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 				}
 			}
 
-			hbKey := protocol.WorkerHeartbeatKey(id)
-			if entry, err := h.kv.Get(hbKey); err == nil {
-				var hb protocol.WorkerHeartbeat
-				if err := json.Unmarshal(entry.Value(), &hb); err == nil {
-					if time.Since(hb.UpdatedAt) < 30*time.Second {
-						if hb.Status == "Ready" {
-							summary.HealthyCount++
-						}
-					} else {
-						summary.ErrorCount++
-					}
-				}
-			} else {
+			switch h.getPipelineStatusString(id) {
+			case "healthy":
+				summary.HealthyCount++
+			case "error":
 				summary.ErrorCount++
 			}
 
@@ -442,6 +433,14 @@ func (h *Handler) getPipelineStatusString(id string) string {
 		var hb protocol.WorkerHeartbeat
 		if err := json.Unmarshal(hbEntry.Value(), &hb); err == nil {
 			if time.Since(hb.UpdatedAt) > 60*time.Second {
+				actualStatus = "error"
+			} else if hb.Status != "" && hb.Status != "Running" {
+				// A fresh heartbeat that reports a non-"Running" status (e.g. a
+				// worker that failed to start and is looping in the retry
+				// backoff, see config/manager.go monitorWorker) must not be
+				// reported "healthy" just because it is being updated on
+				// schedule (WS-8/WS-9: "a pipeline that fails to construct a
+				// processor must no longer be reported healthy").
 				actualStatus = "error"
 			}
 		}

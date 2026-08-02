@@ -62,6 +62,14 @@ func (r *stringRows) Err() error   { return nil }
 func TestBatchUpload_CrossSchemaCollision_PKIsolation(t *testing.T) {
 	db := newFakeDB()
 	db.scanFn = func(query string, _ []any, dest ...any) error {
+		// WS-4.6: refreshPrimaryKey consults cdc_meta.pk_columns before
+		// SHOW CREATE TABLE. This fake has no durable metadata for either
+		// table, so that lookup must miss and fall through to the
+		// SHOW CREATE TABLE canned responses below, exactly as before that
+		// lookup existed.
+		if !strings.Contains(strings.ToUpper(query), "SHOW CREATE TABLE") {
+			return sql.ErrNoRows
+		}
 		p, ok := dest[0].(*string)
 		require.True(t, ok)
 		switch {

@@ -75,3 +75,22 @@ pipelines:
     # Optional Overrides (If not set, global defaults are used)
     batch_size: 2000
     batch_wait: 10s
+
+    # processors:
+    #   - type: "nats/protobuf"
+    #     options:
+    #       nats_url: "nats://localhost:4222"
+    #       subject: "daya.transform.custom_objects"
+    #       # WS-1B: this processor must transform two different replication
+    #       # classes -- every custom_objects.* table (generated custom
+    #       # tables and built-in sidecars) AND the public.visitations table
+    #       # specifically (enriched with checked_in/checked_out; every
+    #       # other public built-in, e.g. master_contacts, business_entities,
+    #       # is left untransformed by not appearing in either list below).
+    #       # `schemas` and `tables` OR together when both are set -- a
+    #       # message matches if it satisfies either, not both -- so this
+    #       # combination is exactly "custom_objects schema, plus
+    #       # visitations regardless of schema". Configuring only one of the
+    #       # two still behaves as a single filter, unchanged.
+    #       schemas: ["custom_objects"]
+    #       tables: ["visitations"]

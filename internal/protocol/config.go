@@ -219,6 +219,12 @@ func (p ProcessorConfig) Validate() error {
 	return validation.ValidateStruct(&p,
 		validation.Field(&p.Name, validation.Required),
 		validation.Field(&p.Type, validation.Required),
+		// A processor with no operation types matches nothing and is
+		// silently skipped in its entirety by Consumer.processMessages
+		// (engine/consumer.go), with no warning and no match-all default --
+		// the pipeline then reports "Running" while transforming nothing.
+		// Require it explicitly at config load instead (WS-8 item 1).
+		validation.Field(&p.OperationTypes, validation.Required, validation.Length(1, 0)),
 	)
 }
 
@@ -242,6 +248,13 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.Sinks, validation.Required, validation.Length(1, 0)),
 		validation.Field(&p.Tables, validation.Each(validation.By(validateTableIdentifier))),
 		validation.Field(&p.Retry),
+		// ozzo-validation already descends into each slice element that
+		// implements Validatable (ProcessorConfig.Validate below), so no
+		// explicit validation.Each(validation.By(...)) is needed here
+		// (WS-9 round-3 fix: the old validation.Each call ran
+		// ProcessorConfig.Validate() a second time, producing duplicate
+		// error keys).
+		validation.Field(&p.Processors),
 	)
 }
 

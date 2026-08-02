@@ -70,4 +70,15 @@ Future implementation would call `transformer.LoadPlugin("/path/to/my_plugin.so"
 
 - **Registration**: All built-in transformers call `RegisterTransformer` in their `init()` block.
 - **Configuration**: Mapped via `ProcessorConfig` in the pipeline settings.
-- **Error Handling**: Transformers should log errors but return the original message if the transformation is non-critical, or return `false` for `should_continue` to drop the message.
+- **Error Handling**: Transformers fail **closed**, not open. On a hard error
+  (the responder unreachable, a malformed response, a protocol violation),
+  the record must be dropped -- `(nil, false, err)` -- never forwarded as the
+  original, untransformed message. `NatsProtoTransformer.Transform` and
+  `TransformBatch`/`doTransform` are both fail-closed (WS-10); a transformer
+  that instead "logs and forwards the original if non-critical" would
+  silently deliver rows to the warehouse that were never actually
+  transformed -- indistinguishable from a working pipeline until someone
+  notices the data is wrong. Use `false` for the second return value / an
+  empty result only to mean "deliberately drop this record" (e.g. a
+  responder-side filter decision, `Keep:false`), never as an error
+  substitute.

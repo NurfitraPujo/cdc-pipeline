@@ -1,6 +1,6 @@
 # Maintaining Patched Dependencies
 
-This project contains a locally patched version of `github.com/Trendyol/go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. It began as a single `panic`-on-shutdown fix, but has since grown into a hand-maintained fork carrying **eight** patches (T0-1..T0-3, T1-4, T1-5, T2-6, MS-1, MS-2) — see [`internal/vendor/go-pq-cdc/PATCHES.md`](internal/vendor/go-pq-cdc/PATCHES.md) for the authoritative catalogue.
+This project contains a locally patched version of `github.com/Trendyol/go-pq-cdc` located in `internal/vendor/go-pq-cdc/`. It began as a single `panic`-on-shutdown fix, but has since grown into a hand-maintained fork carrying **nine** patches (T0-1..T0-3, T1-4, T1-5, T2-6, MS-1, MS-2, WS7-1) — see [`internal/vendor/go-pq-cdc/PATCHES.md`](internal/vendor/go-pq-cdc/PATCHES.md) for the authoritative catalogue.
 
 ## **Why a Local Vendor?**
 The `vendor/` directory was removed from Git to reduce the repository size from ~13MB to <1MB. However, since we need to keep our custom fix for `go-pq-cdc`, we've isolated only that dependency into the `internal/vendor/` directory and used a Go `replace` directive in `go.mod`.
@@ -103,6 +103,41 @@ most likely to shift underneath a line-based patch). See the PATCHES.md T0-3 ent
 reasoning on the flush-ordering guarantee and the full-channel drop decision, and
 `internal/source/postgres/ack.go`'s `AckManager.IdleAdvance` (`highestSeen`/`idleTrusted`) for the
 application-side defence-in-depth added alongside it.
+
+**WS7-1** is the newest patch (2026-08-02), unrelated to `ManualCommit`/T0-*: under
+`REPLICA IDENTITY DEFAULT`, Postgres omits an unchanged TOASTed column from a WAL UPDATE tuple
+entirely rather than sending its value, and `Data.DecodeWithColumn` had no case for that marker —
+the column simply got no entry in the decoded map, indistinguishable from a genuine NULL. Downstream
+this repo's Databend sink derives its `REPLACE INTO` column list from that map's keys, so the
+omitted column was silently nulled on every update that didn't touch it. The fix widens
+`DecodeWithColumn`'s return to also report which columns were TOASTed-and-unchanged
+(`format.Update.NewToastedColumns`), which the embedding application surfaces via
+`protocol.Message.ColumnKinds` and the sink uses to fetch-and-preserve the column's current value
+instead of nulling it (see `docs/decisions/0018-toast-unchanged-signalled-via-columnkinds.md`).
+Unlike T0-1/T0-3, this patch is **not flag-guarded** — it always applies, since there is no legacy
+behavior worth preserving (the pre-patch behavior was a silent data-corruption bug, not a
+deliberate default). A second, related defect was found and fixed during validation review of the
+first: an UPDATE that changes the replica-identity key (Postgres sends a `'K'` key-only old tuple
+in that case) hit `decode()`'s pre-existing toast-backfill loop, which unconditionally copied the
+old tuple's column over the new tuple's TOAST marker — and a `'K'` tuple's non-key columns are
+tagged `DataTypeNull`, not their real value (**verified live** against real Postgres 15 pgoutput
+output), so the copy fabricated a NULL over a genuine unchanged-TOAST column, reintroducing the
+same bug one layer above `DecodeWithColumn`. The backfill loop now only copies when the old tuple
+is a full `REPLICA IDENTITY FULL` row, or the specific old column genuinely isn't NULL. See the
+PATCHES.md WS7-1 entry and its Re-sync Risk Callout (four items, not the original three) — both the
+`case DataTypeToast` arm and this `'K'`-tuple guard are silent-revert risks that will not fail any
+test outside `pq/message/format/update_test.go`'s specific TOAST-shaped fixtures if lost.
+
+Every WS7-1 edit site carries an inline `// vendored-patch: WS7-1` marker, consistent with every
+other patch in this catalogue.
+
+**Note**: the vendored module's own tests (`pq/message/tuple`, `pq/message/format`) cannot be run
+from inside `internal/vendor/go-pq-cdc/` directly — `go test ./pq/message/...` there fails with
+`missing go.sum entry for github.com/jackc/pgservicefile`, because the vendored `go.mod` only
+resolves its full dependency graph through the parent module's `replace` directive and `go.sum`.
+Run them from the **parent** module instead: `go test github.com/Trendyol/go-pq-cdc/pq/message/...`
+(module-path form, not a `./...` relative path, since the parent module's own file tree does not
+contain these packages directly). This is pre-existing, not specific to WS7-1.
 
 ## **Recommended Alternative: Use a Fork**
 

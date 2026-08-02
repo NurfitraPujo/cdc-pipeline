@@ -387,13 +387,101 @@ stream order.
 
 ---
 
+## WS7-1: Surface TOAST-Elided Columns from `DecodeWithColumn` Instead of Silently Dropping Them
+
+**Upstream Issue**: N/A (internal requirement, tracked as
+`plans/cdc_custom_object_transform_remediation.md` WS-7; the pipeline-side half of a cross-repo
+blocking pair with daya-core's WS-4.5)
+
+**Files Modified**:
+- `pq/message/tuple/data.go` (`Data.DecodeWithColumn`)
+- `pq/message/format/update.go` (`Update` struct, `NewUpdate`, `decode`'s toast-backfill loop)
+- `pq/message/format/insert.go`, `pq/message/format/delete.go` (call-site signature update only —
+  neither's own decode behavior changes; see "Fix" below)
+
+Every edit site carries an inline `// vendored-patch: WS7-1 - ...` marker
+(`grep -rn "vendored-patch: WS7-1" internal/vendor/go-pq-cdc/` finds them), per the convention this
+file's "Applying Patches" section describes and `docs/decisions/0007-go-pq-cdc-stays-an-in-tree-fork.md`
+mandates.
+
+**Problem**: two distinct defects, found and fixed in two passes (the second during Opus
+validation review of the first).
+
+1. Under `REPLICA IDENTITY DEFAULT` with an **unchanged** replica-identity key, Postgres omits an
+   unchanged TOASTed (out-of-line, >~2KB) column from the WAL's new tuple entirely — it sends a
+   TOAST-pointer marker (`DataTypeToast`, byte `'u'`) instead of a value, and there is no old tuple
+   present at all in this case (`OldTupleData == nil`), so the pre-existing backfill loop below
+   never runs. `Data.DecodeWithColumn`'s `switch` had no `case DataTypeToast` at all, so such a
+   column simply got no entry in the returned `map[string]any` — byte-for-byte indistinguishable
+   from `DataTypeNull`'s explicit `decoded[colName] = nil`.
+2. Under `REPLICA IDENTITY DEFAULT` with a **changed** replica-identity key, Postgres sends a `'K'`
+   (key-only) old tuple, so `OldTupleData != nil` and the pre-existing backfill loop in
+   `decode()` *does* run — and unconditionally copies `m.OldTupleData.Columns[i]` over any
+   `DataTypeToast` column in the new tuple ("because toasted columns not sent until the toasted
+   column updated"). **Verified live** against Postgres 15's actual pgoutput wire output (docker
+   `postgres:15-alpine`, `wal_level=logical`, a `pgoutput` publication, an UPDATE that changes a
+   table's PK while leaving a TOASTed column untouched, read back via
+   `pg_logical_slot_peek_binary_changes`): a `'K'` tuple's **non-key columns are tagged
+   `DataTypeNull`**, not their real value — Postgres has no value to send for them, key-only means
+   key-only. The unconditional copy therefore overwrote the new tuple's correct `'u'` (Toast) marker
+   with the old tuple's `'n'` (Null) marker, fabricating a NULL over a genuine unchanged-TOAST
+   column — reintroducing defect 1's exact bug, one call frame above `DecodeWithColumn`, for every
+   UPDATE that happens to change the replica-identity key.
+
+Both defects have the same downstream consequence: the embedding application's Databend sink
+derives its `REPLACE INTO` column list from `NewDecoded`'s own keys, so the wrongly-nulled column
+gets silently defaulted to NULL/empty on write — truncating a wide column (e.g. a CITEXT
+custom-object field) on an unrelated field's change, with no error anywhere in the path.
+
+**Fix**:
+- `Data.DecodeWithColumn` signature changed from `(map[string]any, error)` to
+  `(decoded map[string]any, toasted []string, error)`. A `DataTypeToast` column still gets no
+  entry in `decoded` (that part is correct and unchanged — there genuinely is no value to put
+  there), but its name is now appended to the new `toasted` return, so a caller can tell "omitted
+  because unchanged TOAST" apart from "omitted because this column is otherwise never populated."
+- `format.Update` gained `NewToastedColumns []string`, populated from `NewTupleData`'s
+  `DecodeWithColumn` call in `NewUpdate`. `OldTupleData`'s own `DecodeWithColumn` call discards the
+  toasted return (an old tuple carries no meaningful unchanged-TOAST marker of its own for our
+  purposes — see the K-tuple point below for why its *columns* still matter to the backfill loop).
+- `decode()`'s toast-backfill loop (defect 2) now only copies the old tuple's column over a
+  `DataTypeToast` new-tuple column when `m.OldTupleType == UpdateTupleTypeOld` (a full `'O'`
+  `REPLICA IDENTITY FULL` row — verified live: PG sends `'u'` there too for an unchanged TOASTed
+  column, so copying `'u'` onto `'u'` is a same-marker no-op and the loop's original intent is
+  preserved) **or** the specific old column is not itself `DataTypeNull` (a `'K'` tuple's actual
+  key-column data, which is never a toast marker in practice but is handled uniformly rather than
+  special-cased by column identity). When neither holds — a `'K'` tuple's non-key column — the new
+  tuple's `DataTypeToast` marker is left untouched, so `NewToastedColumns` still reports it.
+- `format.Insert`/`format.Delete` updated only to accommodate `DecodeWithColumn`'s new three-value
+  return (`_` on the `toasted` slot) — an INSERT's tuple is always the full row (nothing prior to be
+  "unchanged" against) and a DELETE's old tuple has no analogous case, so neither needed a new
+  field.
+- The embedding application (`internal/source/postgres/source.go`'s `buildMessage`, **not part of
+  this vendored patch** — ordinary application code) reads `Update.NewToastedColumns` and surfaces
+  it to the rest of the pipeline via `protocol.Message.ColumnKinds` (see
+  `docs/decisions/0018-toast-unchanged-signalled-via-columnkinds.md` and
+  `docs/decisions/0019-columnkinds-typed-side-channel.md` for the pipeline-side contract this
+  patch feeds).
+
+**Backward Compatibility**: source-incompatible for any external caller of `DecodeWithColumn` (its
+signature gained a return value); this repo is the only consumer, and all three call sites were
+updated in the same patch. `Update.NewToastedColumns` is a new, additive struct field — empty
+whenever nothing in the tuple is TOASTed-and-unchanged (or, for a `'K'` tuple, whenever the
+TOASTed-and-unchanged columns are all covered by the old tuple's own real data), which is every
+pre-existing test fixture and every ordinary INSERT/DELETE/fully-populated UPDATE, so no existing
+caller's observed behavior changes. The `decode()` backfill-loop change is narrower than a full
+behavior change for `REPLICA IDENTITY FULL`: verified live to be a same-marker no-op there, so that
+path's observed output is unchanged; only the `'K'`-tuple, non-key-column case behaves differently
+(correctly, now) than before this fix.
+
+---
+
 ## Re-sync Risk Callouts
 
-Two changes across T0-1..T0-3 are silent-break risks: a future re-sync can drop or reorder
-either one, the vendored module will still compile, the flag-off (`ManualCommit == false`) tests
-will still pass, and nothing will fail loudly. General "re-apply the patches" advice is not
-enough for these two; verify the exact expressions survive, not just that the surrounding
-function still exists.
+Four changes across T0-1..T0-3 and WS7-1 are silent-break risks: a future re-sync can drop or
+reorder any one of them, the vendored module will still compile, the flag-off
+(`ManualCommit == false`) tests will still pass (WS7-1 has no such flag to begin with), and
+nothing will fail loudly. General "re-apply the patches" advice is not enough for these; verify
+the exact expressions survive, not just that the surrounding function still exists.
 
 1. **T0-3's `buf.flush()`-before-marker-enqueue ordering**, in `handleKeepalive`. This single
    line-ordering fact is the entire correctness argument for T0-3: it is what guarantees every
@@ -409,6 +497,32 @@ function still exists.
    branch (T0-1). It is easy to mistake for flag-guarded (it lives inside the same function as
    several `ManualCommit`-gated branches) and drop or move it during a re-sync merge. It is not
    gated: losing it reintroduces replying to the primary with LSN 0 in both modes.
+3. **WS7-1's `case DataTypeToast: toasted = append(toasted, colName)`** in
+   `Data.DecodeWithColumn`. A re-sync that keeps the three-value return signature (so the code
+   still compiles and every existing test — none of which exercise a genuinely TOASTed-and-
+   unchanged column, since constructing one requires the exact wire shape WS7-1's own tests build
+   by hand — still passes) but drops or empties this one `case` arm reintroduces the exact bug
+   WS7-1 exists to close, silently: the column goes back to getting no `decoded` entry *and* no
+   `toasted` entry, indistinguishable again from a genuine NULL, and the Databend sink's
+   TOAST-preservation step (`internal/sink/databend/sink.go`'s `fetchCurrentColumns` path) simply
+   never fires because it has nothing to key off. No compile error, no test failure, no metric —
+   the sink's `cdc_sink_toast_preservation_failures_total` counter only fires on a *fetch* failure,
+   not on "nothing told me to fetch." Verify this specific `case` arm survives, not just that
+   `DecodeWithColumn` still returns three values.
+4. **WS7-1's `'K'`-tuple guard in `decode()`'s toast-backfill loop**
+   (`m.OldTupleType == UpdateTupleTypeOld || oldCol.DataType != tuple.DataTypeNull`). This is the
+   condition that stops the loop from overwriting a genuine `DataTypeToast` marker with the old
+   tuple's `DataTypeNull` non-key-column placeholder. It was found *after* the initial WS7-1
+   landing, during Opus validation review, and confirmed live against real Postgres 15 pgoutput
+   output before being fixed — it is not a hypothetical. A re-sync that reverts this condition back
+   to an unconditional `m.NewTupleData.Columns[i] = m.OldTupleData.Columns[i]` (upstream's form)
+   reintroduces the bug for exactly one case: an UPDATE that changes the replica-identity key while
+   leaving a TOASTed column untouched. Every test that exercises the `'N'`-only shape (no old
+   tuple) or the `'O'` full-old-tuple shape still passes; only
+   `TestNewUpdate_KeyTupleChangedPK_ToastedColumnStillSurfaced`
+   (`pq/message/format/update_test.go`) exercises the `'K'` shape specifically and would catch the
+   regression. Verify this condition survives verbatim, not just that the surrounding loop and its
+   comment still exist.
 
 ---
 

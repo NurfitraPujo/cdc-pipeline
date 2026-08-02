@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,6 +36,33 @@ const (
 	// DefaultDecimalScale is the default scale used for numeric / decimal
 	// mappings. 9 covers most financial and scientific use cases.
 	DefaultDecimalScale = 9
+
+	// deletedAtColumn is the column every synced table's soft-delete UPDATE
+	// path (deleteTableBatch) targets unconditionally. WS-4/PIPE-OQ-5 is
+	// "soft delete everywhere", but the plan itself documents that several
+	// real satellite tables (business_entity_addresses,
+	// business_entity_contacts, visitation_contacts,
+	// business_entity_industry -- see PIPE-OQ-4's satellite table list)
+	// have no deleted_at column at the source. ApplySchema below always
+	// synthesizes this column on the Databend side regardless of whether
+	// the source schema declares it, so a delete against any of those
+	// tables succeeds instead of failing with an unknown-column error
+	// (which, left unclassified, would retry-loop forever against a frozen
+	// replication slot -- see permanentDDLMarkers below).
+	deletedAtColumn = "deleted_at"
+
+	// pkMetaDatabase/pkMetaTable name the sink-owned metadata table that
+	// persists PkColumns durably (WS-4.6). Databend's CREATE TABLE emits no
+	// PRIMARY KEY / CLUSTER BY clause we can rely on -- SHOW CREATE TABLE
+	// after a process restart finds nothing, and both write paths silently
+	// fell back to pks = []string{"id"}, which does not dedup a sidecar
+	// keyed on record_id and silently duplicates rows on every redelivered
+	// or updated row. Persisting the declared PkColumns here, and treating
+	// this table as authoritative ahead of SHOW CREATE TABLE, survives a
+	// restart because it is read back from Databend itself rather than
+	// process memory.
+	pkMetaDatabase = "cdc_meta"
+	pkMetaTable    = "pk_columns"
 )
 
 // reasonDeserializationFailed is the Prometheus/DLQ label used for messages
@@ -74,7 +102,10 @@ type DatabendSink struct {
 
 	pkMu     sync.RWMutex
 	pkCache  map[string][]string // TableRef.String() -> pk columns
-	pkLoaded map[string]struct{} // TableRef.String() we've already attempted SHOW CREATE TABLE on
+	pkLoaded map[string]struct{} // TableRef.String() we've already attempted resolution for (metadata table + SHOW CREATE TABLE)
+
+	pkMetaMu      sync.Mutex
+	pkMetaEnsured bool // whether cdc_meta.pk_columns has been created this process
 
 	// autoCreateSchema controls whether ensureDatabase issues CREATE
 	// DATABASE IF NOT EXISTS for a target database before DDL/DML, or
@@ -98,6 +129,23 @@ type DatabendSink struct {
 	maxPlaceholders  int
 	decimalPrecision int
 	decimalScale     int
+
+	// colTypeMu/colTypeCache back WS-6's schema-type-divergence detection.
+	// ApplySchema is add-only -- it never issues ALTER ... MODIFY COLUMN --
+	// so a schema_change that redeclares an *existing* column with a
+	// different Databend type can only be surfaced, never silently
+	// applied. Rather than compare against information_schema.columns'
+	// reported data_type (which uses Databend's own canonical type names,
+	// e.g. VARCHAR, and would false-positive against every column purely
+	// from naming skew with mapPgTypeToDatabend's STRING/INT64/etc
+	// vocabulary), this remembers the dbType string *this sink itself*
+	// last computed and applied for that column, so the comparison is
+	// self-consistent and only fires on a genuine change in what the
+	// source declares. In-memory only: a process restart clears it, so the
+	// column already existing but with an as-yet-unknown Databend type is
+	// correctly not flagged.
+	colTypeMu    sync.Mutex
+	colTypeCache map[string]map[string]string // qualified table -> column -> last-applied dbType
 }
 
 // NewDatabendSink opens a new Databend sink backed by a real *sql.DB connection
@@ -117,6 +165,7 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 		db:               sqlDBAdapter{DB: db},
 		pkCache:          make(map[string][]string),
 		pkLoaded:         make(map[string]struct{}),
+		colTypeCache:     make(map[string]map[string]string),
 		autoCreateSchema: true,
 		provisionedDB:    make(map[string]struct{}),
 		validatedDB:      make(map[string]struct{}),
@@ -264,17 +313,48 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 
 	g, gCtx := errgroup.WithContext(ctx)
 
-	for ref, msgs := range upserts {
-		r, m := ref, msgs
+	for ref, upsertMsgs := range upserts {
+		r, um := ref, upsertMsgs
+		if delMsgs, hasDelete := deletes[ref]; hasDelete {
+			// Round-5c review MEDIUM: the same ref appears in both maps --
+			// this flush contains a delete AND a (superseded) upsert for
+			// the same table. Running them as independent concurrent
+			// goroutines is exactly how the round-5b tombstone-preservation
+			// fix reopens itself: fetchCurrentDeletedAt (inside
+			// uploadTableBatch) can read the pre-delete deleted_at before
+			// the concurrent UPDATE lands, then REPLACE INTO writes that
+			// stale (nil) value, silently erasing the delete this same
+			// flush was supposed to apply. Serialise the pair instead of
+			// giving them independent goroutines: run the upsert, THEN the
+			// delete, in one goroutine, so fetchCurrentDeletedAt (if it
+			// runs at all for other rows in the upsert) can only observe
+			// pre-delete state, and the delete -- being strictly last --
+			// always wins for this ref. This does not reorder anything
+			// relative to today's behaviour beyond removing the race: the
+			// two were never ordered before, so "delete wins" is a
+			// deliberate, documented choice, not an accident.
+			dm := delMsgs
+			g.Go(func() error {
+				if err := s.uploadTableBatch(gCtx, r, um); err != nil {
+					return err
+				}
+				return s.deleteTableBatch(gCtx, r, dm)
+			})
+			continue
+		}
 		g.Go(func() error {
-			return s.uploadTableBatch(gCtx, r, m)
+			return s.uploadTableBatch(gCtx, r, um)
 		})
 	}
 
-	for ref, msgs := range deletes {
-		r, m := ref, msgs
+	for ref, delMsgs := range deletes {
+		if _, hasUpsert := upserts[ref]; hasUpsert {
+			// Already scheduled (serialised after its upsert) above.
+			continue
+		}
+		r, dm := ref, delMsgs
 		g.Go(func() error {
-			return s.deleteTableBatch(gCtx, r, m)
+			return s.deleteTableBatch(gCtx, r, dm)
 		})
 	}
 
@@ -509,6 +589,16 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 		s.pkCache[qualified] = schema.PKColumns
 		s.pkLoaded[qualified] = struct{}{}
 		s.pkMu.Unlock()
+
+		// WS-4.6: persist durably so a sink restart does not lose the PK and
+		// fall back to pks = []string{"id"}. Best effort logged loudly rather
+		// than failing the whole ApplySchema call -- the in-memory cache set
+		// above already makes this process instance correct; persistence is
+		// what makes the *next* process instance correct too.
+		if err := s.persistPKMetadata(ctx, ref, schema.PKColumns); err != nil {
+			log.Error().Err(err).Str("table", qualified).Strs("pks", schema.PKColumns).
+				Msg("failed to persist primary key metadata; a sink restart before this succeeds will fall back to an incorrect PK for this table")
+		}
 	}
 
 	existingCols, err := s.getCurrentColumns(ctx, ref)
@@ -526,13 +616,26 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 		}
 		sort.Strings(colNames)
 
+		hasDeletedAt := false
 		for _, name := range colNames {
 			if err := validateIdentifier(name); err != nil {
 				return fmt.Errorf("invalid column name %q: %w", name, err)
 			}
+			if strings.EqualFold(name, deletedAtColumn) {
+				hasDeletedAt = true
+			}
 			pgType := schema.Columns[name]
 			dbType := s.mapPgTypeToDatabend(pgType)
 			colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(name), dbType))
+			s.recordColumnType(qualified, name, dbType)
+		}
+		if !hasDeletedAt {
+			// WS-4: soft delete everywhere requires deleted_at on every
+			// synced table, but several real satellite tables have no such
+			// column at the source (PIPE-OQ-4). Synthesize it here so
+			// deleteTableBatch's unconditional UPDATE ... SET deleted_at
+			// never hits an unknown-column error for those tables.
+			colDefs = append(colDefs, fmt.Sprintf("%s TIMESTAMP", quoteIdentifier(deletedAtColumn)))
 		}
 		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)",
 			quotedTable, strings.Join(colDefs, ", "))
@@ -551,13 +654,27 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 	// one column should not block the others), then surface every failure
 	// to the caller as a single joined, classified error.
 	var alterErrs []error
+	// addedDeletedAt tracks whether the main loop below already issued (and
+	// the underlying Databend already applied) an ADD COLUMN for
+	// deleted_at -- round-5 review MEDIUM: existingCols is a snapshot taken
+	// once at the top of ApplySchema and never updated as this function
+	// adds columns. Without this flag, a table whose Databend columns lack
+	// deleted_at but whose schema.Columns *does* declare it (exactly
+	// PIPE-OQ-4's satellite-table remediation direction: the source gains
+	// the column and a schema_change carries it) would have it ALTERed
+	// twice in the same ApplySchema call -- once by the loop below, once by
+	// the backstop that follows -- and Databend has no ADD COLUMN IF NOT
+	// EXISTS, so the second ALTER fails with "column already exists",
+	// misclassified transient (no permanentDDLMarkers match), which errors
+	// the table and Nacks the batch until the next redelivery self-heals it.
+	addedDeletedAt := false
 	for name, pgType := range schema.Columns {
 		if err := validateIdentifier(name); err != nil {
 			log.Warn().Str("column", name).Err(err).Msg("Skipping invalid column name")
 			continue
 		}
+		dbType := s.mapPgTypeToDatabend(pgType)
 		if !existingCols[strings.ToLower(name)] {
-			dbType := s.mapPgTypeToDatabend(pgType)
 			query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
 				quotedTable, quoteIdentifier(name), dbType)
 
@@ -566,9 +683,45 @@ func (s *DatabendSink) ApplySchema(ctx context.Context, m protocol.Message) erro
 				classified := classifyDDLError(qualified, fmt.Errorf("failed to add column %q: %w", name, err))
 				log.Warn().Err(classified).Str("table", qualified).Str("column", name).Msg("ALTER TABLE failed")
 				alterErrs = append(alterErrs, classified)
+			} else if strings.EqualFold(name, deletedAtColumn) {
+				addedDeletedAt = true
 			}
+			s.recordColumnType(qualified, name, dbType)
+			continue
+		}
+
+		// WS-6: the column already exists in Databend. ApplySchema never
+		// ALTERs an existing column's type (custom objects don't permit
+		// type changes app-side, and a non-custom-object type change has
+		// no safe automatic remediation -- see the plan's PIPE-OQ-1). What
+		// it must not do is stay silent about a divergence: detect it,
+		// count it, and log it loudly so it surfaces on a dashboard/alert
+		// instead of only being discoverable by noticing stale data.
+		if s.checkColumnTypeDivergence(qualified, name, dbType) {
+			log.Error().Str("table", qualified).Str("column", name).Str("declared_type", dbType).
+				Msg("schema_change declared a column type that differs from the previously applied type; ApplySchema is add-only and will NOT alter the existing column -- this table's column is now out of sync with the source and requires manual remediation (see WS-6 / PIPE-OQ-1)")
+			SinkSchemaTypeDivergenceTotal.WithLabelValues(s.name, qualified, name).Inc()
+		}
+		s.recordColumnType(qualified, name, dbType)
+	}
+
+	// WS-4: backstop for a table created before this fix, or whose source
+	// schema.Columns has never declared deleted_at (e.g. a satellite table
+	// per PIPE-OQ-4). Without this, such a table's deleteTableBatch UPDATE
+	// hits an unknown-column error on every delete, forever -- see the
+	// deletedAtColumn doc comment. Guarded by addedDeletedAt (see above) so
+	// this never re-issues an ALTER the loop above already applied
+	// successfully this call.
+	if !addedDeletedAt && !existingCols[strings.ToLower(deletedAtColumn)] {
+		query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TIMESTAMP", quotedTable, quoteIdentifier(deletedAtColumn))
+		log.Info().Str("table", qualified).Str("column", deletedAtColumn).Str("query", query).Msg("Executing Evolution DDL (soft-delete backstop)")
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			classified := classifyDDLError(qualified, fmt.Errorf("failed to add column %q: %w", deletedAtColumn, err))
+			log.Warn().Err(classified).Str("table", qualified).Str("column", deletedAtColumn).Msg("ALTER TABLE failed")
+			alterErrs = append(alterErrs, classified)
 		}
 	}
+
 	if len(alterErrs) > 0 {
 		return errors.Join(alterErrs...)
 	}
@@ -602,6 +755,46 @@ func (s *DatabendSink) getCurrentColumns(ctx context.Context, ref protocol.Table
 		}
 	}
 	return cols, nil
+}
+
+// recordColumnType remembers dbType as the last type this sink applied (or
+// observed applied) for qualified.name, for checkColumnTypeDivergence to
+// compare future schema_change declarations against. Always overwrites --
+// once a divergence has been logged for a change, repeating the exact same
+// (now-divergent) declaration on every redelivered/replayed schema_change
+// must not re-alert forever; only an actual *further* change should.
+func (s *DatabendSink) recordColumnType(qualified, name, dbType string) {
+	s.colTypeMu.Lock()
+	defer s.colTypeMu.Unlock()
+	if s.colTypeCache == nil {
+		s.colTypeCache = make(map[string]map[string]string)
+	}
+	cols, ok := s.colTypeCache[qualified]
+	if !ok {
+		cols = make(map[string]string)
+		s.colTypeCache[qualified] = cols
+	}
+	cols[strings.ToLower(name)] = dbType
+}
+
+// checkColumnTypeDivergence reports whether dbType differs from the type
+// this sink last recorded for qualified.name. No prior recording (nil map
+// entry -- e.g. first ApplySchema call for this table since process start,
+// column pre-existed from before this sink ever saw it) is NOT treated as
+// a divergence: there is nothing to compare against, and flagging it would
+// false-positive on every restart.
+func (s *DatabendSink) checkColumnTypeDivergence(qualified, name, dbType string) bool {
+	s.colTypeMu.Lock()
+	defer s.colTypeMu.Unlock()
+	cols, ok := s.colTypeCache[qualified]
+	if !ok {
+		return false
+	}
+	prev, ok := cols[strings.ToLower(name)]
+	if !ok {
+		return false
+	}
+	return prev != dbType
 }
 
 // mapPgTypeToDatabend translates a PostgreSQL type description (either a
@@ -691,34 +884,20 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, ref protocol.TableR
 		log.Warn().Err(err).Str("table", qualified).Msg("ensurePrimaryKey failed; continuing with current cache")
 	}
 
-	// GROUP BY COLUMN SET
-	// CDC batches might contain records with different column sets (evolution or different sources)
-	groups := make(map[string][]map[string]any)
-	groupCols := make(map[string][]string)
-
-	for _, m := range messages {
-		data, err := decodePayload(m)
-		if err != nil {
-			// T1-1: surface deserialization failures instead of silently dropping.
-			s.emitDLQ(ctx, m, qualified, reasonDeserializationFailed, err.Error())
-			continue
-		}
-
-		cols := make([]string, 0, len(data))
-		for k := range data {
-			cols = append(cols, k)
-		}
-		sort.Strings(cols)
-
-		key := strings.Join(cols, ",")
-		groups[key] = append(groups[key], data)
-		groupCols[key] = cols
-	}
-
 	s.pkMu.RLock()
 	pks := s.pkCache[qualified]
 	s.pkMu.RUnlock()
 	if len(pks) == 0 {
+		// WS-4.6: a custom_objects table (generated custom table or
+		// built-in sidecar) with no resolved PK is not survivable via the
+		// ["id"] default -- sidecars are keyed on record_id, not id, and an
+		// id-keyed REPLACE INTO ON ("id") does not dedup against the real
+		// key, silently duplicating every redelivered or updated row. Make
+		// this a hard error instead of a silent default so the batch
+		// retries (or is DLQ'd loudly) rather than corrupting the table.
+		if protocol.NormalizeSchema(ref.Schema) == "custom_objects" {
+			return fmt.Errorf("no primary key resolved for custom_objects table %q; refusing to fall back to [\"id\"] (would silently duplicate rows for a non-id-keyed table); ensure a schema_change with PkColumns has been applied", qualified)
+		}
 		pks = []string{"id"}
 	}
 
@@ -736,6 +915,201 @@ func (s *DatabendSink) uploadTableBatch(ctx context.Context, ref protocol.TableR
 	pkList := strings.Join(quotedPks, ", ")
 
 	quotedTable := quoteQualified(ref)
+
+	// Decode every message's payload first (pks must already be resolved,
+	// since the deleted_at-preservation step below needs them).
+	type decodedRow struct {
+		msg  protocol.Message
+		data map[string]any
+	}
+	decoded := make([]decodedRow, 0, len(messages))
+	for _, m := range messages {
+		data, err := decodePayload(m)
+		if err != nil {
+			// T1-1: surface deserialization failures instead of silently dropping.
+			s.emitDLQ(ctx, m, qualified, reasonDeserializationFailed, err.Error())
+			continue
+		}
+		decoded = append(decoded, decodedRow{msg: m, data: data})
+	}
+
+	// Round-5 review MEDIUM: "a later upsert resurrects a soft-deleted
+	// row." REPLACE INTO's column list comes from the payload's own keys.
+	// For any table where deleted_at is *synthesized* (not a real source
+	// column -- PIPE-OQ-4's satellite tables), no upsert payload ever
+	// mentions it, so a later REPLACE INTO on the same PK would silently
+	// null out an existing tombstone -- exactly what at-least-once
+	// redelivery of an update that was already superseded by a delete does.
+	// Fix: for any row whose decoded payload omits deleted_at, look up the
+	// row's *current* deleted_at from Databend and carry it forward
+	// explicitly, so the REPLACE INTO preserves rather than erases it. Rows
+	// that already carry their own deleted_at (a real source column) are
+	// left untouched -- the bug does not apply to them.
+	needsPreserve := make([]decodedRow, 0)
+	for _, dr := range decoded {
+		if _, ok := dr.data[deletedAtColumn]; !ok {
+			needsPreserve = append(needsPreserve, dr)
+		}
+	}
+	if len(needsPreserve) > 0 {
+		tuples := make([][]any, len(needsPreserve))
+		for i, dr := range needsPreserve {
+			tuple := make([]any, len(pks))
+			for j, pk := range pks {
+				tuple[j] = normalizeValue(dr.data[pk])
+			}
+			tuples[i] = tuple
+		}
+		current, err := s.fetchCurrentDeletedAt(ctx, ref, pks, tuples)
+		if err != nil {
+			// Non-fatal: log loudly and proceed without preservation for
+			// this batch rather than failing the whole upload over a
+			// best-effort read. Worst case reproduces the pre-fix
+			// behaviour for this one batch; it does not make anything
+			// worse than today, and the fetch failure itself is visible.
+			log.Warn().Err(err).Str("table", qualified).Msg("failed to fetch current deleted_at for tombstone-preserving upsert; proceeding without preservation for this batch")
+			SinkDeletedAtPreservationFailuresTotal.WithLabelValues(s.name, qualified).Inc()
+		} else {
+			for i, dr := range needsPreserve {
+				key := pkTupleKey(tuples[i])
+				// Explicitly set deleted_at (nil if the row doesn't exist
+				// yet, i.e. a genuine first insert) rather than leaving it
+				// absent, so every row in this table's batch carries a
+				// consistent column set for grouping below.
+				dr.data[deletedAtColumn] = current[key]
+			}
+		}
+	}
+
+	// WS-7: any row whose message flagged a column as
+	// protocol.ColumnKindToastedUnchanged has that column absent from
+	// dr.data not because it is NULL, but because Postgres elided an
+	// unchanged TOASTed value from the WAL tuple. REPLACE INTO's column
+	// list comes from dr.data's own keys (below), so left alone that
+	// column would be omitted from the statement and Databend would
+	// default it to NULL on replace -- silently truncating a large column
+	// on every update that doesn't touch it. Fetch and carry forward the
+	// current value, the same pattern as the deleted_at preservation step
+	// above, generalized to an arbitrary per-row column set.
+	tupleFor := func(dr decodedRow) []any {
+		tuple := make([]any, len(pks))
+		for j, pk := range pks {
+			tuple[j] = normalizeValue(dr.data[pk])
+		}
+		return tuple
+	}
+
+	// Opus-validation-review MEDIUM: fetchCurrentColumns (below) reads
+	// pre-flush database state. If THIS SAME batch already contains an
+	// earlier row (decoded preserves message/event order) for the same PK
+	// that carries a real value for a column a later row toast-needs, that
+	// in-batch value -- not the stale pre-batch DB value -- is what the
+	// later row's write must preserve. Without this, a batch containing two
+	// updates to the same PK, where the second toast-elides a column the
+	// first just set, would silently overwrite the first update's real
+	// value with an older one read back from Databend -- strictly better
+	// than the pre-WS-7 bug (which nulled it outright) but still wrong.
+	// Track each PK's resulting column values as we walk the batch in
+	// order, and resolve a later row's toast-need from it before ever
+	// falling back to a DB read.
+	inBatchValues := make(map[string]map[string]any) // pkTupleKey -> column -> value
+
+	toastNeeds := make(map[string][]decodedRow) // column name -> rows still needing a DB-fetched value
+	for _, dr := range decoded {
+		key := pkTupleKey(tupleFor(dr))
+		if len(dr.msg.ColumnKinds) > 0 {
+			for col, kind := range dr.msg.ColumnKinds {
+				if kind != protocol.ColumnKindToastedUnchanged {
+					continue
+				}
+				if _, present := dr.data[col]; present {
+					// Already has a value (e.g. from the deleted_at
+					// preservation step, or simply present some other way) --
+					// nothing to resolve.
+					continue
+				}
+				if prior, ok := inBatchValues[key]; ok {
+					if v, ok2 := prior[col]; ok2 {
+						dr.data[col] = v
+						continue
+					}
+				}
+				toastNeeds[col] = append(toastNeeds[col], dr)
+			}
+		}
+		// Record this row's own resulting values (including anything just
+		// resolved from an earlier row above) as the new in-batch state for
+		// its PK, so any LATER row for the same PK in this batch sees it.
+		m := inBatchValues[key]
+		if m == nil {
+			m = make(map[string]any)
+			inBatchValues[key] = m
+		}
+		for col, v := range dr.data {
+			m[col] = v
+		}
+	}
+	if len(toastNeeds) > 0 {
+		toastCols := make([]string, 0, len(toastNeeds))
+		for col := range toastNeeds {
+			toastCols = append(toastCols, col)
+		}
+		sort.Strings(toastCols)
+
+		seen := make(map[string]bool)
+		tuples := make([][]any, 0)
+		for _, rows := range toastNeeds {
+			for _, dr := range rows {
+				key := pkTupleKey(tupleFor(dr))
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				tuples = append(tuples, tupleFor(dr))
+			}
+		}
+
+		current, err := s.fetchCurrentColumns(ctx, ref, pks, tuples, toastCols)
+		if err != nil {
+			log.Warn().Err(err).Str("table", qualified).Strs("columns", toastCols).Msg("failed to fetch current values for TOAST-unchanged columns; proceeding without preservation for this batch")
+			SinkToastPreservationFailuresTotal.WithLabelValues(s.name, qualified).Inc()
+		} else {
+			for col, rows := range toastNeeds {
+				for _, dr := range rows {
+					key := pkTupleKey(tupleFor(dr))
+					if vals, ok := current[key]; ok {
+						if v, ok2 := vals[col]; ok2 {
+							dr.data[col] = v
+						}
+					}
+					// A pk miss (row not found in Databend yet) means this
+					// is a genuine first write for that pk -- there is
+					// nothing to preserve, so the column stays absent and
+					// is correctly excluded from this row's REPLACE INTO
+					// column list (it lands in a different GROUP BY COLUMN
+					// SET bucket below than rows that do have it).
+				}
+			}
+		}
+	}
+
+	// GROUP BY COLUMN SET
+	// CDC batches might contain records with different column sets (evolution or different sources)
+	groups := make(map[string][]map[string]any)
+	groupCols := make(map[string][]string)
+
+	for _, dr := range decoded {
+		data := dr.data
+		cols := make([]string, 0, len(data))
+		for k := range data {
+			cols = append(cols, k)
+		}
+		sort.Strings(cols)
+
+		key := strings.Join(cols, ",")
+		groups[key] = append(groups[key], data)
+		groupCols[key] = cols
+	}
 
 	for key, records := range groups {
 		columns := groupCols[key]
@@ -958,6 +1332,12 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, ref protocol.TableR
 	pks := s.pkCache[qualified]
 	s.pkMu.RUnlock()
 	if len(pks) == 0 {
+		// WS-4.6: same reasoning as uploadTableBatch -- an id-keyed default
+		// against a non-id-keyed custom_objects table silently no-ops or
+		// targets the wrong row on a soft delete. Fail loudly instead.
+		if protocol.NormalizeSchema(ref.Schema) == "custom_objects" {
+			return fmt.Errorf("no primary key resolved for custom_objects table %q; refusing to fall back to [\"id\"]; ensure a schema_change with PkColumns has been applied", qualified)
+		}
 		pks = []string{"id"}
 	}
 
@@ -970,6 +1350,18 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, ref protocol.TableR
 
 	quotedTable := quoteQualified(ref)
 
+	// WS-4 item 3: batch by (deletedAt, pk-tuple) rather than one UPDATE per
+	// message. Under the ratified merge-on-write model (WS-4B) every UPDATE
+	// is copy-on-write and produces a new table snapshot version, so N
+	// per-row deletes emit N snapshots for what should be one batched
+	// statement -- exactly the write amplification WS-4B flagged. Grouping
+	// by deletedAt (rather than a single shared value for the whole
+	// message batch) preserves per-message event-time idempotency: a
+	// redelivered delete still sets the same deleted_at it always would,
+	// it just now shares a statement with any other delete in this flush
+	// that happens to carry the identical timestamp.
+	groups := make(map[time.Time][][]any) // deletedAt -> ordered pk-value tuples (in pks order)
+
 	for _, m := range messages {
 		data, err := decodePayload(m)
 		if err != nil {
@@ -978,32 +1370,393 @@ func (s *DatabendSink) deleteTableBatch(ctx context.Context, ref protocol.TableR
 			continue
 		}
 
-		var whereClauses []string
-		var args []any
+		tuple := make([]any, 0, len(pks))
+		missing := false
 		for _, pk := range pks {
 			val, ok := data[pk]
 			if !ok {
-				continue
+				missing = true
+				break
 			}
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteIdentifier(pk)))
-			args = append(args, normalizeValue(val))
+			tuple = append(tuple, normalizeValue(val))
 		}
 
-		if len(whereClauses) == 0 {
-			// §7.4 item 6 audit: this used to be a silent `continue`. If none
-			// of the resolved PK columns are present in the decoded payload
-			// we cannot build a WHERE clause and the delete is dropped --
-			// surface that the same way a deserialization failure is
-			// surfaced (DLQ + metric) instead of letting it disappear.
+		if missing || len(tuple) == 0 {
+			// §7.4 item 6 audit: this used to be a silent `continue`. If any
+			// of the resolved PK columns are absent from the decoded
+			// payload we cannot build a WHERE clause and the delete is
+			// dropped -- surface that the same way a deserialization
+			// failure is surfaced (DLQ + metric) instead of letting it
+			// disappear.
 			s.emitDLQ(ctx, m, qualified, reasonMissingPKColumns,
-				fmt.Sprintf("delete skipped: none of the primary key columns %v present in decoded payload", pks))
+				fmt.Sprintf("delete skipped: not all primary key columns %v present in decoded payload", pks))
 			continue
 		}
 
-		query := fmt.Sprintf("DELETE FROM %s WHERE %s", quotedTable, strings.Join(whereClauses, " AND "))
-		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
-			return classifyDDLError(qualified, err)
+		// WS-4 / PIPE-OQ-5: soft delete everywhere. No synced table is ever
+		// hard-deleted from the warehouse -- deleteTableBatch's DELETE FROM
+		// path is retired for every table, transformed or not, uniformly.
+		// deleted_at comes from the message's own event Timestamp, never
+		// server time, so a replayed/redelivered delete is idempotent and
+		// reflects when the delete actually happened in Postgres.
+		deletedAt := m.Timestamp
+		if deletedAt.IsZero() {
+			deletedAt = time.Now().UTC()
 		}
+		groups[deletedAt] = append(groups[deletedAt], tuple)
+	}
+
+	// LOW (round-5 review): Go map iteration order is randomized. If the
+	// same PK appears twice in one flush under two different delete
+	// timestamps (a genuine possibility -- e.g. a delete-recreate-delete
+	// sequence collapsed into one batch), iterating groups in random order
+	// makes the winning deleted_at arbitrary from run to run. Sort
+	// ascending so the LATEST timestamp always wins deterministically (it
+	// is applied last), matching "the most recent delete event is the one
+	// that sticks."
+	orderedTimestamps := make([]time.Time, 0, len(groups))
+	for deletedAt := range groups {
+		orderedTimestamps = append(orderedTimestamps, deletedAt)
+	}
+	sort.Slice(orderedTimestamps, func(i, j int) bool { return orderedTimestamps[i].Before(orderedTimestamps[j]) })
+
+	for _, deletedAt := range orderedTimestamps {
+		tuples := groups[deletedAt]
+		if err := s.executeSoftDeleteChunks(ctx, qualified, quotedTable, pks, deletedAt, tuples); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pkTupleKey renders a pk-value tuple (already normalized, in pks order) as
+// a stable map key, joining with "|" the same way deleteTableBatch's
+// composite-PK grouping does.
+func pkTupleKey(tuple []any) string {
+	parts := make([]string, len(tuple))
+	for i, v := range tuple {
+		parts[i] = canonicalPKValueString(v)
+	}
+	return strings.Join(parts, "|")
+}
+
+// canonicalPKValueString renders a single PK value the same way regardless
+// of which side of the wire it came from (round-5c review MEDIUM). The
+// write side keys on normalizeValue(payload[pk]); when decodePayload falls
+// back to its JSON path (sink.go decodePayload), a JSON-encoded integer PK
+// decodes to float64 -- msgpack decodes integers natively, so this is
+// specifically the msgpack-decode-failed / JSON-fallback path, not the
+// common case. The read side keys on values scanned out of Databend's
+// driver into *any, which for an INT64 column comes back as a Go int64 (or
+// similar integral type), never float64. A plain fmt.Sprintf("%v") on both
+// renders these differently for a large PK -- float64(1234567890123)
+// formats as "1.234567890123e+12" via %v's default %g-like verb, while
+// int64(1234567890123) formats as "1234567890123" -- so the two sides would
+// never agree on the key for exactly the PK values most likely to matter
+// (large bigint ids), causing fetchCurrentDeletedAt's map lookup to silently
+// miss and reintroduce the tombstone-resurrection bug with no error at all.
+//
+// Canonicalize the two known-divergent shapes:
+//   - an integral float64 (no fractional part, in int64 range) renders via
+//     %d, matching how the same logical value renders as an int64;
+//   - []byte (a driver possibility for some column types, and never
+//     produced by the write side, which already converts binary PKs to
+//     string/base64 well before this point) renders as its string form
+//     rather than %v's default (which for []byte is a bracketed list of
+//     byte values, matching nothing on the write side).
+//
+// Every other type (string, int64, bool, time.Time, ...) is assumed to
+// already render identically on both sides and falls through to %v.
+func canonicalPKValueString(v any) string {
+	switch val := v.(type) {
+	case float64:
+		if val == math.Trunc(val) && val >= math.MinInt64 && val <= math.MaxInt64 {
+			return fmt.Sprintf("%d", int64(val))
+		}
+		return fmt.Sprintf("%v", val)
+	case []byte:
+		return string(val)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// fetchCurrentDeletedAt reads back the current deleted_at value for each of
+// tuples (pk-value tuples in pks order) from ref, keyed by pkTupleKey. A pk
+// with no row in Databend yet (a genuine first insert) simply has no entry
+// in the returned map -- callers should treat a map miss as "no tombstone",
+// i.e. nil. This is the read half of the round-5 "upsert resurrects a
+// soft-deleted row" fix: an upsert whose payload omits deleted_at must
+// carry forward whatever value is already there instead of letting
+// REPLACE INTO default it to NULL.
+// pkWhereChunkSize returns how many pk-tuples fit in a single query's WHERE
+// clause without exceeding maxPh placeholders, reserving `reserved`
+// placeholders for use outside the per-row predicates (e.g. a shared SET
+// value in an UPDATE). Always returns at least 1, capped at numTuples.
+// Shared by fetchCurrentDeletedAt, fetchCurrentColumns and
+// executeSoftDeleteChunks, which all chunk the same pk-tuple batch shape
+// against the same placeholder budget.
+func pkWhereChunkSize(numTuples, numPKs, maxPh, reserved int) int {
+	if numPKs <= 0 {
+		return numTuples
+	}
+	budget := maxPh - reserved
+	if budget < numPKs {
+		budget = numPKs
+	}
+	chunkSize := budget / numPKs
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	if chunkSize > numTuples {
+		chunkSize = numTuples
+	}
+	return chunkSize
+}
+
+// buildPKWhereClause renders the WHERE predicate (and its bind args) for one
+// chunk of pk-value tuples: a single-column PK gets the compact `pk IN
+// (?, ...)` form, a composite PK gets `(pk1 = ? AND pk2 = ?) OR (...)`.
+func buildPKWhereClause(quotedPKs []string, chunk [][]any) (where string, args []any) {
+	if len(quotedPKs) == 1 {
+		placeholders := make([]string, len(chunk))
+		args = make([]any, 0, len(chunk))
+		for i, tuple := range chunk {
+			placeholders[i] = "?"
+			args = append(args, tuple[0])
+		}
+		return fmt.Sprintf("%s IN (%s)", quotedPKs[0], strings.Join(placeholders, ", ")), args
+	}
+
+	predicates := make([]string, len(chunk))
+	args = make([]any, 0, len(chunk)*len(quotedPKs))
+	for i, tuple := range chunk {
+		clauses := make([]string, len(quotedPKs))
+		for j, col := range quotedPKs {
+			clauses[j] = fmt.Sprintf("%s = ?", col)
+			args = append(args, tuple[j])
+		}
+		predicates[i] = "(" + strings.Join(clauses, " AND ") + ")"
+	}
+	return strings.Join(predicates, " OR "), args
+}
+
+func (s *DatabendSink) fetchCurrentDeletedAt(ctx context.Context, ref protocol.TableRef, pks []string, tuples [][]any) (map[string]any, error) {
+	result := make(map[string]any, len(tuples))
+	if len(tuples) == 0 || len(pks) == 0 {
+		return result, nil
+	}
+
+	quotedTable := quoteQualified(ref)
+	quotedPks := make([]string, len(pks))
+	for i, pk := range pks {
+		quotedPks[i] = quoteIdentifier(pk)
+	}
+	selectList := strings.Join(quotedPks, ", ") + ", " + quoteIdentifier(deletedAtColumn)
+
+	maxPh := s.maxPlaceholders
+	if maxPh <= 0 {
+		maxPh = DefaultMaxPlaceholders
+	}
+	chunkSize := pkWhereChunkSize(len(tuples), len(pks), maxPh, 0)
+
+	for start := 0; start < len(tuples); start += chunkSize {
+		end := start + chunkSize
+		if end > len(tuples) {
+			end = len(tuples)
+		}
+		chunk := tuples[start:end]
+
+		where, args := buildPKWhereClause(quotedPks, chunk)
+
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectList, quotedTable, where)
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch current deleted_at: %w", err)
+		}
+
+		scanErr := func() error {
+			defer func() {
+				if closeErr := rows.Close(); closeErr != nil {
+					log.Warn().Err(closeErr).Str("table", ref.Table).Msg("failed to close rows after fetching current deleted_at")
+				}
+			}()
+			for rows.Next() {
+				dest := make([]any, len(pks)+1)
+				vals := make([]any, len(pks)+1)
+				for i := range dest {
+					dest[i] = &vals[i]
+				}
+				if err := rows.Scan(dest...); err != nil {
+					return fmt.Errorf("failed to scan current deleted_at row: %w", err)
+				}
+				key := pkTupleKey(vals[:len(pks)])
+				result[key] = vals[len(pks)]
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+
+	return result, nil
+}
+
+// fetchCurrentColumns reads back the current values of cols for each
+// pk-value tuple, keyed by pkTupleKey then column name. This is the WS-7
+// TOAST-preservation counterpart to fetchCurrentDeletedAt: where that
+// function always reads one well-known column, different rows in the same
+// batch may have different TOASTed columns omitted, so this supports an
+// arbitrary, per-call column set. A pk with no row in Databend yet has no
+// entry in the returned map; callers should treat a map miss (or a miss on
+// a specific column within an entry) as "nothing to preserve".
+func (s *DatabendSink) fetchCurrentColumns(ctx context.Context, ref protocol.TableRef, pks []string, tuples [][]any, cols []string) (map[string]map[string]any, error) {
+	result := make(map[string]map[string]any, len(tuples))
+	if len(tuples) == 0 || len(pks) == 0 || len(cols) == 0 {
+		return result, nil
+	}
+
+	quotedTable := quoteQualified(ref)
+	quotedPks := make([]string, len(pks))
+	for i, pk := range pks {
+		quotedPks[i] = quoteIdentifier(pk)
+	}
+	quotedCols := make([]string, len(cols))
+	for i, c := range cols {
+		quotedCols[i] = quoteIdentifier(c)
+	}
+	selectList := strings.Join(quotedPks, ", ") + ", " + strings.Join(quotedCols, ", ")
+
+	maxPh := s.maxPlaceholders
+	if maxPh <= 0 {
+		maxPh = DefaultMaxPlaceholders
+	}
+	chunkSize := pkWhereChunkSize(len(tuples), len(pks), maxPh, 0)
+
+	for start := 0; start < len(tuples); start += chunkSize {
+		end := start + chunkSize
+		if end > len(tuples) {
+			end = len(tuples)
+		}
+		chunk := tuples[start:end]
+
+		where, args := buildPKWhereClause(quotedPks, chunk)
+
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectList, quotedTable, where)
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch current columns: %w", err)
+		}
+
+		scanErr := func() error {
+			defer func() {
+				if closeErr := rows.Close(); closeErr != nil {
+					log.Warn().Err(closeErr).Str("table", ref.Table).Msg("failed to close rows after fetching current columns")
+				}
+			}()
+			return scanCurrentColumnsChunk(rows, pks, cols, result)
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+
+	return result, nil
+}
+
+// scanCurrentColumnsChunk drains one query's result rows into result, keyed
+// by pk-tuple then column name. Split out of fetchCurrentColumns purely to
+// keep the chunking loop's cyclomatic complexity down -- the scan loop
+// carries its own branching (Scan error, per-column assembly) that doesn't
+// need to share a stack frame with the WHERE-clause/query construction above.
+func scanCurrentColumnsChunk(rows DBRows, pks, cols []string, result map[string]map[string]any) error {
+	for rows.Next() {
+		dest := make([]any, len(pks)+len(cols))
+		vals := make([]any, len(pks)+len(cols))
+		for i := range dest {
+			dest[i] = &vals[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("failed to scan current columns row: %w", err)
+		}
+		key := pkTupleKey(vals[:len(pks)])
+		colVals := make(map[string]any, len(cols))
+		for i, c := range cols {
+			colVals[c] = vals[len(pks)+i]
+		}
+		result[key] = colVals
+	}
+	return rows.Err()
+}
+
+// executeSoftDeleteChunks issues one or more batched soft-delete UPDATEs for
+// tuples sharing a single deletedAt value, chunked against maxPlaceholders
+// (WS-4 item 3 / T1-14's chunker, mirrored here for the delete path). A
+// tombstone for a row that never landed is a no-op UPDATE affecting 0 rows
+// -- correct, logged at debug rather than treated as an error.
+//
+// Single-column PK tables (the common case) get the plan's literal
+// `WHERE pk IN (?, ?, ...)` form. A composite PK (e.g. visitation_contacts,
+// business_entity_contacts -- PIPE-OQ-4) has no portable single-IN
+// equivalent, so those use `WHERE (pk1 = ? AND pk2 = ?) OR (...)` chunks
+// instead; the placeholder-budget chunking applies identically either way.
+func (s *DatabendSink) executeSoftDeleteChunks(
+	ctx context.Context,
+	table, quotedTable string,
+	pks []string,
+	deletedAt time.Time,
+	tuples [][]any,
+) error {
+	if len(tuples) == 0 {
+		return nil
+	}
+
+	maxPh := s.maxPlaceholders
+	if maxPh <= 0 {
+		maxPh = DefaultMaxPlaceholders
+	}
+
+	// Each row consumes len(pks) placeholders for its WHERE predicate, plus
+	// one shared placeholder for the SET deleted_at = ? value (bound once
+	// per statement, not once per row).
+	chunkSize := pkWhereChunkSize(len(tuples), len(pks), maxPh, 1)
+
+	quotedPKs := make([]string, len(pks))
+	for i, pk := range pks {
+		quotedPKs[i] = quoteIdentifier(pk)
+	}
+
+	chunksEmitted := 0
+	for start := 0; start < len(tuples); start += chunkSize {
+		end := start + chunkSize
+		if end > len(tuples) {
+			end = len(tuples)
+		}
+		chunk := tuples[start:end]
+
+		where, pkArgs := buildPKWhereClause(quotedPKs, chunk)
+		args := make([]any, 0, 1+len(pkArgs))
+		args = append(args, normalizeValue(deletedAt))
+		args = append(args, pkArgs...)
+
+		query := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s", quotedTable, quoteIdentifier(deletedAtColumn), where)
+
+		log.Debug().
+			Str("table", table).
+			Str("query", query).
+			Int("num_records", len(chunk)).
+			Int("chunk", chunksEmitted).
+			Msg("DatabendSink: Executing soft-delete UPDATE")
+
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("soft-delete chunk %d failed: %w", chunksEmitted, classifyDDLError(table, err))
+		}
+		chunksEmitted++
+	}
+
+	if chunksEmitted > 0 {
+		SinkChunksTotal.WithLabelValues(s.name, table).Add(float64(chunksEmitted))
 	}
 	return nil
 }
@@ -1015,12 +1768,100 @@ func (s *DatabendSink) ensurePrimaryKey(ctx context.Context, ref protocol.TableR
 	return s.refreshPrimaryKey(ctx, ref)
 }
 
-// refreshPrimaryKey executes SHOW CREATE TABLE on the sink-side datastore,
-// parses the PRIMARY KEY clause out of the resulting DDL, and updates the
-// cache. Failures are non-fatal: we log + record a metric, fall back to the
-// existing cache (or a default of "id") and continue. The pkLoaded gate
-// ensures SHOW CREATE TABLE is invoked at most once per table per process
-// lifetime, even when called from concurrent goroutines.
+// ensurePKMetaTable creates the cdc_meta.pk_columns table if it does not
+// already exist. Guarded by pkMetaEnsured so it is issued at most once per
+// process lifetime -- CREATE TABLE IF NOT EXISTS is idempotent server-side
+// regardless, but this avoids a redundant DDL round trip on every ApplySchema
+// call.
+//
+// RUNBOOK NOTE (round-5 review LOW): with sink option auto_create_schema:
+// false, ensureDatabase refuses to auto-provision cdc_meta and returns a
+// permanent DDLError instead, so loadPKMetadata errors and
+// refreshPrimaryKey falls through to SHOW CREATE TABLE (and, for a
+// custom_objects table, on to the WS-4.6 hard error rather than a silently
+// wrong PK -- which is correct, not a bug). But this means a deployment
+// running with auto_create_schema: false MUST provision the cdc_meta
+// database out-of-band before first use, or every custom_objects table's
+// first write in every process lifetime pays the SHOW CREATE TABLE
+// fallback and, until a schema_change has been applied, hard-errors. This
+// is not automated by this change; document it in the deployment runbook.
+func (s *DatabendSink) ensurePKMetaTable(ctx context.Context) error {
+	s.pkMetaMu.Lock()
+	defer s.pkMetaMu.Unlock()
+	if s.pkMetaEnsured {
+		return nil
+	}
+
+	if err := s.ensureDatabase(ctx, pkMetaDatabase); err != nil {
+		return fmt.Errorf("failed to ensure %s database: %w", pkMetaDatabase, err)
+	}
+
+	quoted := quoteIdentifier(pkMetaDatabase) + "." + quoteIdentifier(pkMetaTable)
+	query := fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (table_ref STRING, pk_columns STRING)",
+		quoted,
+	)
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("failed to create %s.%s: %w", pkMetaDatabase, pkMetaTable, classifyDDLError(pkMetaDatabase+"."+pkMetaTable, err))
+	}
+	s.pkMetaEnsured = true
+	return nil
+}
+
+// persistPKMetadata durably records ref's primary key columns in
+// cdc_meta.pk_columns (WS-4.6), keyed by ref.String() -- the same identity
+// used everywhere else in this file. REPLACE INTO ... ON (table_ref) makes
+// this idempotent: a later ApplySchema for the same table (e.g. an
+// incremental ADD COLUMN that still carries PKColumns) overwrites the row
+// rather than duplicating it.
+func (s *DatabendSink) persistPKMetadata(ctx context.Context, ref protocol.TableRef, pks []string) error {
+	if err := s.ensurePKMetaTable(ctx); err != nil {
+		return err
+	}
+	quoted := quoteIdentifier(pkMetaDatabase) + "." + quoteIdentifier(pkMetaTable)
+	query := fmt.Sprintf(
+		"REPLACE INTO %s (table_ref, pk_columns) ON (table_ref) VALUES (?, ?)",
+		quoted,
+	)
+	if _, err := s.db.ExecContext(ctx, query, ref.String(), strings.Join(pks, ",")); err != nil {
+		return fmt.Errorf("failed to persist pk metadata for %s: %w", ref.String(), err)
+	}
+	return nil
+}
+
+// loadPKMetadata reads back a table's primary key columns from
+// cdc_meta.pk_columns. Returns (nil, false, nil) when no row exists for ref
+// -- a genuinely missing entry, not an error, e.g. for a table synced before
+// WS-4.6 landed or a direct-class table that never carried PKColumns.
+func (s *DatabendSink) loadPKMetadata(ctx context.Context, ref protocol.TableRef) ([]string, bool, error) {
+	if err := s.ensurePKMetaTable(ctx); err != nil {
+		return nil, false, err
+	}
+	quoted := quoteIdentifier(pkMetaDatabase) + "." + quoteIdentifier(pkMetaTable)
+	query := fmt.Sprintf("SELECT pk_columns FROM %s WHERE table_ref = ?", quoted)
+
+	var joined string
+	err := s.db.QueryRowScan(ctx, query, []any{ref.String()}, &joined)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if joined == "" {
+		return nil, false, nil
+	}
+	return strings.Split(joined, ","), true, nil
+}
+
+// refreshPrimaryKey resolves the primary key columns for ref, durably first.
+// WS-4.6: cdc_meta.pk_columns (persistPKMetadata's target) is consulted
+// before SHOW CREATE TABLE and, when it holds an entry, is authoritative --
+// it is never overridden by SHOW CREATE TABLE or the ["id"] default, which
+// is exactly the "three sources race for pkCache" hazard the durability fix
+// closes. SHOW CREATE TABLE remains as a fallback for tables synced before
+// this metadata table existed. The pkLoaded gate ensures resolution runs at
+// most once per table per process lifetime, even from concurrent goroutines.
 func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, ref protocol.TableRef) error {
 	qualified := ref.String()
 
@@ -1043,11 +1884,45 @@ func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, ref protocol.Table
 	s.pkLoaded[qualified] = struct{}{}
 	s.pkMu.Unlock()
 
+	if pks, found, err := s.loadPKMetadata(ctx, ref); err != nil {
+		// Metadata lookup itself failed (connectivity, etc.) -- release the
+		// pkLoaded reservation so a later call can retry, and fall through to
+		// the SHOW CREATE TABLE path below rather than giving up outright.
+		s.pkMu.Lock()
+		delete(s.pkLoaded, qualified)
+		s.pkMu.Unlock()
+		log.Warn().Err(err).Str("table", qualified).Msg("pk metadata lookup failed; falling back to SHOW CREATE TABLE")
+	} else if found {
+		s.pkMu.Lock()
+		s.pkCache[qualified] = pks
+		s.pkLoaded[qualified] = struct{}{}
+		s.pkMu.Unlock()
+		SinkPKResolved.WithLabelValues(s.name, qualified).Set(1)
+		log.Info().Str("table", qualified).Strs("pks", pks).Msg("resolved primary key from durable pk metadata (post-restart safe)")
+		return nil
+	}
+
+	// No durable metadata entry (found == false, err == nil): fall through
+	// to SHOW CREATE TABLE. pkLoaded is already reserved for qualified from
+	// the double-checked-locking block above -- do NOT re-check/re-set it
+	// here, since it is only ever cleared on an actual failure (the
+	// metadata-lookup-error branch above, or the SHOW CREATE TABLE failure
+	// branch below), not on a clean "no entry found" miss.
 	quotedTable := quoteQualified(ref)
 	query := fmt.Sprintf("SHOW CREATE TABLE %s", quotedTable)
 
 	var ddl string
 	scanErr := s.db.QueryRowScan(ctx, query, nil, &ddl)
+
+	// WS-4.6: a custom_objects table (generated custom table or sidecar)
+	// with no PK resolvable from durable metadata nor SHOW CREATE TABLE
+	// must NOT get the ["id"] default installed here -- that default is
+	// exactly the silent-duplication hazard the durability fix closes for
+	// non-id-keyed sidecars. Leave pkCache empty for it instead, so
+	// uploadTableBatch/deleteTableBatch's own len(pks)==0 guard turns this
+	// into a loud, non-silent error rather than a wrong write. Every other
+	// table class keeps the legacy ["id"] default, unchanged.
+	isCustomObjects := protocol.NormalizeSchema(ref.Schema) == "custom_objects"
 
 	if scanErr != nil {
 		s.pkMu.Lock()
@@ -1055,7 +1930,9 @@ func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, ref protocol.Table
 		s.pkMu.Unlock()
 
 		log.Warn().Err(scanErr).Str("table", qualified).Msg("SHOW CREATE TABLE failed; falling back to default PK")
-		s.ensureFallbackPK(qualified)
+		if !isCustomObjects {
+			s.ensureFallbackPK(qualified)
+		}
 		SinkPKResolved.WithLabelValues(s.name, qualified).Set(0)
 		return scanErr
 	}
@@ -1063,7 +1940,9 @@ func (s *DatabendSink) refreshPrimaryKey(ctx context.Context, ref protocol.Table
 	pks := parsePKFromDDL(ddl)
 	if len(pks) == 0 {
 		log.Warn().Str("table", qualified).Str("ddl", ddl).Msg("no PRIMARY KEY clause found in SHOW CREATE TABLE; falling back")
-		s.ensureFallbackPK(qualified)
+		if !isCustomObjects {
+			s.ensureFallbackPK(qualified)
+		}
 		SinkPKResolved.WithLabelValues(s.name, qualified).Set(0)
 		return nil
 	}

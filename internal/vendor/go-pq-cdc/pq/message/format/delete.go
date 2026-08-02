@@ -37,7 +37,12 @@ func NewDelete(data []byte, streamedTransaction bool, relation map[uint32]*Relat
 
 	var err error
 
-	msg.OldDecoded, err = msg.OldTupleData.DecodeWithColumn(rel.Columns)
+	// A DELETE's old tuple never carries an unchanged-TOAST marker in the
+	// sense WS-7 cares about (it's either the full old row under REPLICA
+	// IDENTITY FULL, or just the key columns -- non-key columns are absent
+	// from d.Columns entirely under DEFAULT, not present-as-toast), so the
+	// toasted return is discarded here.
+	msg.OldDecoded, _, err = msg.OldTupleData.DecodeWithColumn(rel.Columns)
 	if err != nil {
 		return nil, err
 	}
