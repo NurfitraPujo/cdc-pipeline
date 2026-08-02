@@ -58,6 +58,28 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"pipeline_id", "transformer"})
 
+	// TransformCircuitBreakerState (WS-5 item 2) is deliberately a separate
+	// gauge from CircuitBreakerState above rather than reusing it with a
+	// component label: CircuitBreakerState's existing label set is just
+	// {pipeline_id}, and this breaker guards a different dependency (the
+	// nats/protobuf transform RPC to daya-core, not the JetStream publish
+	// path) -- collapsing the two onto one gauge would make one pipeline's
+	// two independent breakers overwrite each other's last-set value.
+	TransformCircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cdc_transform_circuit_breaker_state",
+		Help: "The state of the nats/protobuf transform circuit breaker (0=closed, 1=open, 2=half-open)",
+	}, []string{"pipeline_id", "transformer"})
+
+	// TransformTransportErrorsTotal (WS-5 item 1) counts NATS transport-layer
+	// failures (no responders, timeout, connection closed, circuit open)
+	// separately from application-level transform failures, so an operator
+	// can see "daya-core is unreachable" as a distinct signal from "daya-core
+	// is rejecting records."
+	TransformTransportErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cdc_transform_transport_errors_total",
+		Help: "The total number of NATS transport-layer failures on the transform path, by kind",
+	}, []string{"pipeline_id", "transformer", "kind"})
+
 	TransformRecordsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cdc_transform_records_total",
 		Help: "The total number of records handled by a transformer, by outcome (transformed, passthrough, dropped, failed)",

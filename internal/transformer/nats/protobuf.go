@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/nats-io/nats.go"
+	"github.com/sony/gobreaker"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -27,6 +29,100 @@ import (
 
 	cdctransformv1 "bitbucket.org/daya-engineering/daya-contracts/v2/gen/go/cdc/transform/v1"
 )
+
+// ErrTransportFailure wraps a NATS transport-layer failure on the transform
+// RPC to daya-core -- no responders, a timeout, a closed connection, or this
+// transformer's own circuit breaker standing in for one of those -- as
+// distinct from an application-level failure (a malformed record daya-core
+// rejected on its merits). WS-5 item 1: engine/consumer.go's handleSinkError
+// checks errors.Is(err, ErrTransportFailure) and treats a match as always
+// retryable, never counting it toward MaxRetries/isolation/DLQ. A daya-core
+// outage must never DLQ live CDC traffic; a genuinely malformed record
+// still can.
+var ErrTransportFailure = errors.New("nats transport failure")
+
+// ErrCircuitOpen is wrapped into ErrTransportFailure and returned by
+// sendRequest when this transformer's circuit breaker is open, so a
+// sustained daya-core outage fails every request immediately instead of
+// waiting out the full per-request timeout each time (WS-5 item 2).
+var ErrCircuitOpen = errors.New("transform circuit breaker open")
+
+// isTransportErr classifies an error returned by conn.RequestWithContext.
+// nats.ErrNoResponders specifically means "nobody is subscribed to this
+// subject" -- a fast, unambiguous signal that daya-core is entirely absent,
+// as opposed to slow or rejecting the record -- so it must never be treated
+// the same as a validation failure. nats.ErrTimeout/context.DeadlineExceeded
+// (a request that didn't complete inside t.timeout) and
+// nats.ErrConnectionClosed (the connection itself is gone) are the other two
+// transport-layer shapes named by the plan; all three say nothing about
+// whether the record itself is valid.
+func isTransportErr(err error) bool {
+	return errors.Is(err, nats.ErrNoResponders) ||
+		errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, nats.ErrConnectionClosed)
+}
+
+// transformCircuitBreaker is the seam this transformer's circuit breaker is
+// exercised through, mirroring engine/producer.go's producerCircuitBreaker
+// (same gobreaker dependency, same Execute/IsOpen shape) so tests can supply
+// a fake that trips deterministically instead of racing gobreaker's
+// real-time window.
+type transformCircuitBreaker interface {
+	Execute(func() (interface{}, error)) (interface{}, error)
+	IsOpen() bool
+}
+
+type gobreakerTransformCircuitBreaker struct {
+	breaker *gobreaker.CircuitBreaker
+}
+
+func (b *gobreakerTransformCircuitBreaker) Execute(request func() (interface{}, error)) (interface{}, error) {
+	return b.breaker.Execute(request)
+}
+
+func (b *gobreakerTransformCircuitBreaker) IsOpen() bool {
+	return b.breaker.State() == gobreaker.StateOpen
+}
+
+// transformCircuitSettings builds this transformer's gobreaker.Settings,
+// matching engine/producer.go's publisher breaker's trip condition (>=3
+// requests, >=60% failure ratio) so the two breakers behave predictably the
+// same way for an operator who already knows one of them. Named per
+// pipelineID+subject so multiple nats/protobuf processors in one pipeline
+// (or the same subject across pipelines) get independent breakers, matching
+// the factory's existing per-sink-per-pipeline transformer construction.
+func transformCircuitSettings(pipelineID, name string) gobreaker.Settings {
+	return gobreaker.Settings{
+		Name:        "transform-" + pipelineID + "-" + name,
+		MaxRequests: 3,
+		Interval:    5 * time.Second,
+		Timeout:     transformCircuitCoolDown,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 3 && failureRatio >= 0.6
+		},
+		OnStateChange: func(bname string, from, to gobreaker.State) {
+			log.Printf("INFO: transform circuit breaker %q changed state %s -> %s", bname, from.String(), to.String())
+			stateVal := 0.0 // Closed
+			switch to {
+			case gobreaker.StateOpen:
+				stateVal = 1.0
+			case gobreaker.StateHalfOpen:
+				stateVal = 2.0
+			}
+			metrics.TransformCircuitBreakerState.WithLabelValues(pipelineID, name).Set(stateVal)
+		},
+	}
+}
+
+// transformCircuitCoolDown bounds how long the breaker stays open before
+// allowing a single probe request through (gobreaker's half-open state).
+// Kept short relative to AckWait/backoff: this only decides how quickly the
+// pipeline notices daya-core has come back, not how long a batch is held --
+// nothing in the flush path waits on the breaker itself, it only ever fails
+// fast or lets a request through (see doTransform/sendRequest).
+const transformCircuitCoolDown = 10 * time.Second
 
 type NatsProtoTransformer struct {
 	pipelineID string
@@ -42,6 +138,13 @@ type NatsProtoTransformer struct {
 	// constant, and a misconfigured guess would either reject legal batches
 	// or admit ones that fail server-side.
 	maxPayload int64
+	// cb is the WS-5 item 2 circuit breaker guarding the transform RPC. It
+	// wraps only the conn.RequestWithContext call in sendRequest -- not the
+	// whole batch/chunk pipeline -- so it trips purely on transport failures
+	// (daya-core absent/unreachable) and never on an individual record daya-
+	// core validly rejected (that comes back as a successful RPC carrying a
+	// Success:false result, never as an Execute error).
+	cb transformCircuitBreaker
 }
 
 // chunkSafetyFraction is the fraction of maxPayload a chunk's encoded size
@@ -159,6 +262,8 @@ func NewNatsProtoTransformer(options map[string]interface{}) (transformer.Transf
 		maxPayload = defaultMaxPayloadFallback
 	}
 
+	breaker := gobreaker.NewCircuitBreaker(transformCircuitSettings(pipelineID, subject))
+
 	return &NatsProtoTransformer{
 		pipelineID: pipelineID,
 		natsURL:    natsURL,
@@ -168,6 +273,7 @@ func NewNatsProtoTransformer(options map[string]interface{}) (transformer.Transf
 		tables:     tables,
 		conn:       conn,
 		maxPayload: maxPayload,
+		cb:         &gobreakerTransformCircuitBreaker{breaker: breaker},
 	}, nil
 }
 
@@ -567,18 +673,50 @@ func (t *NatsProtoTransformer) sendChunks(ctx context.Context, chunks []*cdctran
 }
 
 func (t *NatsProtoTransformer) sendRequest(ctx context.Context, req proto.Message) (*cdctransformv1.TransformResponse, error) {
+	// WS-5 item 2: fail fast on an already-open breaker rather than paying
+	// the full per-request timeout again for a request gobreaker would
+	// reject anyway -- IsOpen is a cheap state read, so this check costs
+	// nothing on the (overwhelmingly common) closed path.
+	if t.cb.IsOpen() {
+		metrics.TransformTransportErrorsTotal.WithLabelValues(t.pipelineID, t.Name(), "circuit_open").Inc()
+		return nil, fmt.Errorf("%w: %w", ErrTransportFailure, ErrCircuitOpen)
+	}
+
 	reqBytes, err := proto.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	metrics.TransformRequestBytes.WithLabelValues(t.pipelineID, t.Name()).Observe(float64(len(reqBytes)))
 
-	reqCtx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
+	respIface, err := t.cb.Execute(func() (interface{}, error) {
+		reqCtx, cancel := context.WithTimeout(ctx, t.timeout)
+		defer cancel()
 
-	msg, err := t.conn.RequestWithContext(reqCtx, t.subject, reqBytes)
+		m, err := t.conn.RequestWithContext(reqCtx, t.subject, reqBytes)
+		if err != nil {
+			if isTransportErr(err) {
+				metrics.TransformTransportErrorsTotal.WithLabelValues(t.pipelineID, t.Name(), classifyTransportErrKind(err)).Inc()
+				return nil, fmt.Errorf("%w: NATS request failed: %w", ErrTransportFailure, err)
+			}
+			return nil, fmt.Errorf("NATS request failed: %w", err)
+		}
+		return m, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("NATS request failed: %w", err)
+		// gobreaker.ErrOpenState/ErrTooManyRequests are themselves transport-
+		// shaped (the breaker just decided not to let this request through,
+		// same as sendRequest's own IsOpen check above racing it) -- classify
+		// them the same way rather than letting them surface as an
+		// unclassified application error.
+		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+			metrics.TransformTransportErrorsTotal.WithLabelValues(t.pipelineID, t.Name(), "circuit_open").Inc()
+			return nil, fmt.Errorf("%w: %w: %w", ErrTransportFailure, ErrCircuitOpen, err)
+		}
+		return nil, err
+	}
+	msg, ok := respIface.(*nats.Msg)
+	if !ok || msg == nil {
+		return nil, fmt.Errorf("unexpected response type from transform breaker: %T", respIface)
 	}
 	metrics.TransformResponseBytes.WithLabelValues(t.pipelineID, t.Name()).Observe(float64(len(msg.Data)))
 
@@ -588,6 +726,23 @@ func (t *NatsProtoTransformer) sendRequest(ctx context.Context, req proto.Messag
 	}
 
 	return &resp, nil
+}
+
+// classifyTransportErrKind labels the TransformTransportErrorsTotal metric
+// with which of the three named transport failure shapes occurred, so an
+// operator can tell "nobody home" (no_responders) apart from "too slow"
+// (timeout) apart from "connection dropped" (connection_closed) at a glance.
+func classifyTransportErrKind(err error) string {
+	switch {
+	case errors.Is(err, nats.ErrNoResponders):
+		return "no_responders"
+	case errors.Is(err, nats.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, nats.ErrConnectionClosed):
+		return "connection_closed"
+	default:
+		return "unknown"
+	}
 }
 
 // transformedResult holds a transformed message or nil if dropped.

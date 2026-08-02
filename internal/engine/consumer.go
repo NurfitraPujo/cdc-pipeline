@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/sink"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/stream"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/transformer"
+	transformernats "github.com/NurfitraPujo/cdc-pipeline/internal/transformer/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -796,6 +798,15 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 	}
 	c.statsMu.Unlock()
 
+	// WS-5 item 1: a transport-classified error (nats.ErrNoResponders,
+	// timeout, connection-closed, or this transformer's own circuit breaker
+	// standing in for one, all wrapped in transformernats.ErrTransportFailure)
+	// says nothing about whether these specific records are valid -- it means
+	// daya-core is unreachable. Such an error must always be retried and must
+	// never count toward MaxRetries/isolation/DLQ, unlike a genuine
+	// application-level rejection.
+	transportErr := errors.Is(err, transformernats.ErrTransportFailure)
+
 	shouldIsolate := false
 	c.retryMu.Lock()
 	now := time.Now()
@@ -804,7 +815,7 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 		entry.count++
 		entry.lastRetry = now
 		c.retries[m.UUID] = entry
-		if entry.count > c.retryConfig.MaxRetries {
+		if !transportErr && entry.count > c.retryConfig.MaxRetries {
 			shouldIsolate = true
 		}
 	}
@@ -816,7 +827,11 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 		return
 	}
 
-	log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
+	if transportErr {
+		log.Warn().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Transform transport failure (daya-core unreachable), Nacking batch for JetStream redelivery -- never counts toward isolation/DLQ")
+	} else {
+		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Int("batch_size", len(wmMsgs)).Msg("Sink upload failed, Nacking batch for JetStream redelivery")
+	}
 
 	backoff := c.retryConfig.InitialInterval
 	if backoff <= 0 {

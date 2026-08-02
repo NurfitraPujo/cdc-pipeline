@@ -37,6 +37,8 @@ re-litigated by whoever reads the code next.
 | [0021](0021-durable-pk-metadata-in-cdc-meta.md) | A table's resolved primary key is persisted durably in `cdc_meta.pk_columns` | accepted |
 | [0022](0022-ackwait-ceiling-ten-minutes.md) | `deriveAckWait`'s derived worst case is clamped to a configurable ceiling, default 10 minutes | accepted |
 | [0023](0023-processor-filter-schemas-tables-or-semantics.md) | A processor's `schemas` and `tables` filters OR together, not AND | accepted |
+| [0024](0024-transform-circuit-breaker-and-transport-classification.md) | The transform RPC gets its own circuit breaker; NATS transport errors are classified separately from application errors | accepted |
+| [0025](0025-transform-subject-auth-accepted-risk.md) | Subject-level authentication on `custom_object_requests.cdc_transform` is an accepted risk, not implemented | accepted |
 
 **0001–0007** came out of multi-schema support; the full narrative, including two refuted
 assumptions and a failed first implementation, is in [`MULTI_SCHEMA_PLAN.md`](../../MULTI_SCHEMA_PLAN.md).
@@ -52,7 +54,10 @@ remediation pass (see `summaries/ws5_ws6_ws7_implementation.md`). 0020 and 0021 
 made earlier in that same effort (WS-4) but not yet written up as ADRs until this pass. 0022 records
 a fix made during Opus validation review of the WS-5/WS-6/WS-7 pass itself. 0023 came out of the
 following WS-1B/WS-2B/WS-4C/WS-10 pass (see
-`summaries/ws1b_ws2b_ws4c_ws10_implementation.md`).
+`summaries/ws1b_ws2b_ws4c_ws10_implementation.md`). 0024 and 0025 close out WS-5's remaining
+resilience gaps (circuit breaker, transport-error classification, health-gated unsubscribe) and
+record the deliberate decision to skip subject-level authentication (see
+`summaries/ws5_resilience_completion.md`).
 
 Several record a **known deviation between the decision and the current code** (notably 0014's
 unimplemented `type_conflict` state and 0017's msgp/JSON boundary violation). That is deliberate —
