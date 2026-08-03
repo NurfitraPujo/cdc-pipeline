@@ -16,7 +16,7 @@ export const mockStatsSummary: StatsSummary = {
 	healthyCount: 3,
 	errorCount: 1,
 	transitioningCount: 1,
-	totalRowsSynchronized: 1500000,
+	totalRowsSynced: 1500000,
 	avgLagMs: 150,
 };
 
