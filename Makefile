@@ -53,8 +53,17 @@ e2e-down:
 e2e-list:
 	cd e2e && pnpm exec playwright test --list
 
+# Invoking playwright directly bypasses npm's pretest/posttest lifecycle, so
+# the port-freeing and container teardown in e2e/scripts/free-ports.sh have to
+# be called explicitly here. Without them this target -- which the pre-push
+# hook uses -- leaked a NATS container on every run and failed to start
+# whenever a previous run had left one of its ports held.
+#
+# The exit status of the test run is preserved so a failure still blocks the
+# push; cleanup must not swallow it.
 e2e:
-	cd e2e && pnpm exec playwright test
+	cd e2e && bash ./scripts/free-ports.sh
+	cd e2e && pnpm exec playwright test; status=$$?; bash ./scripts/free-ports.sh; exit $$status
 
 # =============================================================================
 # Deployment & Release Targets
