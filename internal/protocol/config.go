@@ -224,7 +224,17 @@ func (p ProcessorConfig) Validate() error {
 		// (engine/consumer.go), with no warning and no match-all default --
 		// the pipeline then reports "Running" while transforming nothing.
 		// Require it explicitly at config load instead (WS-8 item 1).
-		validation.Field(&p.OperationTypes, validation.Required, validation.Length(1, 0)),
+		//
+		// Each entry must also be a known OperationType. Requiring only a
+		// non-empty list left the exact hole the length check was meant to
+		// close: a typo ("insrt") passed validation, matched no message, and
+		// produced a pipeline that reported healthy while silently
+		// transforming nothing.
+		validation.Field(&p.OperationTypes,
+			validation.Required,
+			validation.Length(1, 0),
+			validation.Each(validation.By(validateOperationType)),
+		),
 	)
 }
 
@@ -292,6 +302,29 @@ func (s SourceConfig) Validate() error {
 		validation.Field(&s.Schemas, validation.Each(validation.By(validateTableIdentifier))),
 		validation.Field(&s.Tables, validation.Each(validation.By(validateTableIdentifier))),
 	)
+}
+
+// validOperationTypes is the closed set a processor may subscribe to. Kept
+// beside the OperationType constants in message.go -- a new operation must be
+// added here too, or configs naming it are rejected.
+var validOperationTypes = map[OperationType]bool{
+	OpInsert:          true,
+	OpUpdate:          true,
+	OpDelete:          true,
+	OpSnapshot:        true,
+	OpSchemaChange:    true,
+	OpSchemaChangeAck: true,
+}
+
+func validateOperationType(value interface{}) error {
+	op, ok := value.(OperationType)
+	if !ok {
+		return fmt.Errorf("expected an operation type, got %T", value)
+	}
+	if !validOperationTypes[op] {
+		return fmt.Errorf("unknown operation type %q", string(op))
+	}
+	return nil
 }
 
 // validateTableIdentifier rejects "=" (reserved for KeyToken's schema
