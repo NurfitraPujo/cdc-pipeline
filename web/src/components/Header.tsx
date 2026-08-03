@@ -48,46 +48,18 @@ export function Header({ showNav = true }: HeaderProps) {
 						>
 							Home
 						</Link>
+						{/* The scaffolding links this nav used to carry -- About,
+						    TanStack Docs, and the /demo/* pages -- were project
+						    template leftovers, not part of the control plane.
+						    The routes still exist; they are simply no longer
+						    advertised in the product navigation. */}
 						<Link
-							to="/about"
+							to="/dashboard"
 							className="nav-link"
 							activeProps={{ className: "nav-link is-active" }}
 						>
-							About
+							Dashboard
 						</Link>
-						<a
-							href="https://tanstack.com/start/latest/docs/framework/react/overview"
-							className="nav-link"
-							target="_blank"
-							rel="noreferrer"
-						>
-							Docs
-						</a>
-						<details className="relative w-full sm:w-auto">
-							<summary className="nav-link list-none cursor-pointer">
-								Demos
-							</summary>
-							<div className="mt-2 min-w-56 rounded-xl border border-[var(--line)] bg-[var(--header-bg)] p-2 shadow-lg sm:absolute sm:right-0">
-								<a
-									href="/demo/tanstack-query"
-									className="block rounded-lg px-3 py-2 text-sm text-[var(--sea-ink-soft)] no-underline transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
-								>
-									TanStack Query
-								</a>
-								<a
-									href="/demo/table"
-									className="block rounded-lg px-3 py-2 text-sm text-[var(--sea-ink-soft)] no-underline transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
-								>
-									TanStack Table
-								</a>
-								<a
-									href="/demo/store"
-									className="block rounded-lg px-3 py-2 text-sm text-[var(--sea-ink-soft)] no-underline transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
-								>
-									Store
-								</a>
-							</div>
-						</details>
 					</div>
 				)}
 			</nav>

@@ -1,5 +1,6 @@
 import { Link, useLocation } from "@tanstack/react-router";
 import {
+	Cpu,
 	Database,
 	GitBranch,
 	HardDrive,
@@ -19,6 +20,7 @@ const navItems: NavItem[] = [
 	{ to: "/pipelines", label: "Pipelines", icon: GitBranch },
 	{ to: "/sources", label: "Sources", icon: Database },
 	{ to: "/sinks", label: "Sinks", icon: HardDrive },
+	{ to: "/workers", label: "Workers", icon: Cpu },
 	{ to: "/config", label: "Configuration", icon: Settings },
 ];
 
