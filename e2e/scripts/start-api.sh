@@ -12,17 +12,31 @@
 # default ports is never touched or overwritten.
 set -euo pipefail
 
-NATS_CONTAINER="cdc-e2e-nats"
+# Must NOT be `cdc-e2e-nats`: that name belongs to the Makefile's `e2e-up` /
+# `e2e-down` targets, which the pre-push hook uses to provision NATS on 4222
+# and Postgres on 5432. Sharing the name meant this script's cleanup did
+# `rm -f cdc-e2e-nats` and destroyed the hook's container out from under its
+# own API server.
+NATS_CONTAINER="cdc-playwright-nats"
 NATS_PORT="${E2E_NATS_PORT:-4322}"
 API_PORT="${E2E_API_PORT:-8090}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+API_PID=""
+
 cleanup() {
+  if [ -n "$API_PID" ]; then
+    kill "$API_PID" 2>/dev/null || true
+    wait "$API_PID" 2>/dev/null || true
+  fi
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
 }
 
-# Playwright sends SIGTERM to the webServer process group on shutdown.
+# Best-effort only. Playwright tears the webServer process group down hard
+# enough that this trap frequently does not get to run, so the container is
+# also removed by scripts/free-ports.sh, which package.json wires to both
+# `pretest` and `posttest`. That pair is what actually guarantees a clean slate.
 trap cleanup EXIT INT TERM
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -76,10 +90,16 @@ export CORS_ALLOWED_ORIGINS="http://localhost:${E2E_WEB_PORT:-3100}"
 export PORT="${API_PORT}"
 export LOG_LEVEL="${E2E_API_LOG_LEVEL:-info}"
 
-# Build then exec, rather than `go run`. `go run` stays alive as a parent of
-# the compiled binary, so when the harness kills the process group the child
-# can survive and keep holding the API port -- which then makes the *next* run
-# fail at startup with "address already in use".
+# Build a binary rather than using `go run`: `go run` stays alive as a parent
+# of the compiled binary, so when the harness kills the process group the child
+# can survive and keep holding the API port, making the *next* run fail with
+# "address already in use".
 API_BIN="$(mktemp -d)/cdc-e2e-api"
 go build -o "$API_BIN" ./cmd/api
-exec "$API_BIN"
+
+# Run it as a child and wait, rather than exec'ing it. `exec` replaces this
+# shell, which discards the EXIT/TERM trap above -- so the NATS container was
+# never torn down and every run leaked one.
+"$API_BIN" &
+API_PID=$!
+wait "$API_PID"

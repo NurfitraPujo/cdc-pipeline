@@ -24,6 +24,8 @@ for port in "$WEB_PORT" "$API_PORT" "$NATS_PORT"; do
   fi
 done
 
-docker rm -f cdc-e2e-nats >/dev/null 2>&1 || true
+# Only this suite's own container. Deliberately not `cdc-e2e-nats`, which the
+# Makefile's e2e-up/e2e-down targets own.
+docker rm -f cdc-playwright-nats >/dev/null 2>&1 || true
 
 exit 0

@@ -5,6 +5,7 @@
 	"scripts": {
 		"pretest": "bash ./scripts/free-ports.sh",
 		"test": "playwright test",
+		"posttest": "bash ./scripts/free-ports.sh",
 		"test:ui": "playwright test --ui",
 		"test:headed": "playwright test --headed",
 		"test:list": "playwright test --list",
