@@ -28,11 +28,27 @@ export const UPPERCASE_DEFAULT: ProcessorConfigShape = {
 	options: { column: "name" },
 };
 
-export const CUSTOM_DEFAULT: ProcessorConfigShape = {
+/**
+ * Routes records to daya-core over NATS.
+ *
+ * `nats_url` and `subject` are required, and at least one of `schemas` /
+ * `tables` must be set — see NewNatsProtoTransformer in
+ * internal/transformer/nats/protobuf.go. `batch_size` and `pipeline_id` are
+ * injected by engine/factory.go and are deliberately absent here.
+ *
+ * The schema/table pair below is the shape described in that file's WS-1B
+ * comment: custom_objects rows (any table) OR visitations rows (any schema).
+ */
+export const NATS_PROTOBUF_DEFAULT: ProcessorConfigShape = {
 	name: "",
-	type: "custom",
-	operationTypes: [],
-	options: {},
+	type: "nats/protobuf",
+	operationTypes: ["insert", "update", "delete", "snapshot"],
+	options: {
+		nats_url: "nats://localhost:4222",
+		subject: "",
+		schemas: ["custom_objects"],
+		tables: [],
+	},
 };
 
 export const TEMPLATES_BY_TYPE: Record<
@@ -41,5 +57,5 @@ export const TEMPLATES_BY_TYPE: Record<
 > = {
 	mask: [MASK_DEFAULT],
 	uppercase: [UPPERCASE_DEFAULT],
-	custom: [CUSTOM_DEFAULT],
+	"nats/protobuf": [NATS_PROTOBUF_DEFAULT],
 };

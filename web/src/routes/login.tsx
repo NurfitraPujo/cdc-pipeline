@@ -1,4 +1,4 @@
-import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { authApi } from "@/api/auth";
 import { setAuthToken } from "@/api/schema-client";
@@ -18,7 +18,10 @@ export const Route = createFileRoute("/login")({
 	beforeLoad: () => {
 		const { isAuthenticated } = useAuthStore.getState();
 		if (isAuthenticated) {
-			throw Navigate({ to: "/dashboard" });
+			// `Navigate` is a component; throwing the React element it returns
+			// does not navigate. `redirect` is the router's throwable, as used
+			// in __root.tsx's auth guard.
+			throw redirect({ to: "/dashboard" });
 		}
 	},
 });

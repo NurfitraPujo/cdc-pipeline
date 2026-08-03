@@ -19,7 +19,29 @@ export interface LoginResponse {
 	token: string;
 }
 
-export type PipelineStatus = "running" | "stopped" | "error" | "paused";
+export type PipelineStatus = "healthy" | "transitioning" | "error";
+
+/**
+ * LSN checkpoint for one table, streamed on keys ending in `_checkpoint`.
+ * Mirrors protocol.Checkpoint.
+ */
+export interface Checkpoint {
+	ingressLsn: string;
+	egressLsn: string;
+	lastPk: string;
+	status: string;
+	updatedAt: string;
+}
+
+/**
+ * Streamed on keys ending in `.transition`. Mirrors
+ * protocol.PipelineTransitionState.
+ */
+export interface PipelineTransitionState {
+	id: string;
+	status: string;
+	startedAt: string;
+}
 
 export interface TableStats {
 	tableName: string;
@@ -40,6 +62,17 @@ export interface PipelineStatusResponse {
 	sinks: Record<string, Record<string, TableStats>>;
 }
 
+/**
+ * The single SSE event the server emits (event name: "message").
+ *
+ * `data` is discriminated by the suffix of `key`:
+ *   `.stats`       -> TableStats
+ *   `_checkpoint`  -> Checkpoint
+ *   `.transition`  -> PipelineTransitionState
+ * anything else    -> the raw KV value as a string
+ *
+ * See StreamMetrics in internal/api/handler.go.
+ */
 export interface SSEMessage {
 	key: string;
 	data: unknown;

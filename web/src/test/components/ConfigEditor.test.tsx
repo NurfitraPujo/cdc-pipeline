@@ -2,10 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@monaco-editor/react", () => ({
-	default: (props: {
-		value?: string;
-		onChange?: (v?: string) => void;
-	}) => (
+	default: (props: { value?: string; onChange?: (v?: string) => void }) => (
 		<textarea
 			data-testid="monaco"
 			value={props.value ?? ""}
@@ -43,17 +40,17 @@ describe("ConfigEditor (T2-9)", () => {
 		);
 
 		const textarea = screen.getByTestId("monaco") as HTMLTextAreaElement;
-		// Introduce an inline validation error: tabs are not allowed. The
-		// validator only runs when the user clicks Save, so we exercise that
-		// path explicitly.
-		fireEvent.change(textarea, { target: { value: '{\t"a": 1}' } });
+		// Introduce a real parse error. The validator only runs when the user
+		// clicks Save, so we exercise that path explicitly.
+		fireEvent.change(textarea, { target: { value: '{"a": }' } });
 		fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
-		expect(screen.getByText(/Tabs are not allowed/i)).toBeInTheDocument();
+		expect(screen.getByText(/Invalid JSON/i)).toBeInTheDocument();
+		expect(onSave).not.toHaveBeenCalled();
 
 		// A fresh initialValue from the parent should drop the stale
 		// validation message AND refresh the editor text.
 		rerender(<ConfigEditor initialValue='{"a":2}' onSave={onSave} />);
-		expect(screen.queryByText(/Tabs are not allowed/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Invalid JSON/i)).not.toBeInTheDocument();
 		expect((screen.getByTestId("monaco") as HTMLTextAreaElement).value).toBe(
 			'{"a":2}',
 		);

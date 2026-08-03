@@ -1,15 +1,17 @@
-export const PIPELINE_STATUS = [
-	"running",
-	"stopped",
-	"error",
-	"paused",
-] as const;
+/**
+ * The values the API actually emits and accepts.
+ *
+ * Source of truth is `getPipelineStatusString` in internal/api/handler.go,
+ * which returns exactly "healthy", "transitioning" or "error". This list
+ * previously read running/stopped/error/paused -- three of which the backend
+ * never produces and none of which the `?status=` filter would have matched.
+ */
+export const PIPELINE_STATUS = ["healthy", "transitioning", "error"] as const;
 export type PipelineStatus = (typeof PIPELINE_STATUS)[number];
 export const PIPELINE_STATUS_LABELS: Record<PipelineStatus, string> = {
-	running: "Running",
-	stopped: "Stopped",
+	healthy: "Healthy",
+	transitioning: "Transitioning",
 	error: "Error",
-	paused: "Paused",
 };
 
 export const SOURCE_TYPE = ["postgres"] as const;
@@ -25,12 +27,30 @@ export const SINK_TYPE_LABELS: Record<SinkType, string> = {
 	postgres_debug: "Postgres (Debug)",
 };
 
-export const PROCESSOR_TYPE = ["mask", "uppercase", "custom"] as const;
+/**
+ * Transformer types the worker can actually construct.
+ *
+ * Source of truth is the `RegisterTransformer(...)` call sites in
+ * `internal/transformer/` — currently `builtin.go` (mask, uppercase) and
+ * `nats/protobuf.go` (nats/protobuf). A pipeline naming anything else is
+ * accepted by the API with 201 but refused by the worker at construction
+ * ("references unregistered transformer type", engine/factory.go), which
+ * leaves the pipeline reporting `error`.
+ *
+ * This list previously offered "custom", which is not registered anywhere, and
+ * omitted "nats/protobuf", which is the transformer that routes records to
+ * daya-core. Selecting the former produced a dead pipeline; the latter could
+ * only be configured by hand-editing the raw JSON.
+ *
+ * There is no discovery endpoint, so this stays hand-maintained — see
+ * docs/todos/frontend_control_plane_gaps.md.
+ */
+export const PROCESSOR_TYPE = ["mask", "uppercase", "nats/protobuf"] as const;
 export type ProcessorType = (typeof PROCESSOR_TYPE)[number];
 export const PROCESSOR_TYPE_LABELS: Record<ProcessorType, string> = {
 	mask: "Mask",
 	uppercase: "Uppercase",
-	custom: "Custom",
+	"nats/protobuf": "NATS / Protobuf (daya-core)",
 };
 export const PROCESSOR_TYPE_BUILTIN: ReadonlySet<ProcessorType> = new Set([
 	"mask",

@@ -69,6 +69,26 @@ describe("mappers", () => {
 			const out = snakeToCamel({ updated_at: d });
 			expect(out).toEqual({ updatedAt: d });
 		});
+
+		it("leaves keys inside an opaque options map untouched", () => {
+			expect(
+				snakeToCamel({
+					processors: [
+						{
+							operation_types: ["INSERT"],
+							options: { max_length: 8, field_1: "email" },
+						},
+					],
+				}),
+			).toEqual({
+				processors: [
+					{
+						operationTypes: ["INSERT"],
+						options: { max_length: 8, field_1: "email" },
+					},
+				],
+			});
+		});
 	});
 
 	describe("camelToSnake", () => {
@@ -99,6 +119,36 @@ describe("mappers", () => {
 			expect(camelToSnake(null)).toBeNull();
 			expect(camelToSnake(0)).toBe(0);
 			expect(camelToSnake("hello")).toBe("hello");
+		});
+
+		it("leaves keys inside an opaque options map untouched", () => {
+			expect(
+				camelToSnake({
+					processors: [
+						{
+							operationTypes: ["INSERT"],
+							options: { maxLength: 8, fieldName: "email" },
+						},
+					],
+					sinks: { options: { maxAckPending: 100 } },
+				}),
+			).toEqual({
+				processors: [
+					{
+						operation_types: ["INSERT"],
+						options: { maxLength: 8, fieldName: "email" },
+					},
+				],
+				sinks: { options: { maxAckPending: 100 } },
+			});
+		});
+
+		it("no longer skips a key whose value equals it", () => {
+			// The old `if (key === value)` guard silently left such keys
+			// unconverted -- a real hazard for option-like string maps.
+			expect(camelToSnake({ maskField: "maskField" })).toEqual({
+				mask_field: "maskField",
+			});
 		});
 	});
 

@@ -53,19 +53,23 @@ function pipelineToAdvancedConfig(p: Pipeline): AdvancedConfig {
 	return {
 		batchSize: p.batchSize,
 		batchWait: p.batchWait,
+		// pipelinesApi.get() already ran snakeToCamel over the response, so
+		// these are camelCase at runtime. Reading snake_case here yielded
+		// undefined for all five fields, and saving then wiped the pipeline's
+		// retry config and every processor's operation types.
 		retry: p.retry
 			? {
-					maxRetries: p.retry.max_retries,
-					initialInterval: p.retry.initial_interval,
-					maxInterval: p.retry.max_interval,
-					enableDlq: p.retry.enable_dlq,
+					maxRetries: p.retry.maxRetries,
+					initialInterval: p.retry.initialInterval,
+					maxInterval: p.retry.maxInterval,
+					enableDlq: p.retry.enableDlq,
 				}
 			: undefined,
 		processors: (p.processors ?? []).map((pp) => ({
 			name: pp.name,
 			type: pp.type,
 			options: pp.options ?? undefined,
-			operationTypes: pp.operation_types ?? undefined,
+			operationTypes: pp.operationTypes ?? undefined,
 		})),
 	};
 }

@@ -47,58 +47,40 @@ export function ConfigEditor({
 		setError(null);
 	}, [initialValue]);
 
+	/**
+	 * Validate by actually parsing.
+	 *
+	 * This previously counted braces and policed indentation but never called
+	 * JSON.parse, so it rejected valid JSON that used tabs while happily
+	 * forwarding syntactically invalid JSON (balanced braces are not grammar)
+	 * to the parent, which then failed on its own parse.
+	 */
 	const validateJson = useCallback((jsonContent: string): boolean => {
-		// Basic JSON validation - check for common errors
-		const lines = jsonContent.split("\n");
+		// The editor's own header comment lines are stripped before parsing by
+		// callers that use them; tolerate a leading `//`-comment block here so
+		// the pipeline editor's template still validates.
+		const stripped = jsonContent
+			.split("\n")
+			.filter((line) => !line.trim().startsWith("//"))
+			.join("\n");
 
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			const trimmedLine = line.trim();
-
-			// Skip empty lines and comments
-			if (!trimmedLine || trimmedLine.startsWith("#")) {
-				continue;
-			}
-
-			// Check for tabs (JSON should use spaces)
-			if (line.includes("\t")) {
-				setError(
-					`Line ${i + 1}: Tabs are not allowed. Use spaces for indentation.`,
-				);
-				return false;
-			}
-
-			// Check indentation consistency
-			const leadingSpaces = line.length - line.trimStart().length;
-			if (leadingSpaces % 2 !== 0 && leadingSpaces > 0) {
-				setError(
-					`Line ${i + 1}: Indentation should be a multiple of 2 spaces.`,
-				);
-				return false;
-			}
+		if (!stripped.trim()) {
+			setError("Configuration cannot be empty.");
+			return false;
 		}
 
-		// Try to check for basic structure
 		try {
-			// Check for unmatched braces/brackets (simple check)
-			const openBraces = (jsonContent.match(/\{/g) || []).length;
-			const closeBraces = (jsonContent.match(/\}/g) || []).length;
-			const openBrackets = (jsonContent.match(/\[/g) || []).length;
-			const closeBrackets = (jsonContent.match(/\]/g) || []).length;
-
-			if (openBraces !== closeBraces) {
-				setError("Unmatched curly braces in JSON content.");
+			const parsed: unknown = JSON.parse(stripped);
+			if (parsed === null || typeof parsed !== "object") {
+				setError("Configuration must be a JSON object.");
 				return false;
 			}
-
-			if (openBrackets !== closeBrackets) {
-				setError("Unmatched square brackets in JSON content.");
-				return false;
-			}
-
+			setError(null);
 			return true;
-		} catch {
-			setError("Invalid JSON format.");
+		} catch (err) {
+			setError(
+				err instanceof Error ? `Invalid JSON: ${err.message}` : "Invalid JSON.",
+			);
 			return false;
 		}
 	}, []);

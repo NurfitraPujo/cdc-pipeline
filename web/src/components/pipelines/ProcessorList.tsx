@@ -10,6 +10,9 @@ type ProcessorConfig = ProcessorConfigShape;
 interface ProcessorListProps {
 	value: ProcessorConfig[];
 	onChange: (next: ProcessorConfig[]) => void;
+	/** Passed through to the nats/protobuf options form. */
+	availableSchemas?: string[];
+	availableTables?: string[];
 }
 
 function makeDefault(): ProcessorConfig {
@@ -24,7 +27,12 @@ function makeDefault(): ProcessorConfig {
 	};
 }
 
-export function ProcessorList({ value, onChange }: ProcessorListProps) {
+export function ProcessorList({
+	value,
+	onChange,
+	availableSchemas,
+	availableTables,
+}: ProcessorListProps) {
 	// T3-4: rows arriving from the API (or produced by older code paths) do
 	// not carry an `id`. Backfill them once on mount and whenever the array
 	// length grows so the `key={p.id}` below never falls back to an index.
@@ -75,6 +83,8 @@ export function ProcessorList({ value, onChange }: ProcessorListProps) {
 							onChange={(next) => update(i, next)}
 							onRemove={() => remove(i)}
 							index={i}
+							availableSchemas={availableSchemas}
+							availableTables={availableTables}
 						/>
 					</CardContent>
 				</Card>

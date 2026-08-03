@@ -47,8 +47,9 @@ class MockEventSource {
 
 beforeEach(() => {
 	constructed.length = 0;
-	(globalThis as unknown as { EventSource: typeof MockEventSource }).EventSource =
-		MockEventSource;
+	(
+		globalThis as unknown as { EventSource: typeof MockEventSource }
+	).EventSource = MockEventSource;
 	useAuthStore.setState({ token: "test-token", isAuthenticated: true });
 });
 

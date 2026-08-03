@@ -6,10 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Radix UI primitives that ProcessorList transitively renders are stubbed via
 // the `resolve.alias` block in `vitest.config.ts`. We only mock Monaco here.
 vi.mock("@monaco-editor/react", () => ({
-	default: (props: {
-		value?: string;
-		onChange?: (v?: string) => void;
-	}) => (
+	default: (props: { value?: string; onChange?: (v?: string) => void }) => (
 		<textarea
 			data-testid="monaco"
 			value={props.value ?? ""}
@@ -18,8 +15,8 @@ vi.mock("@monaco-editor/react", () => ({
 	),
 }));
 
-import { ProcessorList } from "@/components/pipelines/ProcessorList";
 import type { ProcessorConfigShape } from "@/components/pipelines/optionsTemplates";
+import { ProcessorList } from "@/components/pipelines/ProcessorList";
 
 type ProcessorRow = Required<Pick<ProcessorConfigShape, "id">> &
 	ProcessorConfigShape;
@@ -47,9 +44,7 @@ function ControlledProcessorList({
 	initial?: ProcessorConfigShape[];
 }) {
 	const [rows, setRows] = useState<ProcessorConfigShape[]>(initial);
-	return (
-		<ProcessorList value={rows} onChange={(next) => setRows(next)} />
-	);
+	return <ProcessorList value={rows} onChange={(next) => setRows(next)} />;
 }
 
 describe("ProcessorList (T3-4)", () => {
@@ -129,7 +124,9 @@ describe("ProcessorList (T3-4)", () => {
 		const addBtn = screen.getByRole("button", { name: /add processor/i });
 		await user.click(addBtn);
 		await user.click(addBtn);
-		const inputs = screen.getAllByPlaceholderText(/processor name/i) as HTMLInputElement[];
+		const inputs = screen.getAllByPlaceholderText(
+			/processor name/i,
+		) as HTMLInputElement[];
 		expect(inputs.length).toBeGreaterThanOrEqual(2);
 		// Inputs themselves don't carry ids; instead validate the stable row
 		// count + that subsequent adds do not reuse an id by checking the

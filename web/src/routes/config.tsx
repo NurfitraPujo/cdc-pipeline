@@ -4,22 +4,24 @@ import { AlertCircle, CheckCircle, Settings } from "lucide-react";
 import { useState } from "react";
 import { type GlobalConfig, globalConfigApi } from "@/api/globalConfig";
 import { ConfigEditor } from "@/components/ConfigEditor";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
+import { GlobalConfigForm } from "@/components/GlobalConfigForm";
+import { Button } from "@/components/ui/button";
 
+// Mirrors protocol.GlobalConfig.SetDefaults() in internal/protocol/config.go.
 const defaultConfig: GlobalConfig = {
 	batchSize: 1000,
 	batchWait: "1s",
 	retry: {
 		maxRetries: 3,
-		initialBackoff: "1s",
-		maxBackoff: "30s",
+		initialInterval: "1s",
+		maxInterval: "30s",
+		enableDlq: false,
 	},
+	drainTimeout: "30s",
+	shutdownTimeout: "30s",
+	stabilizationDelay: "2s",
+	crashRecoveryDelay: "5s",
+	globalReloadDelay: "2s",
 };
 
 const fetchGlobalConfig = async (): Promise<GlobalConfig> => {
@@ -40,6 +42,7 @@ function ConfigPage() {
 	const queryClient = useQueryClient();
 	const [saveError, setSaveError] = useState<string | null>(null);
 	const [saveSuccess, setSaveSuccess] = useState(false);
+	const [mode, setMode] = useState<"form" | "json">("form");
 
 	const { data: config, error } = useQuery({
 		queryKey: ["global-config"],
@@ -107,53 +110,36 @@ function ConfigPage() {
 				</div>
 			)}
 
-			<Card className="mb-6">
-				<CardHeader>
-					<CardTitle>Configuration Settings</CardTitle>
-					<CardDescription>
-						Edit the global configuration below. Changes will take effect
-						immediately after saving.
-					</CardDescription>
-				</CardHeader>
-				<CardContent className="space-y-4">
-					<div className="grid gap-4 md:grid-cols-2">
-						<div className="space-y-2">
-							<span className="text-sm font-medium">
-								Max Concurrent Pipelines
-							</span>
-							<p className="text-xs text-muted-foreground">
-								Maximum number of pipelines that can run simultaneously
-							</p>
-						</div>
-						<div className="space-y-2">
-							<span className="text-sm font-medium">Default Batch Size</span>
-							<p className="text-xs text-muted-foreground">
-								Number of events to batch before flushing
-							</p>
-						</div>
-						<div className="space-y-2">
-							<span className="text-sm font-medium">
-								Default Flush Interval
-							</span>
-							<p className="text-xs text-muted-foreground">
-								Milliseconds between automatic flushes
-							</p>
-						</div>
-						<div className="space-y-2">
-							<span className="text-sm font-medium">Health Check Interval</span>
-							<p className="text-xs text-muted-foreground">
-								Milliseconds between health checks
-							</p>
-						</div>
-					</div>
-				</CardContent>
-			</Card>
+			<div className="mb-6 flex items-center gap-3">
+				<Button
+					variant={mode === "form" ? "default" : "outline"}
+					size="sm"
+					onClick={() => setMode("form")}
+				>
+					Form
+				</Button>
+				<Button
+					variant={mode === "json" ? "default" : "outline"}
+					size="sm"
+					onClick={() => setMode("json")}
+				>
+					Raw JSON
+				</Button>
+			</div>
 
-			<ConfigEditor
-				initialValue={initialValue}
-				onSave={handleSave}
-				isLoading={mutation.isPending}
-			/>
+			{mode === "form" ? (
+				<GlobalConfigForm
+					value={currentConfig}
+					onSave={(cfg) => mutation.mutate(cfg)}
+					isSaving={mutation.isPending}
+				/>
+			) : (
+				<ConfigEditor
+					initialValue={initialValue}
+					onSave={handleSave}
+					isLoading={mutation.isPending}
+				/>
+			)}
 		</div>
 	);
 }

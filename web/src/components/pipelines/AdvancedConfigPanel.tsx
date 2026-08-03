@@ -19,6 +19,14 @@ interface AdvancedConfigPanelProps {
 	onChange: (next: AdvancedConfig) => void;
 	defaultOpen?: string[];
 	errors?: Record<string, string>;
+	/**
+	 * Source-derived suggestions for the nats/protobuf transformer's
+	 * schemas/tables filter. Optional: the editor falls back to free-text
+	 * entry when the caller has nothing to offer (e.g. the edit page, which
+	 * has no source-table query).
+	 */
+	availableSchemas?: string[];
+	availableTables?: string[];
 }
 
 function parseIntOrUndefined(s: string): number | undefined {
@@ -55,6 +63,8 @@ export function AdvancedConfigPanel({
 	onChange,
 	defaultOpen,
 	errors,
+	availableSchemas,
+	availableTables,
 }: AdvancedConfigPanelProps) {
 	const [localErrors, setLocalErrors] = useState<Record<string, string>>({});
 
@@ -300,6 +310,8 @@ export function AdvancedConfigPanel({
 					<ProcessorList
 						value={value.processors}
 						onChange={(p) => onChange({ ...value, processors: p })}
+						availableSchemas={availableSchemas}
+						availableTables={availableTables}
 					/>
 				</AccordionContent>
 			</AccordionItem>

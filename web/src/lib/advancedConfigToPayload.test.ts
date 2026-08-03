@@ -31,7 +31,13 @@ describe("advancedConfigToPayload (T3-4)", () => {
 		const payload = advancedConfigToPayload({
 			processors: [
 				{ id: "a", name: "a", type: "mask", operationTypes: [], options: {} },
-				{ id: "b", name: "b", type: "uppercase", operationTypes: [], options: {} },
+				{
+					id: "b",
+					name: "b",
+					type: "uppercase",
+					operationTypes: [],
+					options: {},
+				},
 			],
 		});
 

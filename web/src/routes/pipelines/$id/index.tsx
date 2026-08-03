@@ -15,8 +15,14 @@ import {
 import { useEffect, useState } from "react";
 import { pipelinesApi } from "@/api/pipelines";
 import { sourcesApi } from "@/api/sources";
-import type { SSEMessage, TableStats } from "@/api/types";
+import type {
+	Checkpoint,
+	PipelineTransitionState,
+	SSEMessage,
+	TableStats,
+} from "@/api/types";
 import { MetricCard } from "@/components/MetricCard";
+import { StatusBadge, type StatusBadgeStatus } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +38,22 @@ export const Route = createFileRoute("/pipelines/$id/")({
 	component: PipelineDetailPage,
 });
 
+/**
+ * Reduce a checkpoint KV key to the table token it refers to.
+ *
+ * Keys look like
+ *   cdc.pipeline.{pid}.sources.{sid}.tables.{token}.ingress_checkpoint
+ *   cdc.pipeline.{pid}.sources.{sid}.sinks.{sink}.tables.{token}.egress_checkpoint
+ * so the token is whatever sits between the "tables" marker and the trailing
+ * checkpoint segment. Falls back to the whole key if the shape is unfamiliar.
+ */
+function checkpointLabel(key: string): string {
+	const parts = key.split(".");
+	const tablesAt = parts.lastIndexOf("tables");
+	if (tablesAt === -1 || tablesAt + 1 >= parts.length - 1) return key;
+	return parts.slice(tablesAt + 1, parts.length - 1).join(".");
+}
+
 function PipelineDetailPage() {
 	const { id } = Route.useParams();
 	const queryClient = useQueryClient();
@@ -41,6 +63,12 @@ function PipelineDetailPage() {
 		Record<string, Record<string, TableStats>>
 	>({});
 	const [lastUpdate, setLastUpdate] = useState<string | null>(null);
+	const [checkpoints, setCheckpoints] = useState<Record<string, Checkpoint>>(
+		{},
+	);
+	const [transition, setTransition] = useState<PipelineTransitionState | null>(
+		null,
+	);
 
 	const {
 		data: pipeline,
@@ -57,6 +85,9 @@ function PipelineDetailPage() {
 	});
 
 	const sourceById = new Map(sources.map((s) => [s.id, s]));
+
+	// GET /pipelines/{id} now carries the server-computed status.
+	const livePipelineStatus = pipeline?.status ?? "unknown";
 
 	// Fetch initial status
 	const { data: initialStatus } = useQuery({
@@ -83,6 +114,29 @@ function PipelineDetailPage() {
 			if (!msg || !msg.key) return;
 
 			const key = msg.key;
+
+			// The server streams three payload variants over one event name.
+			// Only `.stats` used to be handled; checkpoints and transitions
+			// were parsed and thrown away, so the page never reflected a
+			// transition and never showed replication progress.
+			if (key.endsWith("_checkpoint")) {
+				setLastUpdate(new Date().toISOString());
+				setCheckpoints((prev) => ({
+					...prev,
+					[key]: msg.data as Checkpoint,
+				}));
+				return;
+			}
+
+			if (key.endsWith(".transition")) {
+				setLastUpdate(new Date().toISOString());
+				setTransition(msg.data as PipelineTransitionState);
+				// A transition changes the pipeline's reported status, so the
+				// cached config/status queries are now stale.
+				queryClient.invalidateQueries({ queryKey: ["pipeline-status", id] });
+				return;
+			}
+
 			const data = msg.data as TableStats;
 
 			if (key.endsWith(".stats")) {
@@ -103,8 +157,8 @@ function PipelineDetailPage() {
 						: undefined) || data.tableName;
 				const sinkID = msg.sinkId;
 
+				// Per-sink breakdown, when the event carries a sink.
 				if (sinkID) {
-					// Update per-sink stats
 					setSinks((prev) => ({
 						...prev,
 						[sinkID]: {
@@ -112,29 +166,34 @@ function PipelineDetailPage() {
 							[tableName]: data,
 						},
 					}));
+				}
 
-					// Update aggregated table stats (exclude debug)
-					if (!msg.isDebug) {
-						setTables((prev) => {
-							const current = prev[tableName] || { totalSynced: 0, lagMs: 0 };
-							const next = { ...data, tableName };
+				// Aggregate into the table totals. Producer-level stats keys
+				// (ProducerTableStatsKey) carry no sink, so this used to sit
+				// inside `if (sinkID)` and drop them entirely -- while
+				// setLastUpdate still fired, making "Last Update" tick as the
+				// numbers stayed frozen. Debug sinks stay excluded so a
+				// postgres_debug mirror does not double-count.
+				if (!msg.isDebug) {
+					setTables((prev) => {
+						const current = prev[tableName] || { totalSynced: 0, lagMs: 0 };
+						const next = { ...data, tableName };
 
-							// Simple aggregation: max for count and lag
-							if (data.totalSynced > current.totalSynced) {
-								next.totalSynced = data.totalSynced;
-							} else {
-								next.totalSynced = current.totalSynced;
-							}
+						// Simple aggregation: max for count and lag
+						if (data.totalSynced > current.totalSynced) {
+							next.totalSynced = data.totalSynced;
+						} else {
+							next.totalSynced = current.totalSynced;
+						}
 
-							if (data.lagMs > current.lagMs) {
-								next.lagMs = data.lagMs;
-							} else {
-								next.lagMs = current.lagMs;
-							}
+						if (data.lagMs > current.lagMs) {
+							next.lagMs = data.lagMs;
+						} else {
+							next.lagMs = current.lagMs;
+						}
 
-							return { ...prev, [tableName]: next };
-						});
-					}
+						return { ...prev, [tableName]: next };
+					});
 				}
 			}
 		},
@@ -206,7 +265,21 @@ function PipelineDetailPage() {
 							Back
 						</Link>
 					</Button>
-					<Badge variant="secondary">Configured</Badge>
+					{/* Live status, not a hardcoded "Configured" literal. A
+					    transition event from the stream wins over the value the
+					    status query returned when the page loaded. */}
+					<StatusBadge
+						status={
+							(transition?.status?.toLowerCase() === "transitioning"
+								? "transitioning"
+								: livePipelineStatus) as StatusBadgeStatus
+						}
+					/>
+					{transition?.startedAt && (
+						<span className="text-xs text-muted-foreground">
+							since {new Date(transition.startedAt).toLocaleTimeString()}
+						</span>
+					)}
 					{isConnected ? (
 						<Badge variant="success" className="gap-1">
 							<Wifi className="h-3 w-3" />
@@ -247,9 +320,6 @@ function PipelineDetailPage() {
 						</Button>
 					</div>
 				</div>
-				{pipeline.description && (
-					<p className="text-muted-foreground mt-4">{pipeline.description}</p>
-				)}
 			</div>
 
 			{/* Real-time Metrics */}
@@ -492,6 +562,54 @@ function PipelineDetailPage() {
 						))}
 					</div>
 				</div>
+			)}
+
+			{/* Replication checkpoints, streamed on `_checkpoint` keys. */}
+			{Object.keys(checkpoints).length > 0 && (
+				<Card className="mb-8">
+					<CardHeader>
+						<CardTitle>Replication Checkpoints</CardTitle>
+						<CardDescription>
+							Ingress and egress LSN positions per table
+						</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<div className="overflow-x-auto">
+							<table className="w-full text-sm">
+								<thead>
+									<tr className="border-b text-left text-muted-foreground">
+										<th className="pb-2 pr-4 font-medium">Table</th>
+										<th className="pb-2 pr-4 font-medium">Ingress LSN</th>
+										<th className="pb-2 pr-4 font-medium">Egress LSN</th>
+										<th className="pb-2 pr-4 font-medium">Last PK</th>
+										<th className="pb-2 font-medium">Status</th>
+									</tr>
+								</thead>
+								<tbody>
+									{Object.entries(checkpoints).map(([key, cp]) => (
+										<tr key={key} className="border-b last:border-0">
+											<td className="py-2 pr-4 font-mono text-xs" title={key}>
+												{checkpointLabel(key)}
+											</td>
+											<td className="py-2 pr-4 font-mono text-xs">
+												{cp.ingressLsn || "—"}
+											</td>
+											<td className="py-2 pr-4 font-mono text-xs">
+												{cp.egressLsn || "—"}
+											</td>
+											<td className="py-2 pr-4 font-mono text-xs">
+												{cp.lastPk || "—"}
+											</td>
+											<td className="py-2">
+												<Badge variant="secondary">{cp.status || "—"}</Badge>
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					</CardContent>
+				</Card>
 			)}
 
 			{/* Raw Config */}

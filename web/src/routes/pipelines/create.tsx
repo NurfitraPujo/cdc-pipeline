@@ -9,7 +9,7 @@ import {
 	Server,
 	X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { camelToSnake } from "@/api/mappers";
 import { pipelinesApi } from "@/api/pipelines";
 import { sinksApi } from "@/api/sinks";
@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { isValidDuration, parseDuration } from "@/lib/duration";
+import { filterGroupedTables, groupTablesBySchema } from "@/lib/tableGrouping";
 
 export const Route = createFileRoute("/pipelines/create")({
 	component: CreatePipelinePage,
@@ -77,6 +78,32 @@ function CreatePipelinePage() {
 			setSelectedTables(new Set());
 		}
 	}, [selectedSource]);
+
+	const [tableFilter, setTableFilter] = useState("");
+
+	// Group the discovered tables by schema so a subset can be picked within
+	// each one.
+	const tablesBySchema = useMemo(() => groupTablesBySchema(tables), [tables]);
+
+	const filteredTablesBySchema = useMemo(
+		() => filterGroupedTables(tablesBySchema, tableFilter),
+		[tablesBySchema, tableFilter],
+	);
+
+	const toggleSchemaTables = (schema: string, select: boolean) => {
+		const group = tablesBySchema.get(schema) ?? [];
+		setSelectedTables((prev) => {
+			const next = new Set(prev);
+			for (const t of group) {
+				if (select) next.add(t);
+				else next.delete(t);
+			}
+			return next;
+		});
+		if (validationErrors.tables) {
+			setValidationErrors((prev) => ({ ...prev, tables: "" }));
+		}
+	};
 
 	const createMutation = useMutation({
 		mutationFn: pipelinesApi.create,
@@ -220,6 +247,11 @@ function CreatePipelinePage() {
 					</CardHeader>
 					<CardContent>
 						<Input
+							id="pipeline-id"
+							// The card title above is the visible label but is not
+							// associated with the control, so assistive tech
+							// announced this as an unlabelled text box.
+							aria-label="Pipeline ID"
 							placeholder="e.g., postgres-to-kafka"
 							value={pipelineId}
 							onChange={(e) => {
@@ -371,23 +403,84 @@ function CreatePipelinePage() {
 							</p>
 						) : (
 							<div className="space-y-4">
-								<div className="flex flex-wrap gap-2">
-									{tables.map((table) => (
-										<button
-											key={table}
-											type="button"
-											onClick={() => handleToggleTable(table)}
-											className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm transition-colors ${
-												selectedTables.has(table)
-													? "bg-primary text-primary-foreground border-primary"
-													: "bg-background hover:bg-muted"
-											}`}
-										>
-											{table}
-											{selectedTables.has(table) && <X className="h-3 w-3" />}
-										</button>
-									))}
-								</div>
+								{/* Grouped by schema so a subset can be picked within each
+								    one. A flat list made a multi-schema source unusable:
+								    every table from every schema ran together with no way
+								    to tell which schema a name belonged to. */}
+								<Input
+									aria-label="Filter tables"
+									placeholder="Filter tables..."
+									value={tableFilter}
+									onChange={(e) => setTableFilter(e.target.value)}
+									className="max-w-sm"
+								/>
+
+								{filteredTablesBySchema.size === 0 ? (
+									<p className="text-sm text-muted-foreground">
+										No tables match “{tableFilter}”.
+									</p>
+								) : (
+									<div className="space-y-4">
+										{[...filteredTablesBySchema.entries()].map(
+											([schema, group]) => {
+												const allSelected = group.every((t) =>
+													selectedTables.has(t),
+												);
+												return (
+													<div key={schema}>
+														<div className="mb-2 flex items-center gap-2">
+															<span className="text-sm font-medium">
+																{schema}
+															</span>
+															<span className="text-xs text-muted-foreground">
+																{
+																	group.filter((t) => selectedTables.has(t))
+																		.length
+																}{" "}
+																/ {group.length}
+															</span>
+															<Button
+																type="button"
+																variant="ghost"
+																size="sm"
+																onClick={() =>
+																	toggleSchemaTables(schema, !allSelected)
+																}
+															>
+																{allSelected ? "Clear schema" : "Select all"}
+															</Button>
+														</div>
+														<div className="flex flex-wrap gap-2">
+															{group.map((table) => (
+																<button
+																	key={table}
+																	type="button"
+																	onClick={() => handleToggleTable(table)}
+																	aria-pressed={selectedTables.has(table)}
+																	className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm transition-colors ${
+																		selectedTables.has(table)
+																			? "bg-primary text-primary-foreground border-primary"
+																			: "bg-background hover:bg-muted"
+																	}`}
+																>
+																	{/* The chip shows the bare name inside its
+																	    schema group, but the stored value stays
+																	    fully qualified. */}
+																	{table.includes(".")
+																		? table.slice(table.indexOf(".") + 1)
+																		: table}
+																	{selectedTables.has(table) && (
+																		<X className="h-3 w-3" />
+																	)}
+																</button>
+															))}
+														</div>
+													</div>
+												);
+											},
+										)}
+									</div>
+								)}
 								{selectedTables.size > 0 && (
 									<div className="flex items-center gap-2 text-sm text-muted-foreground">
 										<span>Selected: {selectedTables.size} table(s)</span>
@@ -424,6 +517,13 @@ function CreatePipelinePage() {
 							value={advanced}
 							onChange={setAdvanced}
 							errors={validationErrors}
+							// Lets the nats/protobuf form offer the schemas and tables
+							// the source actually exposes, rather than making the
+							// operator retype them from memory.
+							availableSchemas={
+								sources.find((s) => s.id === selectedSource)?.schemas ?? []
+							}
+							availableTables={tables}
 							defaultOpen={
 								validationErrors.batchWait ||
 								validationErrors.initialInterval ||

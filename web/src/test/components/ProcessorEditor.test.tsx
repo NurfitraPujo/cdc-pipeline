@@ -4,10 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Radix UI primitives that ProcessorEditor pulls in are stubbed via the
 // `resolve.alias` block in `vitest.config.ts`. We only mock Monaco here.
 vi.mock("@monaco-editor/react", () => ({
-	default: (props: {
-		value?: string;
-		onChange?: (v?: string) => void;
-	}) => (
+	default: (props: { value?: string; onChange?: (v?: string) => void }) => (
 		<textarea
 			data-testid="monaco"
 			value={props.value ?? ""}
@@ -41,9 +38,7 @@ describe("ProcessorEditor (T2-10)", () => {
 
 		const textarea = screen.getByTestId("monaco") as HTMLTextAreaElement;
 		// Sanity: editor seeded with the initial formatted options.
-		expect(textarea.value).toBe(
-			JSON.stringify({ fields: ["email"] }, null, 2),
-		);
+		expect(textarea.value).toBe(JSON.stringify({ fields: ["email"] }, null, 2));
 
 		// User types something that breaks JSON mid-edit.
 		fireEvent.change(textarea, { target: { value: '{ "fields": ["ema' } });
@@ -61,9 +56,7 @@ describe("ProcessorEditor (T2-10)", () => {
 			"text-xs text-destructive",
 		);
 		const errorTexts = Array.from(errorNodes).map((n) => n.textContent ?? "");
-		expect(
-			errorTexts.some((t) => /JSON/i.test(t)),
-		).toBe(true);
+		expect(errorTexts.some((t) => /JSON/i.test(t))).toBe(true);
 	});
 
 	it("resyncs the editor text when an external prop change arrives", () => {

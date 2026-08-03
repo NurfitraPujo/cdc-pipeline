@@ -108,7 +108,11 @@ const Root = (props: AnyProps) => {
 	) {
 		const role = props.role ?? "switch";
 		const ariaChecked =
-			checked === undefined ? false : checked === "indeterminate" ? "mixed" : checked;
+			checked === undefined
+				? false
+				: checked === "indeterminate"
+					? "mixed"
+					: checked;
 		const onButtonClick = (event: React.MouseEvent<HTMLButtonElement>) => {
 			if (typeof handleClick === "function") {
 				handleClick(event);
@@ -119,7 +123,13 @@ const Root = (props: AnyProps) => {
 		};
 		return React.createElement(
 			"button",
-			{ ...dom, role, type: "button", "aria-checked": ariaChecked, onClick: onButtonClick },
+			{
+				...dom,
+				role,
+				type: "button",
+				"aria-checked": ariaChecked,
+				onClick: onButtonClick,
+			},
 			props.children,
 		);
 	}

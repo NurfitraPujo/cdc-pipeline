@@ -14,6 +14,7 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as WorkersIndexRouteImport } from './routes/workers/index'
 import { Route as SourcesIndexRouteImport } from './routes/sources/index'
 import { Route as SinksIndexRouteImport } from './routes/sinks/index'
 import { Route as PipelinesIndexRouteImport } from './routes/pipelines/index'
@@ -51,6 +52,11 @@ const AboutRoute = AboutRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkersIndexRoute = WorkersIndexRouteImport.update({
+  id: '/workers/',
+  path: '/workers/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SourcesIndexRoute = SourcesIndexRouteImport.update({
@@ -134,6 +140,7 @@ export interface FileRoutesByFullPath {
   '/pipelines/': typeof PipelinesIndexRoute
   '/sinks/': typeof SinksIndexRoute
   '/sources/': typeof SourcesIndexRoute
+  '/workers/': typeof WorkersIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/sinks/$id/edit': typeof SinksIdEditRoute
   '/sources/$id/edit': typeof SourcesIdEditRoute
@@ -154,6 +161,7 @@ export interface FileRoutesByTo {
   '/pipelines': typeof PipelinesIndexRoute
   '/sinks': typeof SinksIndexRoute
   '/sources': typeof SourcesIndexRoute
+  '/workers': typeof WorkersIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/sinks/$id/edit': typeof SinksIdEditRoute
   '/sources/$id/edit': typeof SourcesIdEditRoute
@@ -175,6 +183,7 @@ export interface FileRoutesById {
   '/pipelines/': typeof PipelinesIndexRoute
   '/sinks/': typeof SinksIndexRoute
   '/sources/': typeof SourcesIndexRoute
+  '/workers/': typeof WorkersIndexRoute
   '/pipelines/$id/edit': typeof PipelinesIdEditRoute
   '/sinks/$id/edit': typeof SinksIdEditRoute
   '/sources/$id/edit': typeof SourcesIdEditRoute
@@ -197,6 +206,7 @@ export interface FileRouteTypes {
     | '/pipelines/'
     | '/sinks/'
     | '/sources/'
+    | '/workers/'
     | '/pipelines/$id/edit'
     | '/sinks/$id/edit'
     | '/sources/$id/edit'
@@ -217,6 +227,7 @@ export interface FileRouteTypes {
     | '/pipelines'
     | '/sinks'
     | '/sources'
+    | '/workers'
     | '/pipelines/$id/edit'
     | '/sinks/$id/edit'
     | '/sources/$id/edit'
@@ -237,6 +248,7 @@ export interface FileRouteTypes {
     | '/pipelines/'
     | '/sinks/'
     | '/sources/'
+    | '/workers/'
     | '/pipelines/$id/edit'
     | '/sinks/$id/edit'
     | '/sources/$id/edit'
@@ -258,6 +270,7 @@ export interface RootRouteChildren {
   PipelinesIndexRoute: typeof PipelinesIndexRoute
   SinksIndexRoute: typeof SinksIndexRoute
   SourcesIndexRoute: typeof SourcesIndexRoute
+  WorkersIndexRoute: typeof WorkersIndexRoute
   PipelinesIdEditRoute: typeof PipelinesIdEditRoute
   SinksIdEditRoute: typeof SinksIdEditRoute
   SourcesIdEditRoute: typeof SourcesIdEditRoute
@@ -299,6 +312,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workers/': {
+      id: '/workers/'
+      path: '/workers'
+      fullPath: '/workers/'
+      preLoaderRoute: typeof WorkersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sources/': {
@@ -410,6 +430,7 @@ const rootRouteChildren: RootRouteChildren = {
   PipelinesIndexRoute: PipelinesIndexRoute,
   SinksIndexRoute: SinksIndexRoute,
   SourcesIndexRoute: SourcesIndexRoute,
+  WorkersIndexRoute: WorkersIndexRoute,
   PipelinesIdEditRoute: PipelinesIdEditRoute,
   SinksIdEditRoute: SinksIdEditRoute,
   SourcesIdEditRoute: SourcesIdEditRoute,

@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import {
 	ChevronLeft,
 	ChevronRight,
@@ -9,7 +10,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { type Pipeline, pipelinesApi } from "@/api/pipelines";
-import { StatusBadge } from "@/components/StatusBadge";
+import { StatusBadge, type StatusBadgeStatus } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -53,16 +54,23 @@ function PipelineTableRow({
 	return (
 		<TableRow>
 			<TableCell>
-				<button
-					type="button"
-					onClick={() => (window.location.href = `/pipelines/${pipeline.id}`)}
-					className="font-medium text-primary hover:underline bg-transparent border-none p-0 cursor-pointer"
+				{/* A router Link, not window.location -- a hard navigation
+				    reloads the app and discards the React Query cache. */}
+				<Link
+					to="/pipelines/$id"
+					params={{ id: pipeline.id }}
+					className="font-medium text-primary hover:underline"
 				>
 					{pipeline.name}
-				</button>
+				</Link>
 			</TableCell>
 			<TableCell>
-				<StatusBadge status={(pipeline.status as any) || "unknown"} />
+				{/* GET /pipelines returns "healthy" | "transitioning" | "error"
+				    (getPipelineStatusString in internal/api/handler.go).
+				    StatusBadge falls back to "Unknown" for anything else. */}
+				<StatusBadge
+					status={(pipeline.status ?? "unknown") as StatusBadgeStatus}
+				/>
 			</TableCell>
 			<TableCell>{pipeline.sources.length} source(s)</TableCell>
 			<TableCell>{pipeline.sinks.length} sink(s)</TableCell>
@@ -76,13 +84,11 @@ function PipelineTableRow({
 						</Button>
 					</DropdownMenuTrigger>
 					<DropdownMenuContent align="end">
-						<DropdownMenuItem
-							onClick={() =>
-								(window.location.href = `/pipelines/${pipeline.id}`)
-							}
-						>
-							<Play className="mr-2 h-4 w-4" />
-							View Details
+						<DropdownMenuItem asChild>
+							<Link to="/pipelines/$id" params={{ id: pipeline.id }}>
+								<Play className="mr-2 h-4 w-4" />
+								View Details
+							</Link>
 						</DropdownMenuItem>
 						<DropdownMenuItem
 							onClick={() => onRestart(pipeline.id)}
@@ -148,12 +154,27 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 	const [page, setPage] = useState(1);
 	const queryClient = useQueryClient();
 
-	const _params = { search, status, page, limit: DEFAULT_PAGE_SIZE };
-	void _params;
+	// Filters narrow the result set, so whatever page we were on is likely out
+	// of range -- filtering from page 3 would show an empty table.
+	//
+	// Adjusted during render rather than in an effect: an effect would let the
+	// query fire once with the stale page before the reset landed, costing an
+	// extra request and a flash of the wrong rows. This is React's documented
+	// pattern for reacting to a prop change.
+	const [prevFilters, setPrevFilters] = useState({ search, status });
+	if (prevFilters.search !== search || prevFilters.status !== status) {
+		setPrevFilters({ search, status });
+		setPage(1);
+	}
+
+	const params = { search, status, page, limit: DEFAULT_PAGE_SIZE };
 
 	const { data, isLoading, isError, error } = useQuery({
-		queryKey: ["pipelines", "list", { search, status, page }],
-		queryFn: () => pipelinesApi.list(),
+		queryKey: ["pipelines", "list", params],
+		queryFn: () => pipelinesApi.list(params),
+		// Keeps the previous page on screen while the next one loads instead of
+		// flashing the skeleton on every page/filter change.
+		placeholderData: (previous) => previous,
 	});
 
 	const restartMutation = useMutation({
@@ -181,12 +202,11 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 	};
 
 	const pipelines = data?.pipelines ?? [];
-	const pagination = {
-		page: 1,
-		total_pages: 1,
-		total: pipelines.length,
-		limit: DEFAULT_PAGE_SIZE,
-	};
+	// Derived from the server's own total, not from the length of the current
+	// page -- otherwise the pager can never show more than one page.
+	const total = data?.total ?? 0;
+	const limit = data?.limit ?? DEFAULT_PAGE_SIZE;
+	const totalPages = Math.max(1, Math.ceil(total / limit));
 
 	const handlePreviousPage = () => {
 		if (page > 1) {
@@ -195,7 +215,7 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 	};
 
 	const handleNextPage = () => {
-		if (pagination && page < pagination.total_pages) {
+		if (page < totalPages) {
 			setPage(page + 1);
 		}
 	};
@@ -259,12 +279,11 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 				</Table>
 			</div>
 
-			{pagination && pagination.total_pages > 1 && (
+			{totalPages > 1 && (
 				<div className="flex items-center justify-between">
 					<div className="text-sm text-muted-foreground">
-						Showing {(page - 1) * DEFAULT_PAGE_SIZE + 1} to{" "}
-						{Math.min(page * DEFAULT_PAGE_SIZE, pagination.total)} of{" "}
-						{pagination.total} pipelines
+						Showing {(page - 1) * limit + 1} to {Math.min(page * limit, total)}{" "}
+						of {total} pipelines
 					</div>
 					<div className="flex items-center gap-2">
 						<Button
@@ -277,13 +296,13 @@ export function PipelineTable({ search, status }: PipelineTableProps) {
 							Previous
 						</Button>
 						<div className="text-sm">
-							Page {page} of {pagination.total_pages}
+							Page {page} of {totalPages}
 						</div>
 						<Button
 							variant="outline"
 							size="sm"
 							onClick={handleNextPage}
-							disabled={page >= pagination.total_pages || isLoading}
+							disabled={page >= totalPages || isLoading}
 						>
 							Next
 							<ChevronRight className="h-4 w-4" />
