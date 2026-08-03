@@ -7,6 +7,7 @@ import {
 	OPERATION_TYPE_LABELS,
 	PROCESSOR_TYPE,
 	PROCESSOR_TYPE_LABELS,
+	type ProcessorType,
 } from "@/api/enums";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -29,6 +30,8 @@ import {
 } from "@/components/ui/select";
 import { deepMergeOptions } from "@/lib/processorMerge";
 import { cn } from "@/lib/utils";
+import type { NatsProtobufOptionsValue } from "./NatsProtobufOptions";
+import { NatsProtobufOptions } from "./NatsProtobufOptions";
 import type { ProcessorConfigShape } from "./optionsTemplates";
 import { TEMPLATES_BY_TYPE } from "./optionsTemplates";
 
@@ -39,6 +42,10 @@ interface ProcessorEditorProps {
 	onChange: (next: ProcessorConfig) => void;
 	onRemove: () => void;
 	index: number;
+	/** Schemas configured on the pipeline's source, for the nats/protobuf form. */
+	availableSchemas?: string[];
+	/** Discovered tables as `schema.table` (bare name for public). */
+	availableTables?: string[];
 }
 
 const OPERATION_ORDER = OPERATION_TYPE;
@@ -56,6 +63,8 @@ export function ProcessorEditor({
 	onChange,
 	onRemove,
 	index,
+	availableSchemas,
+	availableTables,
 }: ProcessorEditorProps) {
 	const [optionsText, setOptionsText] = useState<string>(() =>
 		JSON.stringify(value.options ?? {}, null, 2),
@@ -103,6 +112,17 @@ export function ProcessorEditor({
 
 	const templates = TEMPLATES_BY_TYPE[value.type] ?? [];
 
+	// A stored type outside PROCESSOR_TYPE -- an older config, or one written
+	// through the raw JSON editor -- must still appear in the dropdown.
+	// Otherwise the trigger renders blank and the next change to any other
+	// field saves that blank back, silently rewriting the processor's type.
+	const selectableTypes: string[] =
+		value.type && !PROCESSOR_TYPE.includes(value.type as ProcessorType)
+			? [...PROCESSOR_TYPE, value.type]
+			: [...PROCESSOR_TYPE];
+
+	const isNatsProtobuf = value.type === "nats/protobuf";
+
 	const updateName = (name: string) => {
 		onChange({ ...value, name });
 	};
@@ -140,10 +160,7 @@ export function ProcessorEditor({
 			value.options ?? {},
 			tplOptions ?? {},
 		) as ProcessorConfig["options"];
-		propagateOptions(
-			merged,
-			JSON.stringify(merged ?? {}, null, 2),
-		);
+		propagateOptions(merged, JSON.stringify(merged ?? {}, null, 2));
 	};
 
 	const loadTemplate = (tplOptions: ProcessorConfig["options"]) => {
@@ -188,9 +205,9 @@ export function ProcessorEditor({
 							<SelectValue placeholder="Type" />
 						</SelectTrigger>
 						<SelectContent>
-							{PROCESSOR_TYPE.map((t) => (
+							{selectableTypes.map((t) => (
 								<SelectItem key={t} value={t}>
-									{PROCESSOR_TYPE_LABELS[t] ?? t}
+									{PROCESSOR_TYPE_LABELS[t as ProcessorType] ?? t}
 								</SelectItem>
 							))}
 						</SelectContent>
@@ -255,8 +272,30 @@ export function ProcessorEditor({
 				</div>
 			</div>
 
+			{isNatsProtobuf && (
+				<div className="space-y-2">
+					<div className="text-sm font-medium">Transformer settings</div>
+					<NatsProtobufOptions
+						index={index}
+						value={(value.options ?? {}) as NatsProtobufOptionsValue}
+						onChange={(next) =>
+							// Route through the same propagation path as the JSON
+							// editor so the two stay in sync.
+							propagateOptions(
+								next as ProcessorConfig["options"],
+								JSON.stringify(next, null, 2),
+							)
+						}
+						availableSchemas={availableSchemas}
+						availableTables={availableTables}
+					/>
+				</div>
+			)}
+
 			<div className="space-y-2">
-				<div className="text-sm font-medium">Options</div>
+				<div className="text-sm font-medium">
+					{isNatsProtobuf ? "Options (raw)" : "Options"}
+				</div>
 				<div className="grid grid-cols-1 md:grid-cols-5 gap-3">
 					<div className="md:col-span-3">
 						<div
