@@ -396,17 +396,14 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 		pipelines = pipelines[start:end]
 	}
 
-	type PipelineListItem struct {
-		protocol.PipelineConfig
-		Status string `json:"status"`
-	}
-
-	var items []PipelineListItem
+	items := make([]json.RawMessage, 0, len(pipelines))
 	for _, pipe := range pipelines {
-		items = append(items, PipelineListItem{
-			PipelineConfig: pipe,
-			Status:         h.getPipelineStatusString(pipe.ID),
-		})
+		item, err := h.pipelineWithStatus(pipe)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		items = append(items, item)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -415,6 +412,36 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 		"page":      page,
 		"limit":     limit,
 	})
+}
+
+// pipelineWithStatus renders a pipeline config with its computed "status"
+// spliced in alongside the config fields.
+//
+// This deliberately does not use a struct embedding protocol.PipelineConfig.
+// PipelineConfig has a MarshalJSON method (internal/protocol/config_json.go,
+// which renders durations as "10s" rather than as nanosecond integers), and an
+// embedded type's MarshalJSON is promoted to the outer struct -- so an
+// embedding wrapper serialises as a bare PipelineConfig and silently drops
+// every sibling field, including Status. See list_pipelines_json_test.go.
+func (h *Handler) pipelineWithStatus(cfg protocol.PipelineConfig) (json.RawMessage, error) {
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	extra, err := json.Marshal(map[string]string{
+		"status": h.getPipelineStatusString(cfg.ID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// {"a":1} + {"status":"healthy"} -> {"a":1,"status":"healthy"}
+	merged := make([]byte, 0, len(encoded)+len(extra))
+	merged = append(merged, encoded[:len(encoded)-1]...)
+	merged = append(merged, ',')
+	merged = append(merged, extra[1:]...)
+	return merged, nil
 }
 
 func (h *Handler) getPipelineStatusString(id string) string {
@@ -630,7 +657,16 @@ func (h *Handler) GetPipeline(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, cfg)
+	// Include the computed status, matching ListPipelines. Without it the
+	// detail page had no way to show a pipeline's health and fell back to a
+	// hardcoded "Configured" badge.
+	item, err := h.pipelineWithStatus(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Data(http.StatusOK, "application/json; charset=utf-8", item)
 }
 
 // DeletePipeline deletes a pipeline.
@@ -682,7 +718,7 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 	}
 
 	statusMap := make(map[string]any)
-	tableStats := make(map[string]protocol.TableStats) // aggregated by table
+	tableStats := make(map[string]protocol.TableStats)           // aggregated by table
 	sinkStats := make(map[string]map[string]protocol.TableStats) // sinkID -> tableName -> stats
 
 	prefix := protocol.PipelineStatusPrefix(id)
@@ -1112,23 +1148,44 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 		rows, err := db.QueryContext(ctx,
 			"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = ANY($1) AND table_type = 'BASE TABLE'",
 			schemas)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var schema, tableName string
-				if err := rows.Scan(&schema, &tableName); err == nil {
-					// Filter out snapshot tables
-					if strings.Contains(tableName, "cdc_snapshot") {
-						continue
-					}
-					ref := protocol.TableRef{Schema: schema, Table: tableName}
-					tables = append(tables, protocol.TableMetadata{
-						ID:     ref.KeyToken(),
-						Name:   tableName,
-						Schema: ref.Schema,
-					})
+		if err != nil {
+			// Surface the failure instead of swallowing it. database/sql
+			// connects lazily, so openSourceDB above succeeds even when the
+			// source is unreachable and this query is where that first shows
+			// up. Reporting 200 with an empty list made "cannot reach the
+			// database" indistinguishable from "connected fine, no tables" --
+			// the discovery button just showed nothing. GetSourceSchema
+			// already answers 502 for the same condition.
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": fmt.Sprintf("table discovery failed: %v", err),
+			})
+			return
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var schema, tableName string
+			if err := rows.Scan(&schema, &tableName); err == nil {
+				// Filter out snapshot tables
+				if strings.Contains(tableName, "cdc_snapshot") {
+					continue
 				}
+				ref := protocol.TableRef{Schema: schema, Table: tableName}
+				tables = append(tables, protocol.TableMetadata{
+					ID:     ref.KeyToken(),
+					Name:   tableName,
+					Schema: ref.Schema,
+				})
 			}
+		}
+
+		// An error part-way through iteration would otherwise truncate the
+		// list silently.
+		if err := rows.Err(); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": fmt.Sprintf("table discovery failed: %v", err),
+			})
+			return
 		}
 	}
 
@@ -1515,6 +1572,13 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	}
 }
 
+const (
+	// dsnMask stands in for a sink password on every read path.
+	dsnMask = "***"
+	// dsnMaskEncoded is what net/url writes for dsnMask inside userinfo.
+	dsnMaskEncoded = "%2A%2A%2A"
+)
+
 func maskDSN(dsn string) string {
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -1523,8 +1587,15 @@ func maskDSN(dsn string) string {
 	if u.User != nil {
 		_, hasPassword := u.User.Password()
 		if hasPassword {
-			u.User = url.UserPassword(u.User.Username(), "***")
-			return u.String()
+			u.User = url.UserPassword(u.User.Username(), dsnMask)
+			// url.String() percent-encodes "*" in userinfo, so the mask went
+			// out as "%2A%2A%2A" and was shown to the operator that way in the
+			// sink list and the edit form. reconstructDSN still worked (Parse
+			// decodes it back), but a masked DSN nobody recognises invites
+			// hand-editing around it, which is how the real password gets
+			// clobbered. "*" is a sub-delim and legal unencoded in userinfo,
+			// so emitting it literally is valid and round-trips.
+			return strings.Replace(u.String(), dsnMaskEncoded, dsnMask, 1)
 		}
 	}
 	return dsn
@@ -1537,7 +1608,10 @@ func reconstructDSN(newDSN, oldDSN string) string {
 	}
 	if uNew.User != nil {
 		pass, hasPassword := uNew.User.Password()
-		if hasPassword && pass == "***" {
+		// Parse decodes userinfo, so this matches whether the client echoed
+		// back the literal "***" or the percent-encoded form older responses
+		// emitted.
+		if hasPassword && pass == dsnMask {
 			uOld, err := url.Parse(oldDSN)
 			if err == nil && uOld.User != nil {
 				oldPass, hasOldPassword := uOld.User.Password()

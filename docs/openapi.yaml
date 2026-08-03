@@ -568,6 +568,14 @@ paths:
         Returns all tables whose metadata has been discovered and
         persisted by the worker. Tables are filtered to those whose
         NATS KV key matches `*.sources.{id}.tables.*.metadata`.
+
+        When no metadata has been persisted yet, the API falls back to
+        querying `information_schema.tables` on the source directly. If
+        that query fails — most commonly because the source is
+        unreachable — the response is `502`, matching
+        `GET /sources/{id}/schema`. It is deliberately not a `200` with
+        an empty list, which made "cannot connect" indistinguishable
+        from "connected, no tables".
       operationId: listSourceTables
       responses:
         '200':
@@ -580,6 +588,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '502':
+          description: Live table discovery against the source failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /sources/test:
     post:

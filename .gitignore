@@ -21,3 +21,8 @@ logs
 
 .env*
 !.env.example
+
+# Playwright artifacts. e2e/.gitignore already covers the suite's own output;
+# these catch runs accidentally launched from a directory other than e2e/.
+test-results/
+playwright-report/
