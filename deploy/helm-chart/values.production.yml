@@ -100,7 +100,7 @@ api:
       kubernetes.io/elb.port: "443"
       kubernetes.io/elb.tls-certificate-ids: ef8353e34fcd412699b149970aca8995,ef8353e34fcd412699b149970aca8995
     hosts:
-      - host: cdc-api.daya.ai
+      - host: api-cdc.daya.ai
         paths:
           - path: /
             pathType: ImplementationSpecific
@@ -255,7 +255,7 @@ web:
       kubernetes.io/elb.port: "443"
       kubernetes.io/elb.tls-certificate-ids: ef8353e34fcd412699b149970aca8995,ef8353e34fcd412699b149970aca8995
     hosts:
-      - host: cdc-dashboard.daya.ai
+      - host: cdc.daya.ai
         paths:
           - path: /
             pathType: ImplementationSpecific
