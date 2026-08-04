@@ -37,8 +37,16 @@ spec:
           securityContext:
             {{- toYaml .Values.api.podSecurityContext | nindent 12 }}
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          # MUST be `command`, not `args`. The image sets
+          # ENTRYPOINT ["/app/worker"], and in Kubernetes `args` overrides CMD
+          # while `command` overrides ENTRYPOINT -- so `args: ["/app/api"]`
+          # executed `/app/worker /app/api`, i.e. the WORKER binary with the
+          # api path as an ignored argument. This pod then served health on
+          # HEALTH_PORT 8081 while its probes checked 8080, so liveness could
+          # never pass and the pod was SIGTERMed ~60s after every start
+          # (~25k restarts over 64 days before this was found).
           {{- if .Values.api.args }}
-          args:
+          command:
             {{- toYaml .Values.api.args | nindent 12 }}
           {{- end }}
           envFrom:

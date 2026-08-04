@@ -37,8 +37,14 @@ spec:
           securityContext:
             {{- toYaml .Values.worker.podSecurityContext | nindent 12 }}
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          # `command`, not `args` -- see the note in templates/api/deployments.yaml.
+          # This one was benign (ENTRYPOINT ["/app/worker"] + args ["/app/worker"]
+          # ran `/app/worker /app/worker`, which is still the right binary), which
+          # is exactly why the identical bug on the api deployment went unnoticed
+          # for 64 days. Fixed here too so the two stay consistent and neither
+          # silently depends on the ENTRYPOINT happening to match.
           {{- if .Values.worker.args }}
-          args:
+          command:
             {{- toYaml .Values.worker.args | nindent 12 }}
           {{- end }}
           envFrom:
