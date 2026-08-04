@@ -361,7 +361,7 @@ Sequencing rationale (TL;DR): Tier 0 must land before any production restart bec
 | T2-1 | SSRF in TestSource/Connection | `internal/api/handler.go` lines 1410-1490 | Resolve host and implement a custom `net.Dialer` with a `Control` callback that rejects loopback, link-local, and private RFC 1918 ranges, preventing DNS rebinding attacks. |
 | T2-2 | Missing HTTP timeouts | `cmd/api/main.go` lines 150-160 | Set ReadTimeout/WriteTimeout/IdleTimeout on `http.Server`. |
 | T2-3 | Silent decryption fallbacks | `internal/protocol/config.go` lines 270-300 | Return errors instead of falling through; fail-fast in bootstrap. |
-| T2-4 | Lossy type mapping (decimal/array) | `internal/sink/databend/sink.go` lines 200-235, 320-325; `docs/todos/lossy_type_mappings.md` | Map decimals to DECIMAL(38,9), arrays to VARIANT/ARRAY; expand Go primitive switch. |
+| T2-4 | Lossy type mapping (decimal/array) | `internal/sink/databend/sink.go` lines 200-235, 320-325 | **DONE (2026-08-04)** — decimals map to `DECIMAL(p,s)`, arrays to `VARIANT`; see `mapPgTypeToDatabend`. |
 | T2-5 | Patched upstream dep risk | `internal/vendor/go-pq-cdc/**` | Open upstream PRs; track patches in `internal/vendor/go-pq-cdc/PATCHES.md`; evaluate pglogrepl. |
 | T2-6 | Retry filter ignored | `internal/vendor/go-pq-cdc/internal/retry/retry.go` | Register `RetryIf(rc.If)` in options array inside `retry.go`'s `Do` method, and correct connection.go's check filter callback from `err == nil` to `err != nil`. |
 | T2-7 | Slice index overflow in pagination | `internal/api/handler.go` lines 285-345 | Cap `limit <= 100`; verify `start >= 0 && start <= total`. |
