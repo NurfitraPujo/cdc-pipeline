@@ -1,6 +1,6 @@
 # Holistic Code Review Remediation Plan
 
-Source: `summaries/architecture_review/holistic_code_review.md` and the 8 supporting subagent reports.
+Source: `summaries/architecture_review/holistic_code_review.md` and the 8 supporting subagent reports. <!-- hygiene:ignore -->
 
 This plan consolidates every finding from the review into prioritized, individually actionable tickets. Each item is scoped small enough to ship behind its own PR. Items are grouped by execution tier; within a tier, order matters where stated.
 
@@ -22,7 +22,7 @@ Sequencing rationale (TL;DR): Tier 0 must land before any production restart bec
 ## Tier 0 - Critical (block any prod restart until merged)
 
 ### T0-1. Fake Ack Loop Bypasses Flow Control (Data Loss)
-- **Source**: `summaries/architecture_review/subagent_postgres_source_findings.md` finding #1; `subagent_broker_stream_findings.md` #2; `holistic_code_review.md` critical #1.
+- **Source**: `summaries/architecture_review/subagent_postgres_source_findings.md` finding #1; `subagent_broker_stream_findings.md` #2; `holistic_code_review.md` critical #1. <!-- hygiene:ignore -->
 - **Files**: `internal/source/postgres/source.go` lines 140-180, 320-360.
 - **Problem (verified)**: `select { case <-s.ackChan: lc.Ack(); default: lc.Ack() }` advances the PostgreSQL slot LSN before the message is published to NATS or written to the sink. A crash here is permanent data loss.
 - **Fix plan**:

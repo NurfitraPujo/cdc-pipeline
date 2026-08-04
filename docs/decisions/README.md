@@ -49,15 +49,15 @@ code, and each cites the evidence it rests on. Where a rationale was inferred ra
 the ADR says so. [`rfc/RFC-001-Architecture-and-Design.md`](../../rfc/RFC-001-Architecture-and-Design.md)
 remains the broad architecture document; these ADRs complement it rather than replace it.
 
-**0018–0022** came out of `plans/cdc_custom_object_transform_remediation.md`'s WS-5/WS-6/WS-7
-remediation pass (see `summaries/ws5_ws6_ws7_implementation.md`). 0020 and 0021 record decisions
+**0018–0022** came out of `plans/cdc_custom_object_transform_remediation.md`'s WS-5/WS-6/WS-7 <!-- hygiene:ignore -->
+remediation pass (see `summaries/ws5_ws6_ws7_implementation.md`). 0020 and 0021 record decisions <!-- hygiene:ignore -->
 made earlier in that same effort (WS-4) but not yet written up as ADRs until this pass. 0022 records
 a fix made during Opus validation review of the WS-5/WS-6/WS-7 pass itself. 0023 came out of the
 following WS-1B/WS-2B/WS-4C/WS-10 pass (see
-`summaries/ws1b_ws2b_ws4c_ws10_implementation.md`). 0024 and 0025 close out WS-5's remaining
+`summaries/ws1b_ws2b_ws4c_ws10_implementation.md`). 0024 and 0025 close out WS-5's remaining <!-- hygiene:ignore -->
 resilience gaps (circuit breaker, transport-error classification, health-gated unsubscribe) and
 record the deliberate decision to skip subject-level authentication (see
-`summaries/ws5_resilience_completion.md`).
+`summaries/ws5_resilience_completion.md`). <!-- hygiene:ignore -->
 
 Several record a **known deviation between the decision and the current code** (notably 0014's
 unimplemented `type_conflict` state and 0017's msgp/JSON boundary violation). That is deliberate —

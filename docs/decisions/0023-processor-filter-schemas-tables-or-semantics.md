@@ -87,6 +87,6 @@ match, exactly as before.
 `internal/transformer/nats/protobuf_test.go`'s
 `TestMatchesFilter_SchemasAndTablesOR` pins both the WS-1B admit case and
 the single-filter-unaffected case. See
-`summaries/ws1b_ws2b_ws4c_ws10_implementation.md` (WS-1B section) for the
+`summaries/ws1b_ws2b_ws4c_ws10_implementation.md` (WS-1B section) for the <!-- hygiene:ignore -->
 verification method (disable-and-confirm-fails against real code, not just
 the assertion).

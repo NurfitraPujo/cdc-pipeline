@@ -108,6 +108,6 @@ consumer independently reconstructing "was this column really NULL," which is no
 ## More Information
 
 Full daya-core-facing contract is written out in
-`summaries/ws5_ws6_ws7_implementation.md`'s WS-7 section: what to read, what "absent + flagged"
+`summaries/ws5_ws6_ws7_implementation.md`'s WS-7 section: what to read, what "absent + flagged" <!-- hygiene:ignore -->
 must mean for the column-set-collapse null-fill, and that this repo did not change the wire/proto
 schema — only what it puts into the existing `ColumnKinds` field.

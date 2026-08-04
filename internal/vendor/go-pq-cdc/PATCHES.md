@@ -390,7 +390,7 @@ stream order.
 ## WS7-1: Surface TOAST-Elided Columns from `DecodeWithColumn` Instead of Silently Dropping Them
 
 **Upstream Issue**: N/A (internal requirement, tracked as
-`plans/cdc_custom_object_transform_remediation.md` WS-7; the pipeline-side half of a cross-repo
+`plans/cdc_custom_object_transform_remediation.md` WS-7; the pipeline-side half of a cross-repo <!-- hygiene:ignore -->
 blocking pair with daya-core's WS-4.5)
 
 **Files Modified**:
