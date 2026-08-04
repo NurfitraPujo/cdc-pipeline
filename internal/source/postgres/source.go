@@ -1256,7 +1256,7 @@ func (s *PostgresSource) persistWatermark(wm uint64) {
 	}
 
 	cp := protocol.Checkpoint{IngressLSN: wm, Status: "ACTIVE", UpdatedAt: time.Now().UTC()}
-	data, err := cp.MarshalMsg(nil)
+	data, err := protocol.MarshalState(&cp)
 	if err != nil {
 		log.Debug().Err(err).Msg("persistWatermark: failed to marshal checkpoint")
 		return
