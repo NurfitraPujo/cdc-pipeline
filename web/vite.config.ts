@@ -19,7 +19,9 @@ const config = defineConfig({
 	},
 	plugins: [
 		devtools(),
-		cloudflare({ viteEnvironment: { name: "ssr" } }),
+		...(process.env.BUILD_TARGET === "cloudflare"
+			? [cloudflare({ viteEnvironment: { name: "ssr" } })]
+			: []),
 		tsconfigPaths({ projects: ["./tsconfig.json"] }),
 		tailwindcss(),
 		tanstackStart(),
