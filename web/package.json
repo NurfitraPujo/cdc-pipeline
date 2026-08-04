@@ -7,15 +7,18 @@
   },
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "vite build",
+    "build": "pnpm run clean && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "pnpm run build:cloudflare && wrangler deploy",
     "format": "biome format",
     "lint": "biome lint",
     "type-check": "tsc --noEmit",
     "check": "biome check && tsc --noEmit",
-    "generate:api": "openapi-typescript ../docs/openapi.yaml -o ./src/api/schema.d.ts"
+    "generate:api": "openapi-typescript ../docs/openapi.yaml -o ./src/api/schema.d.ts",
+    "build:cloudflare": "pnpm run clean && BUILD_TARGET=cloudflare vite build",
+    "start": "node server-node.mjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.26.0",
