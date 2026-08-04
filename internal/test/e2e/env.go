@@ -37,6 +37,56 @@ const testEncryptionKey = "cdc_pipeline_e2e_key_padded_32AA" // exactly 32 bytes
 
 func init() {
 	os.Setenv("ENCRYPTION_KEY", testEncryptionKey)
+	truncateLogFile(logFilePath)
+}
+
+// logFilePath mirrors the path logger.Init builds. Kept as a constant so the
+// truncation and the logging agree, and so tests can point at a temp file.
+const logFilePath = "logs/app.log"
+
+// truncateLogFile empties the file logger.Init appends to, once per test
+// binary, before anything has opened it.
+//
+// logger.Init opens logs/app.log with O_APPEND and nothing rotates or caps it,
+// so every e2e run used to pile onto the last one. A day of runs reached 38 GB
+// and broke an unrelated container build with "no space left on device"; the
+// file is gitignored, so it never shows up in `git status` while it grows.
+// Truncating here bounds it to a single `go test` invocation's output --
+// exactly the window anyone debugging a failure cares about.
+//
+// This runs in package init rather than Setup() so it happens once per process
+// and before the first log line, no matter which test opens the environment
+// first. A failure to truncate is not fatal: the suite is still runnable, it
+// just keeps the old content, so we warn on stderr and carry on.
+func truncateLogFile(logFile string) {
+	info, err := os.Stat(logFile)
+	if err != nil {
+		return // no previous run, or unreadable -- logger.Init will create it
+	}
+
+	if err := os.Truncate(logFile, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: could not truncate %s (%v); it will keep growing\n", logFile, err)
+		return
+	}
+
+	if info.Size() > 0 {
+		fmt.Fprintf(os.Stderr, "e2e: truncated %s (was %s) from the previous run\n", logFile, humanBytes(info.Size()))
+	}
+}
+
+// humanBytes renders a byte count in the largest unit that keeps it under 1024,
+// so the truncation notice reads "12.1 GB" rather than "12127651152".
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // encryptForKV wraps crypto.Encrypt and fails the test on error. E2E configs
