@@ -1,4 +1,18 @@
-{{- if .Values.worker.alerts.enabled }}
+{{- if and .Values.worker.alerts.enabled .Values.worker.alerts.prometheusRule.enabled }}
+# NOTE (deploy): this CRD does NOT apply on the daya CCE cluster -- there is
+# no Prometheus Operator there (`kubectl get crd | grep monitoring.coreos.com`
+# returns nothing), so rendering it fails the ArgoCD sync with "could not find
+# monitoring.coreos.com/PrometheusRule". That is why prometheusRule.enabled is
+# false in both values files; the same thing bit daya-core (see its
+# deploy/prometheus/agents-outbox-notify-runbook.md).
+#
+# The rules below are kept here as the reviewable source of truth. What
+# prometheus-server actually loads is the copy in the daya-infra repo at
+# k8s/hcs/argocd/cluster/prometheus/helm-values.production.yaml
+# (serverFiles.alerting_rules.yml) -- keep the two in sync by hand; ArgoCD
+# reverts direct ConfigMap edits. Scraping likewise comes from that file's
+# `extraScrapeConfigs`, not from anything in this chart.
+#
 # WI-5a (plan 01a §3): slot-lag observability. Under ManualCommit -- gated by
 # the `strict_ack` flag (CDC_STRICT_ACK, internal/source/postgres/source.go:
 # resolveStrictAck, defaults ON in dev/test and OFF in prod) -- the
@@ -7,10 +21,13 @@
 # PostgreSQL retains WAL without bound on the SOURCE primary, for any
 # pipeline that has strict_ack turned on. That is the correct at-least-once
 # trade (loss -> visible backpressure), but it is only safe to operate with
-# these alerts live -- and until worker.alerts.enabled is true here, it is
-# NOT visible. Per the RUNBOOK's deploy order, worker.alerts.enabled: true
-# is a precondition for flipping strict_ack on for any pipeline in this
-# environment, not a follow-up.
+# these alerts live. Per the RUNBOOK's deploy order, live alerting is a
+# precondition for flipping strict_ack on for any pipeline in this
+# environment, not a follow-up -- and "live" means all three of: the
+# daya-infra scrape job collecting cdc_source_* from this namespace, the
+# rule group loaded via serverFiles.alerting_rules.yml, and a Grafana bridge
+# rule matching ALERTS{alertname=~"CDCSource.*"} so a firing alert actually
+# reaches a human. Enabling anything in this chart alone does NOT achieve it.
 #
 # See deploy/helm-chart/RUNBOOK.md for the full risk statement, the
 # deploy-order checklist, and the three distinct failure modes these

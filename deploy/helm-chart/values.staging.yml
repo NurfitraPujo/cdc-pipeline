@@ -118,17 +118,21 @@ api:
 
 worker:
   name: cdc-worker
-  # WI-5a (plan 01a §3): PrometheusRule for cdc_source_slot_lag_bytes and
-  # friends. Requires the prometheus-operator CRDs. Enabled by default in
-  # staging so the metrics/alerting are proven out here ahead of the
-  # `strict_ack` bake period (CDC_STRICT_ACK,
-  # internal/source/postgres/source.go: resolveStrictAck) -- staging's
-  # default (no CDC_STRICT_ACK set, ENV != production) is `strict_ack` ON,
-  # so the slot-freezing behaviour this covers IS live here today, unlike
-  # in values.production.yml. See "Status as of this commit" in
+  # WI-5a (plan 01a §3): alert definitions for cdc_source_slot_lag_bytes and
+  # friends. Staging's default (no CDC_STRICT_ACK set, ENV != production) is
+  # `strict_ack` ON, so the slot-freezing behaviour these cover IS live here
+  # today, unlike in values.production.yml. See "Status as of this commit" in
   # deploy/helm-chart/RUNBOOK.md.
   alerts:
     enabled: true
+    # MUST stay false: the CCE cluster has no Prometheus Operator, so the
+    # PrometheusRule CRD does not exist and rendering it breaks the ArgoCD
+    # sync. The rules are loaded instead from the daya-infra repo
+    # (k8s/hcs/argocd/cluster/prometheus/helm-values.production.yaml,
+    # serverFiles.alerting_rules.yml). Only flip this true if the operator is
+    # ever installed AND the daya-infra copy is removed, or alerts double-fire.
+    prometheusRule:
+      enabled: false
     ruleSelectorLabels: {}
     slotLag:
       warnBytes: 536870912   # 512MiB

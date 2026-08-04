@@ -123,12 +123,17 @@ worker:
   # OFF here since no CDC_STRICT_ACK is set and this is a production
   # environment -- production does NOT yet carry the WAL-retention risk.
   # `enabled: false` here is therefore correct FOR NOW, but it is a
-  # precondition, not a follow-up: per the RUNBOOK's "Deploy order", this
-  # MUST be flipped to `true` (once the prometheus-operator CRDs and alert
-  # routing are confirmed for this cluster) BEFORE CDC_STRICT_ACK is ever
-  # set to true for any pipeline in this environment.
+  # precondition, not a follow-up: per the RUNBOOK's "Deploy order", alerting
+  # for this namespace MUST be live BEFORE CDC_STRICT_ACK is ever set to true
+  # for any pipeline in this environment. "Live" is NOT achieved by flipping
+  # this flag -- it means the daya-infra scrape job + rule group + Grafana
+  # bridge rule are all in place for cdc-pipeline-production.
   alerts:
     enabled: false
+    # MUST stay false -- no Prometheus Operator on the CCE cluster; see the
+    # note in values.staging.yml. Rules live in daya-infra.
+    prometheusRule:
+      enabled: false
     ruleSelectorLabels: {}
     slotLag:
       warnBytes: 536870912   # 512MiB
