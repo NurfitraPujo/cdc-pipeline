@@ -74,9 +74,9 @@ api:
       protocol: TCP
   services:
     - name: cdc-api
-      port: 31080
+      port: 31314
       type: NodePort
-      nodePort: 31080
+      nodePort: 31314
   probe:
     livenessProbe:
       httpGet:
@@ -94,8 +94,11 @@ api:
   ingress:
     enabled: true
     annotations:
+      kubernetes.io/elb.acl-id: ""
       kubernetes.io/elb.class: union
+      kubernetes.io/elb.id: 99ed1830-9f66-4ba4-84e2-3d1b819eaf55
       kubernetes.io/elb.port: "443"
+      kubernetes.io/elb.tls-certificate-ids: ef8353e34fcd412699b149970aca8995,ef8353e34fcd412699b149970aca8995
     hosts:
       - host: cdc-api.daya.ai
         paths:
@@ -105,7 +108,7 @@ api:
               service:
                 name: cdc-api
                 port:
-                  number: 31080
+                  number: 31314
   env:
     configmap:
       PORT: "8080"
@@ -136,14 +139,14 @@ worker:
       enabled: false
     ruleSelectorLabels: {}
     slotLag:
-      warnBytes: 536870912   # 512MiB
+      warnBytes: 536870912 # 512MiB
       warnFor: 15m
-      pageBytes: 5368709120  # 5GiB
+      pageBytes: 5368709120 # 5GiB
       pageFor: 15m
     pendingStuck:
       for: 10m
     probeStale:
-      staleAfterSeconds: 120  # 8x the 15s probe interval
+      staleAfterSeconds: 120 # 8x the 15s probe interval
       for: 2m
   args: ["/app/worker"]
   image:
@@ -240,14 +243,17 @@ web:
       protocol: TCP
   services:
     - name: cdc-web-dashboard
-      port: 31090
+      port: 31315
       type: NodePort
-      nodePort: 31090
+      nodePort: 31315
   ingress:
     enabled: true
     annotations:
+      kubernetes.io/elb.acl-id: ""
       kubernetes.io/elb.class: union
+      kubernetes.io/elb.id: 99ed1830-9f66-4ba4-84e2-3d1b819eaf55
       kubernetes.io/elb.port: "443"
+      kubernetes.io/elb.tls-certificate-ids: ef8353e34fcd412699b149970aca8995,ef8353e34fcd412699b149970aca8995
     hosts:
       - host: cdc-dashboard.daya.ai
         paths:
@@ -257,7 +263,7 @@ web:
               service:
                 name: cdc-web-dashboard
                 port:
-                  number: 31090
+                  number: 31315
   env:
     configmap:
       VITE_API_BASE_URL: "https://cdc-api.daya.ai/api/v1"

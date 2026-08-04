@@ -109,8 +109,6 @@ api:
                 name: cdc-api
                 port:
                   number: 31121
-            property:
-              ingress.beta.kubernetes.io/url-match-mode: STARTS_WITH
   env:
     configmap:
       PORT: "8080"
@@ -135,14 +133,14 @@ worker:
       enabled: false
     ruleSelectorLabels: {}
     slotLag:
-      warnBytes: 536870912   # 512MiB
+      warnBytes: 536870912 # 512MiB
       warnFor: 15m
-      pageBytes: 5368709120  # 5GiB
+      pageBytes: 5368709120 # 5GiB
       pageFor: 15m
     pendingStuck:
       for: 10m
     probeStale:
-      staleAfterSeconds: 120  # 8x the 15s probe interval
+      staleAfterSeconds: 120 # 8x the 15s probe interval
       for: 2m
   args: ["/app/worker"]
   image:
@@ -260,8 +258,6 @@ web:
                 name: cdc-web-dashboard
                 port:
                   number: 31122
-            property:
-              ingress.beta.kubernetes.io/url-match-mode: STARTS_WITH
   env:
     configmap:
       VITE_API_BASE_URL: "https://cdc-api-staging.daya.ai/api/v1"
