@@ -8,7 +8,7 @@ missing UI have since been fixed, and the Playwright suite was repaired and
 extended. The items below were deliberately deferred — none of them block a
 working control plane, but each is a real gap.
 
-The long-form audit lives at `summaries/frontend_control_plane_audit.md`, which <!-- hygiene:ignore -->
+The long-form audit lives at `summaries/frontend_control_plane_audit.md`, which
 is a local working note: `summaries/` is gitignored, so that file is not in the
 repository. Everything needed to act on the items below is restated here.
 

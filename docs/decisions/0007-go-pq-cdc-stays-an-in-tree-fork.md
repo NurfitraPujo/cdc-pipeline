@@ -16,7 +16,7 @@ It is not a vendor copy but a **fork**: no submodule, no upstream remote, syncin
 Multi-schema support required two further patches, raising the count to eight. That prompted the
 question of whether to promote it to a real fork repository now.
 
-**Update (2026-08-02)**: WS-7 (the TOAST hazard, `plans/cdc_custom_object_transform_remediation.md`) <!-- hygiene:ignore -->
+**Update (2026-08-02)**: WS-7 (the TOAST hazard, `plans/cdc_custom_object_transform_remediation.md`)
 required a ninth patch, `WS7-1`, to `Data.DecodeWithColumn`/`format.Update` — see
 `internal/vendor/go-pq-cdc/PATCHES.md`'s WS7-1 entry and
 `docs/decisions/0018-toast-unchanged-signalled-via-columnkinds.md` for the pipeline-side contract

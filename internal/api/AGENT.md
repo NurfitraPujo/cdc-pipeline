@@ -14,7 +14,7 @@ The `internal/api` package implements the RESTful Control Plane for the CDC Data
 
 ## Web Frontend
 
-The web dashboard is planned but not yet developed. See `web/plans/featureplan.md` for the full requirements specification. The planned dashboard will include: <!-- hygiene:ignore -->
+The web dashboard is planned but not yet developed. See `web/plans/featureplan.md` for the full requirements specification. The planned dashboard will include:
 - Authentication (Login Page)
 - Home Dashboard with summary cards and gauges
 - Global Configuration editor

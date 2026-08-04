@@ -1,6 +1,6 @@
 # Follow-ups surfaced by the CDC custom-object transform review
 
-Out of scope for `plans/cdc_custom_object_transform_remediation.md` — recorded <!-- hygiene:ignore -->
+Out of scope for `plans/cdc_custom_object_transform_remediation.md` — recorded
 here rather than fixed as part of that change. Each is independent.
 
 See also `docs/todos/lossy_type_mappings.md` and
