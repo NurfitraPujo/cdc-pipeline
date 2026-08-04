@@ -39,6 +39,11 @@ linters:
         main:
           allow:
             - $gostd
+            # $gostd does not cover these; internal/protocol/state_boundary_test.go
+            # parses the tree to enforce the ADR-0017 KV encoding boundary.
+            - go/ast
+            - go/parser
+            - go/token
             - github.com/NurfitraPujo/cdc-pipeline
             - github.com/ThreeDotsLabs/watermill
             - github.com/ThreeDotsLabs/watermill/message

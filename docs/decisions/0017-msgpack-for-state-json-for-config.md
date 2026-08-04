@@ -46,14 +46,38 @@ from `config.example.yaml`. Structs that are API-only carry **no** `msg` tag at 
 
 * Good: the hot path pays no reflection or string-key cost.
 * Good: config stays inspectable and hand-editable in KV.
-* Bad: **the boundary is a convention, not a type-level guarantee — and it is currently violated.**
-  `TableStats` is written to the same KV key as JSON in one place
-  (`internal/engine/consumer.go:553`) and as msgp in two others (`:749`, `:874`), and the API
-  decodes msgp-written `Checkpoint`/`TableStats` with `json.Unmarshal` under an `err == nil` guard
-  (`internal/api/handler.go:698,704,1482,1488`), so it silently skips them. Verified experimentally:
-  `json.Unmarshal` on msgp bytes returns an `invalid character` error and leaves the struct
-  zero-valued. Per-table stats and checkpoints are therefore absent from the status API. Tracked
-  separately — do not read this ADR as blessing the current state.
+* Bad: the boundary is a convention, not a type-level guarantee. It **was** violated: `TableStats`
+  was written to the same KV key as JSON in one place (`internal/engine/consumer.go:553`) and as
+  msgp in two others, and the API decoded msgp-written `Checkpoint`/`TableStats` with
+  `json.Unmarshal` under an `err == nil` guard, silently skipping them — so per-table stats and
+  checkpoints were absent from the status API and `TotalSynced` reset on every restart.
+  **Fixed:** every state writer and reader now goes through `protocol.MarshalState` /
+  `protocol.UnmarshalState`, decode failures are logged instead of swallowed, and
+  `internal/engine/state_encoding_test.go` pins writer/reader agreement by piping the bytes the
+  real writers `Put` into the real reader's `Get`.
+* The boundary is now **checked**, if not type-enforced:
+  `internal/protocol/state_boundary_test.go` fails the build on any
+  `json.Unmarshal(entry.Value(), &x)` where `x` is a state type, naming the file, line and this
+  ADR. It keys on the `.Value()` KV accessor, so JSON-encoding a `TableStats` into an HTTP
+  response — which is legitimate and common — stays legal. A blanket ban on JSON for these types
+  would have been wrong for exactly that reason.
+* The write side is guarded too. `TestStateKeysAreWrittenWithMarshalState` requires any value
+  `Put` under a state key (`TableStatsKey`, `IngressCheckpointKey`, `EgressCheckpointKey`,
+  `SourceWatermarkKey`) to come from `MarshalState`. It is an allowlist rather than a ban on
+  `json.Marshal`, so a raw `MarshalMsg` — correct bytes today, but bypassing the one chokepoint —
+  fails too. Adding it surfaced four such writers (three in `producer.go`, one in
+  `source/postgres/source.go`), now converted.
+* **Fixed:** `TableMetadataKey` was written as `SchemaMetadata` and read as `TableMetadata` — a
+  cross-*type* split rather than a cross-encoding one. The two disagree on `columns` (a
+  name→type object versus a `[]string`), so the read failed and was silently skipped by the same
+  `err == nil` idiom, and the source-tables endpoint returned nothing. The discovery path now
+  writes a real `TableMetadata` via `tableMetadataFromSchema`, with columns sorted so `Columns`
+  and `Types` stay positionally aligned.
+* Still unguarded: cross-type mismatches in general. The write guard checks *how* a value is
+  encoded, not *which struct* goes under a key, so a future writer could still put the wrong type
+  under the right key. `SchemaEvolutionKey` is the live example — `persistEvoState` writes a
+  JSON `tableEvolution` to it while `ConfigManager.UpdateSchemaStateCAS`/`GetSchemaState` use
+  msgp `SchemaEvolutionState`. Not currently a bug only because the latter pair has no callers.
 * Bad: debugging KV state requires a msgpack decoder.
 * Bad: two sets of tags per struct is easy to get wrong, and nothing enforces that a new field gains
   both.
@@ -72,6 +96,13 @@ from `config.example.yaml`. Structs that are API-only carry **no** `msg` tag at 
 
 ## More Information
 
-A durable fix for the violation would make the boundary explicit rather than remembered — for
-example distinct `putState`/`getState` (msgp) and `putConfig`/`getConfig` (JSON) helpers, so the
-encoding is chosen by the call site's type rather than by the author's memory.
+The fix took the shape this section proposed: `protocol.MarshalState`/`protocol.UnmarshalState`
+(`internal/protocol/statecodec.go`) make the encoding a property of the helper rather than of the
+author's memory. They are deliberately *not* KV-level `putState`/`getState` wrappers — the KV
+handle is `nats.KeyValue` throughout, and wrapping it would have been a much wider change than the
+defect warranted.
+
+`UnmarshalState` also accepts JSON, sniffed by leading byte, so state written before the encodings
+were unified still decodes. Per §0 of `MULTI_SCHEMA_PLAN.md` this deployment has no production data
+to preserve, so that fallback is belt-and-braces rather than a migration requirement; it can be
+dropped once no pre-fix KV state remains.

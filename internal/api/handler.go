@@ -237,7 +237,9 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 
 		if entry, err := h.kv.Get(key); err == nil {
 			var st protocol.TableStats
-			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+			if err := protocol.UnmarshalState(entry.Value(), &st); err != nil {
+				log.Error().Err(err).Str("key", key).Msg("Failed to decode table stats; excluded from summary totals")
+			} else {
 				if _, ok := aggStats[info.PipelineID]; !ok {
 					aggStats[info.PipelineID] = make(map[string]protocol.TableStats)
 				}
@@ -731,13 +733,17 @@ func (h *Handler) GetPipelineStatus(c *gin.Context) {
 
 			if strings.HasSuffix(key, "_checkpoint") {
 				var cp protocol.Checkpoint
-				if err := json.Unmarshal(entry.Value(), &cp); err == nil {
+				if err := protocol.UnmarshalState(entry.Value(), &cp); err != nil {
+					log.Error().Err(err).Str("key", key).Msg("Failed to decode checkpoint; omitting from status")
+				} else {
 					statusMap[key] = cp
 				}
 			} else if strings.HasSuffix(key, ".stats") {
 				info := protocol.ParseTableStatsKey(key)
 				var st protocol.TableStats
-				if err := json.Unmarshal(entry.Value(), &st); err == nil {
+				if err := protocol.UnmarshalState(entry.Value(), &st); err != nil {
+					log.Error().Err(err).Str("key", key).Msg("Failed to decode table stats; omitting from status")
+				} else {
 					// Raw map for backward compatibility
 					statusMap[key] = st
 
@@ -1536,13 +1542,15 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 
 			if strings.HasSuffix(key, "_checkpoint") {
 				var cp protocol.Checkpoint
-				if err := json.Unmarshal(entry.Value(), &cp); err != nil {
+				if err := protocol.UnmarshalState(entry.Value(), &cp); err != nil {
+					log.Error().Err(err).Str("key", key).Msg("Failed to decode checkpoint; omitting from state stream")
 					continue
 				}
 				data = cp
 			} else if strings.HasSuffix(key, ".stats") {
 				var st protocol.TableStats
-				if err := json.Unmarshal(entry.Value(), &st); err != nil {
+				if err := protocol.UnmarshalState(entry.Value(), &st); err != nil {
+					log.Error().Err(err).Str("key", key).Msg("Failed to decode table stats; omitting from state stream")
 					continue
 				}
 				data = st

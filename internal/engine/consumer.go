@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -134,7 +133,9 @@ func (c *Consumer) LoadStats(sourceID string, tables []string) {
 		entry, err := c.kv.Get(key)
 		if err == nil {
 			var st protocol.TableStats
-			if err := json.Unmarshal(entry.Value(), &st); err == nil {
+			if err := protocol.UnmarshalState(entry.Value(), &st); err != nil {
+				log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("key", key).Msg("Failed to decode restored table stats; TotalSynced will restart from zero for this table")
+			} else {
 				c.stats[sourceID+"."+ref.KeyToken()] = &st
 			}
 		}
@@ -591,7 +592,7 @@ func (c *Consumer) updateTableError(sourceID string, ref protocol.TableRef) {
 	s.UpdatedAt = time.Now()
 
 	metrics.SyncErrors.WithLabelValues(c.pipelineID, sourceID, ref.String()).Inc()
-	statsData, _ := json.Marshal(s)
+	statsData, _ := protocol.MarshalState(s)
 	statsKey := protocol.TableStatsKey(c.pipelineID, sourceID, c.sinkID, ref)
 	if _, err := c.kv.Put(statsKey, statsData); err != nil {
 		log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", ref.Table).Msg("Failed to update table stats")
@@ -788,7 +789,7 @@ func (c *Consumer) handleSinkError(ctx context.Context, batch []protocol.Message
 		s.UpdatedAt = time.Now()
 
 		metrics.SyncErrors.WithLabelValues(c.pipelineID, m.SourceID, msgTableRef(m).String()).Inc()
-		statsData, _ := s.MarshalMsg(nil)
+		statsData, _ := protocol.MarshalState(s)
 		statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 		if _, err := c.kv.Put(statsKey, statsData); err != nil {
 			log.Error().Err(err).Str("pipeline_id", c.pipelineID).Str("table", m.Table).Msg("Failed to update table stats")
@@ -914,7 +915,7 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 				Status:    "ACTIVE",
 				UpdatedAt: now,
 			}
-			cpData, err := checkpoint.MarshalMsg(nil)
+			cpData, err := protocol.MarshalState(&checkpoint)
 			if err == nil {
 				cpKey := protocol.EgressCheckpointKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 				if _, err := c.kv.Put(cpKey, cpData); err != nil {
@@ -943,7 +944,7 @@ func (c *Consumer) updateStats(batch []protocol.Message) {
 
 		metrics.PipelineLag.WithLabelValues(c.pipelineID, m.SourceID, msgTableRef(m).String()).Set(float64(s.LagMS))
 
-		statsData, err := s.MarshalMsg(nil)
+		statsData, err := protocol.MarshalState(s)
 		if err == nil {
 			statsKey := protocol.TableStatsKey(c.pipelineID, m.SourceID, c.sinkID, msgTableRef(m))
 			if _, err := c.kv.Put(statsKey, statsData); err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +91,46 @@ func tableRefFromConfigEntry(s string) protocol.TableRef {
 // messages that predate the field, per NormalizeSchema's single rule.
 func msgTableRef(m protocol.Message) protocol.TableRef {
 	return protocol.TableRef{Schema: protocol.NormalizeSchema(m.TableSchema), Table: m.Table}
+}
+
+// tableMetadataFromSchema converts the message-side *SchemaMetadata into the
+// protocol.TableMetadata that TableMetadataKey is read back as
+// (api/handler.go ListSourceTables).
+//
+// These are different types with incompatible JSON: SchemaMetadata carries
+// columns as a name->type map, TableMetadata as two parallel slices. Writing
+// the former under this key made every read fail with "cannot unmarshal object
+// into Go struct field TableMetadata.columns of type []string", and the
+// reader's `err == nil` guard skipped it silently -- so the endpoint returned
+// no tables at all.
+//
+// Columns are emitted in sorted order: Columns and Types are positional, so a
+// map's randomised range order would both misalign them and rewrite the blob
+// on every discovery.
+func tableMetadataFromSchema(ref protocol.TableRef, s *protocol.SchemaMetadata) protocol.TableMetadata {
+	meta := protocol.TableMetadata{
+		ID:     ref.KeyToken(),
+		Name:   ref.Table,
+		Schema: protocol.NormalizeSchema(ref.Schema),
+	}
+	if s == nil {
+		return meta
+	}
+
+	names := make([]string, 0, len(s.Columns))
+	for name := range s.Columns {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	types := make([]string, len(names))
+	for i, name := range names {
+		types[i] = s.Columns[name]
+	}
+	meta.Columns = names
+	meta.Types = types
+	meta.PKColumns = s.PKColumns
+	return meta
 }
 
 type producerCircuitBreaker interface {
@@ -456,7 +497,7 @@ func (p *Producer) Run(ctx context.Context, srcConfig protocol.SourceConfig, che
 						Status:     "ACTIVE",
 						UpdatedAt:  time.Now(),
 					}
-					cpData, err := cp.MarshalMsg(nil)
+					cpData, err := protocol.MarshalState(&cp)
 					if err == nil {
 						key := protocol.IngressCheckpointKey(p.pipelineID, m.SourceID, msgTableRef(m))
 						if _, err := p.kv.Put(key, cpData); err != nil {
@@ -1198,7 +1239,7 @@ func (p *Producer) handleDiscovery(ctx context.Context, m protocol.Message) {
 
 		// 1. Update table metadata in KV
 		metaKey := protocol.TableMetadataKey(p.pipelineID, m.SourceID, ref)
-		metaData, err := json.Marshal(m.Schema)
+		metaData, err := json.Marshal(tableMetadataFromSchema(ref, m.Schema))
 		if err == nil {
 			if _, err := p.kv.Put(metaKey, metaData); err != nil {
 				log.Error().Err(err).Str("pipeline_id", p.pipelineID).Msg("Error updating table metadata")
@@ -1582,7 +1623,7 @@ func (p *Producer) performChunkedSnapshot(sourceID string, ref protocol.TableRef
 				Status:     "Snapshotting",
 				UpdatedAt:  time.Now(),
 			}
-			cpData, err := cp.MarshalMsg(nil)
+			cpData, err := protocol.MarshalState(&cp)
 			if err == nil {
 				if _, err := p.kv.Put(cpKey, cpData); err != nil {
 					log.Error().Err(err).Str("table", tableName).Msg("Failed to persist snapshot checkpoint")
@@ -1610,7 +1651,7 @@ func (p *Producer) performChunkedSnapshot(sourceID string, ref protocol.TableRef
 		Status:     "ACTIVE",
 		UpdatedAt:  time.Now(),
 	}
-	if cpData, err := cp.MarshalMsg(nil); err == nil {
+	if cpData, err := protocol.MarshalState(&cp); err == nil {
 		_, _ = p.kv.Put(cpKey, cpData)
 	}
 

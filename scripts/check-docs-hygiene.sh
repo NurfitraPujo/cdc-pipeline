@@ -11,7 +11,10 @@
 # Checks:
 #   1. Every `path/to/file.ext:NNN` cited in Markdown points at a file that
 #      exists and actually has that many lines.
-#   2. Every backtick-quoted repo path cited in Markdown exists.
+#   2. Every backtick-quoted repo path cited in Markdown exists. Citations into
+#      gitignored paths (plans/, summaries/) are reported as unverifiable rather
+#      than failed -- they are real on the author's machine and absent in a clean
+#      checkout, so failing would demand a hygiene: marker on every one forever.
 #   3. Every ADR cross-link resolves.
 #   4. Every ADR file appears in the ADR index, and vice versa.
 #   5. Generated swagger matches the source annotations (skipped if `swag` is
@@ -57,7 +60,7 @@ echo "🔍 Docs hygiene sensor (${#DOCS[@]} markdown files)"
 
 # ---------------------------------------------------------------- 1 & 2
 MAP_OUT=$(python3 - "${DOCS[@]}" <<'PY'
-import os, re, sys
+import os, re, subprocess, sys
 docs = sys.argv[1:]
 
 # NOTE: alternation is ordered, so longer suffixes MUST come first -- with
@@ -69,6 +72,10 @@ PATH_RE = re.compile(r'`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_.-]+\.(?:go|md|
 # not exist yet ("create docs/runbooks/foo.md"), and an ADR may cite a path that
 # was deliberately removed. Marking the line is a deliberate, greppable act --
 # unlike a blanket directory exclusion, which silently stops checking everything.
+#
+# It is NOT the mechanism for citing plans/ or summaries/. Those are gitignored,
+# so every such citation would need a marker forever -- a tax with no signal.
+# See gitignored() below: git decides, and the count is always reported.
 IGNORE_RE = re.compile(r'hygiene:(planned|ignore)')
 
 def lc(p):
@@ -77,7 +84,29 @@ def lc(p):
     except OSError:
         return None
 
-bad = []
+def gitignored(paths):
+    """Subset of paths that .gitignore excludes.
+
+    A citation into an ignored path cannot be checked in a clean checkout --
+    the target is real on the author's machine and absent in CI. That is
+    UNVERIFIABLE, not stale, and failing on it would force a hygiene: marker
+    onto every line that cites plans/ or summaries/ forever.
+
+    This is deliberately narrower than a hardcoded directory list: it asks git,
+    so it tracks .gitignore instead of drifting from it, and a citation that
+    is merely wrong still fails.
+    """
+    if not paths:
+        return set()
+    try:
+        p = subprocess.run(["git", "check-ignore", "--stdin"],
+                           input="\n".join(paths), capture_output=True,
+                           text=True, check=False)
+    except OSError:
+        return set()
+    return {l.strip() for l in p.stdout.splitlines() if l.strip()}
+
+bad, missing = [], []
 for doc in docs:
     base = os.path.dirname(doc)
     try:
@@ -100,21 +129,43 @@ for doc in docs:
             )
             hit = next((c for c in cands if os.path.isfile(c)), None)
             if hit is None:
-                bad.append(f"{doc}:{i}: cites `{raw}` which does not exist "
-                           f"(if intentional, mark the line hygiene:planned)")
+                missing.append((doc, i, raw))
             elif ln:
                 n = lc(hit)
                 if n is not None and int(ln) > n:
                     bad.append(f"{doc}:{i}: cites `{raw}` but that file has only {n} lines")
+
+ignored = gitignored(sorted({raw for _, _, raw in missing}))
+unverifiable = 0
+for doc, i, raw in missing:
+    if raw in ignored:
+        unverifiable += 1
+        continue
+    bad.append(f"{doc}:{i}: cites `{raw}` which does not exist "
+               f"(if intentional, mark the line hygiene:planned)")
+
 for b in sorted(set(bad)):
-    print(b)
+    print("F\t" + b)
+if unverifiable:
+    print(f"U\t{unverifiable} citation(s) point into gitignored paths "
+          f"(real locally, absent in a clean checkout) — not checked")
 PY
 )
+UNVERIFIABLE=""
 if [[ -n "$MAP_OUT" ]]; then
-  while IFS= read -r l; do note "$l"; done <<< "$MAP_OUT"
-else
+  while IFS= read -r l; do
+    case "$l" in
+      F$'\t'*) note "${l#F$'\t'}" ;;
+      U$'\t'*) UNVERIFIABLE="${l#U$'\t'}" ;;
+    esac
+  done <<< "$MAP_OUT"
+fi
+if [[ $FAILED -eq 0 ]]; then
   ok "doc file references resolve"
 fi
+# Reported, never silent: the point of the sensor is that nothing stops being
+# checked without someone being told.
+[[ -n "$UNVERIFIABLE" ]] && skip "$UNVERIFIABLE"
 
 # ---------------------------------------------------------------- 3 & 4
 ADR_DIR="docs/decisions"
