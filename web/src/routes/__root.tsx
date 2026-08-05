@@ -1,4 +1,3 @@
-import { TanStackDevtools } from "@tanstack/react-devtools";
 import type { QueryClient } from "@tanstack/react-query";
 import {
 	createRootRouteWithContext,
@@ -7,16 +6,21 @@ import {
 	Scripts,
 	useLocation,
 } from "@tanstack/react-router";
-import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { lazy, Suspense, useEffect, useState } from "react";
 import Footer from "../components/Footer";
 import { Header } from "../components/Header";
 import Sidebar from "../components/layout/Sidebar";
 
-import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
+import { env } from "../env";
 import TanStackQueryProvider from "../integrations/tanstack-query/root-provider";
-import StoreDevtools from "../lib/demo-store-devtools";
 import { useAuthStore } from "../stores/authStore";
 import appCss from "../styles.css?url";
+
+// Lazy-loaded so devtools (and their dependencies, e.g.
+// @tanstack/devtools-event-client) never end up in the production
+// server/client bundles when disabled.
+const DevtoolsPanel = lazy(() => import("../components/DevtoolsPanel"));
+const devtoolsEnabled = env.VITE_ENABLE_DEVTOOLS === "true";
 
 interface MyRouterContext {
 	queryClient: QueryClient;
@@ -96,6 +100,14 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 });
 
 function RootDocument({ children }: { children: React.ReactNode }) {
+	// Only flip on after the client has mounted, so the server-rendered markup
+	// and the initial client render always agree (devtools are never part of
+	// SSR output) and hydration never mismatches.
+	const [mounted, setMounted] = useState(false);
+	useEffect(() => {
+		setMounted(true);
+	}, []);
+
 	return (
 		<html lang="en" suppressHydrationWarning>
 			<head>
@@ -106,19 +118,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
 			<body className="font-sans antialiased [overflow-wrap:anywhere] selection:bg-[rgba(79,184,178,0.24)]">
 				<TanStackQueryProvider>
 					<RootLayout>{children}</RootLayout>
-					<TanStackDevtools
-						config={{
-							position: "bottom-right",
-						}}
-						plugins={[
-							{
-								name: "Tanstack Router",
-								render: <TanStackRouterDevtoolsPanel />,
-							},
-							TanStackQueryDevtools,
-							StoreDevtools,
-						]}
-					/>
+					{mounted && devtoolsEnabled && (
+						<Suspense fallback={null}>
+							<DevtoolsPanel />
+						</Suspense>
+					)}
 				</TanStackQueryProvider>
 				<Scripts />
 			</body>

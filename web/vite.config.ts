@@ -18,7 +18,13 @@ const config = defineConfig({
 		},
 	},
 	plugins: [
-		devtools(),
+		// Devtools visibility is handled ourselves in src/routes/__root.tsx
+		// (VITE_ENABLE_DEVTOOLS + lazy import), which also covers the SSR
+		// bundle. This plugin's own removeDevtoolsOnBuild transform only
+		// touches the client build and doesn't rewrite the `return (...)`
+		// wrapper cleanly when devtools JSX is a component's sole child, so
+		// disable it here to avoid the conflict.
+		devtools({ removeDevtoolsOnBuild: false }),
 		...(process.env.BUILD_TARGET === "cloudflare"
 			? [cloudflare({ viteEnvironment: { name: "ssr" } })]
 			: []),
