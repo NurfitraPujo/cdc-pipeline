@@ -1,5 +1,15 @@
 # CDC Data Pipeline - Configuration Template
 # This file serves as a reference for the settings stored in NATS KV.
+#
+# Only `auth` and `global` below are actually seeded into an empty KV bucket
+# on first boot (see bootstrapKV in cmd/pipeline/main.go). Sources, sinks,
+# and pipelines are NOT preseeded -- a shipped example pointing at tables
+# like "users"/"orders"/"products" would reference real-looking tables that
+# don't exist in your database, and the pipeline would crash-loop trying to
+# replicate them. Create sources, sinks, and pipelines explicitly through the
+# dashboard/API against tables that actually exist in your database. The
+# sections below are documentation of the shape those objects take, not a
+# default configuration.
 
 # Authentication (Stored in NATS KV as 'cdc.config.auth')
 auth:
@@ -11,52 +21,54 @@ global:
   batch_size: 1000
   batch_wait: 5s
 
-# Source Configurations (Stored in NATS KV as 'cdc.config.sources.{id}')
-sources:
-  - id: "postgres-primary"
-    type: "postgres"
-    host: "localhost"
-    port: 5432
-    user: "cdc_user"
-    pass: "your-encrypted-password"
-    database: "production_db"
-    slot_name: "cdc_slot"
-    publication_name: "cdc_pub"
-    # Schema whitelist. Tables are discovered only in these schemas.
-    # Empty or omitted means "public only" -- NOT all schemas. Discovering
-    # every schema by default would silently start replicating unrelated
-    # tables on upgrade, so the whitelist is opt-in.
-    schemas:
-      - "public"
-      - "sales"
-    batch_size: 100
+# Source Configuration example (Stored in NATS KV as 'cdc.config.sources.{id}')
+# Not seeded automatically -- create via the dashboard/API.
+# sources:
+#   - id: "postgres-primary"
+#     type: "postgres"
+#     host: "localhost"
+#     port: 5432
+#     user: "cdc_user"
+#     pass: "your-encrypted-password"
+#     database: "production_db"
+#     slot_name: "cdc_slot"
+#     publication_name: "cdc_pub"
+#     # Schema whitelist. Tables are discovered only in these schemas.
+#     # Empty or omitted means "public only" -- NOT all schemas. Discovering
+#     # every schema by default would silently start replicating unrelated
+#     # tables on upgrade, so the whitelist is opt-in.
+#     schemas:
+#       - "public"
+#       - "sales"
+#     batch_size: 100
 
-# Sink Configurations (Stored in NATS KV as 'cdc.config.sinks.{id}')
-sinks:
-  - id: "databend-analytics"
-    type: "databend"
-    dsn: "http://root:@localhost:8000"
-    # A Postgres schema maps to a Databend DATABASE (Databend has no schema
-    # layer), so public.orders is written to the "public" database, NOT to
-    # the database the DSN selects.
-    # options:
-    #   auto_create_schema: true   # default true; issues CREATE DATABASE IF
-    #                              # NOT EXISTS for each target database.
-    #                              # When false, the pipeline validates every
-    #                              # target at startup and refuses to start
-    #                              # if one is missing.
+# Sink Configuration example (Stored in NATS KV as 'cdc.config.sinks.{id}')
+# Not seeded automatically -- create via the dashboard/API.
+# sinks:
+#   - id: "databend-analytics"
+#     type: "databend"
+#     dsn: "http://root:@localhost:8000"
+#     # A Postgres schema maps to a Databend DATABASE (Databend has no schema
+#     # layer), so public.orders is written to the "public" database, NOT to
+#     # the database the DSN selects.
+#     # options:
+#     #   auto_create_schema: true   # default true; issues CREATE DATABASE IF
+#     #                              # NOT EXISTS for each target database.
+#     #                              # When false, the pipeline validates every
+#     #                              # target at startup and refuses to start
+#     #                              # if one is missing.
 
-# Pipeline Configurations (Stored in NATS KV as 'cdc.config.pipelines.{id}')
-pipelines:
-  - id: "pipe-01"
-    name: "Main Data Sync"
-    sources: ["postgres-primary"]
-    sinks: ["databend-analytics"]
-    tables:
-      - "users"
-      - "orders"
-      - "products"
-    
-    # Optional Overrides (If not set, global defaults are used)
-    batch_size: 2000
-    batch_wait: 10s
+# Pipeline Configuration example (Stored in NATS KV as 'cdc.config.pipelines.{id}')
+# Not seeded automatically -- create via the dashboard/API, listing only
+# tables that actually exist in your source database.
+# pipelines:
+#   - id: "pipe-01"
+#     name: "Main Data Sync"
+#     sources: ["postgres-primary"]
+#     sinks: ["databend-analytics"]
+#     tables:
+#       - "your_table_here"
+#
+#     # Optional Overrides (If not set, global defaults are used)
+#     batch_size: 2000
+#     batch_wait: 10s

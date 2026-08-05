@@ -107,9 +107,9 @@ podman compose logs -f pipeline
 ```
 
 Behind the scenes:
-1. **Dynamic Config Bootstrapping**: `pipeline` starts, checks NATS KV, and initializes configurations.
-2. **Runtime Configuration Overrides**: It reads environment variables (such as `POSTGRES_SOURCE_HOST`, `POSTGRES_PASSWORD`, `DATABEND_HOST`, etc.) to dynamically override default configurations at runtime, maintaining complete separation between the image build stage and runtime credentials/topology.
-3. **Replication Streaming**: The pipeline automatically spawns a logical replication slot on `cdc-postgres-source` and opens batch consumers to `cdc-databend` and `cdc-postgres-debug`.
+1. **Dynamic Config Bootstrapping**: `pipeline` starts, checks NATS KV, and if the bucket is empty seeds only the admin login and global defaults from `cmd/pipeline/config.example.yaml`. It does **not** seed a default source, sink, or pipeline -- a shipped example pointing at tables like `users`/`orders`/`products` doesn't match your real schema and would crash-loop on startup.
+2. **Manual Topology Setup**: Create your source, sink(s), and pipeline through the web dashboard or API, pointing them at tables that actually exist in your database. See Step 3 below.
+3. **Replication Streaming**: Once configured, the pipeline spawns a logical replication slot on `cdc-postgres-source` and opens batch consumers to `cdc-databend` and `cdc-postgres-debug`.
 
 ---
 
