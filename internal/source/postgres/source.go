@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/source"
 	cdc "github.com/Trendyol/go-pq-cdc"
@@ -1441,7 +1442,27 @@ func (s *PostgresSource) startConnector(conn cdc.Connector, sourceCtx context.Co
 				// goroutine exits promptly and is drained by s.runWg --
 				// it never blocks Stop()/Restart() from proceeding.
 				if err := conn.WaitUntilReady(sourceCtx); err != nil {
-					log.Debug().Err(err).Msg("B3: WaitUntilReady did not succeed; skipping post-ready fresh-slot seed")
+					// HA-1: a setup failure here means this source finished starting up
+					// without capturing anything. Shutdown (context cancelled) is the one
+					// benign case and stays at Debug; everything else is a real fault that
+					// used to be invisible -- the connector's own log was the only trace,
+					// and nothing counted it. Report it loudly and count it so
+					// cdc_source_capture_setup_failures_total can alert.
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						log.Debug().Err(err).Msg("B3: WaitUntilReady did not succeed (shutdown); skipping post-ready fresh-slot seed")
+						return
+					}
+					reason := "other"
+					if errors.Is(err, replication.ErrorSlotInUse) {
+						reason = "slot_in_use"
+					}
+					metrics.SourceCaptureSetupFailures.
+						WithLabelValues(s.name, srcConfig.SlotName, reason).Inc()
+					log.Error().Err(err).
+						Str("source", s.name).
+						Str("slot", srcConfig.SlotName).
+						Str("reason", reason).
+						Msg("source failed to start capturing: this worker is running but ingesting nothing")
 					return
 				}
 				// Re-check: the resume-path branch above cannot run

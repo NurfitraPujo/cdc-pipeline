@@ -179,4 +179,47 @@ spec:
               treat as a possible silent data-loss regression. See runbook
               section on OPS-2 in deploy/helm-chart/RUNBOOK.md.
             runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md#ops-2-idle-advance-refused-t0-3-regression-canary"
+
+        # HA-1. Every other alert in this file is keyed on a slot that IS being
+        # read: they measure lag, staleness, or refused advances on a working
+        # capture. None of them can see a worker that never acquired its slot at
+        # all -- that pod emits no cdc_source_* series whatsoever, so every
+        # expression above evaluates over an absent series and stays silent. It
+        # also stays Ready (/readyz only checks the NATS connection) and keeps
+        # heartbeating Status="Running", so the API and dashboards show it
+        # healthy. This counter is the only signal for that state.
+        #
+        # reason="slot_in_use" means another walsender already holds the slot. A
+        # replication slot admits exactly one, so in practice this means more
+        # than one worker replica is running the same pipeline -- the worker is a
+        # stateful singleton per pipeline (RFC-001), see
+        # docs/decisions/0026-worker-ha-via-nats-kv-leases.md. Fires on the first
+        # occurrence: there is no acceptable rate of "a replica cannot capture".
+        #
+        # Note the labels are {source, slot, reason}, not {pipeline, source,
+        # slot} like the rules above -- PostgresSource does not know its pipeline
+        # id. The slot name embeds it (internal/engine/pipeline.go suffixes the
+        # configured slot name with the pipeline id), so $labels.slot identifies
+        # the pipeline.
+        - alert: CDCSourceCaptureSetupFailed
+          expr: |
+            increase(cdc_source_capture_setup_failures_total[10m]) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "CDC worker failed to start capturing on slot {{ "{{" }} $labels.slot {{ "}}" }} ({{ "{{" }} $labels.reason {{ "}}" }})"
+            description: >
+              cdc_source_capture_setup_failures_total for source
+              {{ "{{" }} $labels.source {{ "}}" }} on slot {{ "{{" }} $labels.slot {{ "}}" }}
+              increased in the last 10m with reason={{ "{{" }} $labels.reason {{ "}}" }}.
+              This worker is running and Ready but ingesting nothing.
+              If reason="slot_in_use": another walsender holds the slot, which
+              almost always means the worker Deployment has more than one
+              replica, or a previous pod has not released the slot. Check
+              `SELECT slot_name, active, active_pid FROM pg_replication_slots`
+              on the source and the worker replica count -- it must be 1 until
+              per-pipeline leases land (ADR-0026).
+              If reason="other": read the worker's error log for the underlying
+              cause (publication missing, credentials, connectivity).
+            runbook_url: "https://github.com/NurfitraPujo/cdc-pipeline/blob/main/deploy/helm-chart/RUNBOOK.md"
 {{- end }}

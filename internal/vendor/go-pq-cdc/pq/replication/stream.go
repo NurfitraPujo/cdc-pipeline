@@ -32,9 +32,19 @@ var ErrStreamClosed = goerrors.New("replication stream connection is closed")
 // rather than treat this as a failed advance.
 var ErrStandbyWriteInFlight = goerrors.New("standby status update already in flight")
 
+// vendored-patch: HA-1 - these two were built with github.com/go-playground/errors.New
+// (the `errors` import in this file), which returns an errors.Chain -- a SLICE, and
+// therefore non-comparable. stdlib errors.Is compares identity with ==, which it can
+// only do for comparable targets, and Chain has no Is method to fall back on. So
+// `errors.Is(err, ErrorSlotInUse)` was unconditionally false -- even
+// `errors.Is(ErrorSlotInUse, ErrorSlotInUse)` was false -- and every attempt to detect
+// these sentinels silently failed, including the connector's own slot-in-use branch,
+// which was dead code from the day it was written.
+//
+// goerrors is the stdlib, matching ErrStreamClosed and ErrStandbyWriteInFlight above.
 var (
-	ErrorSlotInUse    = errors.New("replication slot in use")
-	ErrorNotConnected = errors.New("stream is not connected")
+	ErrorSlotInUse    = goerrors.New("replication slot in use")
+	ErrorNotConnected = goerrors.New("stream is not connected")
 )
 
 const (

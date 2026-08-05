@@ -526,6 +526,56 @@ the exact expressions survive, not just that the surrounding function still exis
 
 ---
 
+## HA-1: Slot-in-use was undetectable, and a failed `Start` was silent
+
+**Upstream Issue**: TBD
+
+**Files Modified**:
+- `pq/replication/stream.go`
+- `connector.go`
+
+**Problem**: three defects that compounded into "a worker that cannot capture looks healthy".
+
+1. `ErrorSlotInUse` and `ErrorNotConnected` were built with `github.com/go-playground/errors.New`,
+   which returns an `errors.Chain` — a **slice**, and therefore non-comparable. `errors.Is`
+   matches a target by `==`, which it only attempts for comparable targets, and `Chain` has no
+   `Is` method. So `errors.Is(err, ErrorSlotInUse)` was **always false**, even when comparing the
+   sentinel to itself. Every detection of these two sentinels silently failed.
+2. Because of (1), the connector's own slot-in-use branch (`if goerrors.Is(err,
+   replication.ErrorSlotInUse)` → log at Info, sleep, recurse into `Start`) was **dead code from
+   the day it was written**. The real path fell through to `logger.Error("postgres stream open")`
+   and returned. Note that had the branch ever run, it would have hung on the second attempt:
+   `Open` pushes to the cap-1 `sinkEnd` channel before returning the error, and only `Close`
+   drains it.
+3. `Start` has no error return, so *every* setup failure — slot creation, slot connect, stream
+   connect, snapshot, and the above — logged and returned, leaving `WaitUntilReady` blocked until
+   context cancellation. A caller could not distinguish "still starting up" from "failed and gave
+   up".
+
+**Fix**:
+- Define both sentinels with stdlib `goerrors.New`, matching `ErrStreamClosed` and
+  `ErrStandbyWriteInFlight` (T0-2). `errors.Is` now works.
+- Add a buffered `startErrCh` to `connector`; every setup-failure return in `Start` calls
+  `signalStartErr`, and `WaitUntilReady` selects on it. A failed `Start` now surfaces its cause
+  instead of blocking.
+- Replace the dead retry branch with a single loud `logger.Error` naming the slot and explaining
+  that a slot admits one walsender, so this usually means more than one replica is running the
+  same pipeline. Retrying belongs in the supervisor, which has backoff and is observable; it
+  cannot work here without rebuilding the stream.
+
+**Backward Compatibility**: `Connector` interface unchanged. `WaitUntilReady` may now return a
+non-context error where it previously blocked — that is the point, and callers already handle a
+non-nil return.
+
+**Regression Risk**: the sentinel change is the load-bearing one. Any code that *depended* on
+`errors.Is` against these two being false would change behaviour — at the time of the patch there
+was no such caller (the only two comparison sites, `connector.go` and
+`internal/source/postgres/source.go`, both intended a true match). `TestProbeSentinel`-style
+identity is covered by `internal/source/postgres/capture_setup_failure_test.go`, which wraps
+`ErrorSlotInUse` with `%w` and asserts the classification survives.
+
+---
+
 ## Applying Patches
 
 When merging upstream changes, search for `// vendored-patch:` markers to identify patched locations.
