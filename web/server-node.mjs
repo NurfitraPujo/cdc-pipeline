@@ -3,21 +3,28 @@
 // in vite.config.ts). Both targets build from the same source; the app itself
 // has no Cloudflare-specific runtime dependencies.
 //
-// `vite build` emits dist/server/server.js as a fetch-style handler that does
-// NOT listen on its own, so this adapter bridges it to node:http. It also
-// does not serve the static client build (dist/client/**) -- Cloudflare
-// handles that itself via Workers assets, but plain Node needs it done here,
-// so we serve dist/client first and fall through to the SSR handler for
-// everything else.
+// The app is built in TanStack Start SPA mode (see vite.config.ts): `vite
+// build` prerenders a route-agnostic shell at dist/client/_shell.html and the
+// app renders entirely on the client. There is no server-side rendering of
+// route content and no server functions, so this entrypoint is a plain static
+// file server: it serves dist/client/** and falls back to the SPA shell for
+// every navigation request. Rendering only on the client is what lets the
+// localStorage-based auth guard (src/routes/__root.tsx) run before any
+// protected content is shown -- SSR could not see localStorage and used to
+// leak the dashboard shell to unauthenticated users.
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import handler from "./dist/server/server.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDir = path.join(__dirname, "dist", "client");
+const shellPath = path.join(clientDir, "_shell.html");
+
+// Read the SPA shell once at startup; it never changes for the life of the
+// process (a new deploy ships a fresh image).
+const shellHtml = await readFile(shellPath);
 
 const MIME_TYPES = {
 	".js": "text/javascript; charset=utf-8",
@@ -41,7 +48,7 @@ const MIME_TYPES = {
  * Serve a file from dist/client if it exists, resolving it safely so
  * request paths can never escape clientDir via `..` traversal.
  * Returns true if the request was handled (response sent), false to let
- * the caller fall through to the SSR handler.
+ * the caller fall through to the SPA shell.
  */
 async function serveStaticAsset(req, res, pathname) {
 	if (req.method !== "GET" && req.method !== "HEAD") return false;
@@ -89,6 +96,19 @@ async function serveStaticAsset(req, res, pathname) {
 	return true;
 }
 
+/**
+ * Serve the SPA shell for a navigation request. The shell references
+ * content-hashed asset URLs, so it must never be cached -- a stale shell
+ * would point at asset filenames that no longer exist after a deploy.
+ */
+function serveShell(req, res) {
+	res.writeHead(200, {
+		"Content-Type": "text/html; charset=utf-8",
+		"Cache-Control": "no-cache",
+	});
+	res.end(req.method === "HEAD" ? undefined : shellHtml);
+}
+
 const port = Number(process.env.PORT) || 3000;
 
 const server = createServer(async (req, res) => {
@@ -98,26 +118,16 @@ const server = createServer(async (req, res) => {
 
 		if (await serveStaticAsset(req, res, pathname)) return;
 
-		const hasBody = req.method !== "GET" && req.method !== "HEAD";
-		const request = new Request(url, {
-			method: req.method,
-			headers: req.headers,
-			body: hasBody ? req : undefined,
-			duplex: "half",
-		});
-
-		const response = await handler.fetch(request);
-		res.writeHead(response.status, Object.fromEntries(response.headers));
-
-		if (response.body) {
-			const reader = response.body.getReader();
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				res.write(value);
-			}
+		// SPA fallback: any GET/HEAD that isn't a real file is a client route.
+		if (req.method === "GET" || req.method === "HEAD") {
+			serveShell(req, res);
+			return;
 		}
-		res.end();
+
+		// Nothing on this server handles non-GET requests (the app talks to a
+		// separate API service directly from the browser).
+		res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+		res.end("Not Found");
 	} catch (err) {
 		console.error("request failed", err);
 		if (!res.headersSent) res.writeHead(500);

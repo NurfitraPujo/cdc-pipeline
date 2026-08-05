@@ -30,7 +30,16 @@ const config = defineConfig({
 			: []),
 		tsconfigPaths({ projects: ["./tsconfig.json"] }),
 		tailwindcss(),
-		tanstackStart(),
+		// SPA mode: this is an internal, auth-gated dashboard whose auth state
+		// lives in localStorage (client-only, invisible to the server -- see
+		// src/stores/authStore.ts). SSR therefore cannot evaluate the auth
+		// guard and was rendering the protected /dashboard shell for
+		// unauthenticated requests, with the client expected to redirect to
+		// /login afterwards. If client JS was slow or failed to load, users saw
+		// the dashboard shell instead of the login form. Prerendering a static
+		// shell and rendering routes only on the client makes the beforeLoad
+		// auth guard authoritative before any protected content is shown.
+		tanstackStart({ spa: { enabled: true } }),
 		viteReact({
 			babel: {
 				plugins: ["babel-plugin-react-compiler"],
