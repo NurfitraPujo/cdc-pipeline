@@ -22,6 +22,14 @@ RUN pnpm install --frozen-lockfile
 
 # Copy source code and compile the TanStack Start project for Node
 COPY . .
+
+# Devtools (TanStack Router/Query/Store panels) are compiled in but only
+# execute when this is "true" -- Vite inlines VITE_ vars at build time, so
+# this must be set per-image, not toggled via container runtime env. Leave
+# unset/false for production; pass --build-arg ENABLE_DEVTOOLS=true for
+# staging builds.
+ARG ENABLE_DEVTOOLS=false
+ENV VITE_ENABLE_DEVTOOLS=${ENABLE_DEVTOOLS}
 RUN pnpm run build
 
 # Stage 2: Prune to production dependencies only.

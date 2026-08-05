@@ -249,7 +249,7 @@ pipelines:
                     TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
                   fi
                   export DOCKER_BUILDKIT=1
-                  docker build --platform linux/amd64 -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
+                  docker build --platform linux/amd64 --build-arg ENABLE_DEVTOOLS=true -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
                   docker tag cdc-web-dashboard:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
                   docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
               services:
@@ -312,7 +312,7 @@ pipelines:
                     TAG=$BITBUCKET_BRANCH-$BITBUCKET_COMMIT_SHORT
                   fi
                   export DOCKER_BUILDKIT=1
-                  docker build --platform linux/amd64 -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
+                  docker build --platform linux/amd64 --build-arg ENABLE_DEVTOOLS=false -t cdc-web-dashboard:$TAG ./web -f web/Dockerfile
                   docker tag cdc-web-dashboard:$TAG swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
                   docker push swr.$BBPP_HCS_REGION.myhuaweicloud.com/daya-engineering/cdc-web-dashboard:$TAG
               services:

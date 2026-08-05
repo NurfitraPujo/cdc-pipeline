@@ -14,6 +14,7 @@ export const env = createEnv({
 
 	client: {
 		VITE_APP_TITLE: z.string().min(1).optional(),
+		VITE_ENABLE_DEVTOOLS: z.enum(["true", "false"]).optional().default("false"),
 	},
 
 	/**
