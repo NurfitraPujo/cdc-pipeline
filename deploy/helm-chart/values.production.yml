@@ -173,16 +173,47 @@ worker:
               app.kubernetes.io/name: cdc-worker
               app.kubernetes.io/environment: production
   tolerantions: {}
-  strategy: {}
+  # Recreate, not RollingUpdate: a rolling deploy would briefly run the old and
+  # new pod together, and two producers cannot share a replication slot (see the
+  # hpa comment below). Recreate takes the old pod fully down first.
+  strategy:
+    type: Recreate
   securityContext: {}
   podSecurityContext: {}
   podAnnotations: {}
   serviceAccount:
     annotations: {}
+  # The worker is a stateful singleton per pipeline (RFC-001), NOT a scalable
+  # stateless service. Every replica watches the whole pipeline-config prefix and
+  # starts a producer for every pipeline it sees -- there is no ownership or
+  # sharding step. With >1 replica:
+  #
+  #   * the Postgres replication slot name is derived from the pipeline ID, not
+  #     the pod (internal/engine/pipeline.go), and Postgres allows exactly one
+  #     active walsender per slot, so the losing pods cannot capture;
+  #   * producer message ids are fresh UUIDs, so JetStream's TrackMsgId dedup
+  #     does not catch cross-pod duplicates;
+  #   * egress checkpoint writes are unguarded Puts, so they are last-writer-wins.
+  #
+  # The losing pods fail QUIETLY, which is why this went unnoticed. They log one
+  # error at startup and then sit idle forever: the connector's Start has no
+  # error return, so nothing propagates, WaitUntilReady just blocks, no probe
+  # fails (/readyz only checks the NATS connection), and the heartbeat still
+  # reports Status="Running". Every worker alert is keyed on {pipeline, source,
+  # slot} and measures a slot that IS being read, so a pod that never acquired
+  # one fires nothing. Scaling the worker up therefore adds no throughput at all.
+  #
+  # Patch HA-1 (internal/vendor/go-pq-cdc/PATCHES.md) makes this loud and adds
+  # cdc_source_capture_setup_failures_total{reason="slot_in_use"} to alert on.
+  #
+  # Keep this disabled with minReplicas 1 until per-pipeline ownership (a NATS KV
+  # lease) lands -- see docs/decisions/0026-worker-ha-via-nats-kv-leases.md.
+  # This is single-writer correctness, not high availability: a pod failure stops
+  # capture until Kubernetes restarts it.
   hpa:
-    enabled: true
-    minReplicas: 3
-    maxReplicas: 20
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 1
     targetCPUUtilizationPercentage: 80
   ports:
     - containerPort: 8081

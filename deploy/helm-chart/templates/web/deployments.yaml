@@ -8,6 +8,10 @@ metadata:
 spec:
   replicas: 1
   revisionHistoryLimit: 0
+  {{- with .Values.web.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Values.web.name }}
@@ -65,8 +69,4 @@ spec:
       {{- if .Values.global.dnsConfig }}
       dnsConfig:
         {{- toYaml .Values.global.dnsConfig | nindent 8 }}
-      {{- end }}
-      {{- with .Values.web.strategy }}
-      strategy:
-        {{- toYaml . | nindent 8 }}
       {{- end }}
