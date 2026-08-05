@@ -20,13 +20,34 @@ type AnyProps = React.HTMLAttributes<HTMLElement> & {
 	value?: unknown;
 	checked?: unknown;
 	defaultValue?: unknown;
-	open?: unknown;
+	open?: boolean;
 	onOpenChange?: (open: boolean) => void;
 	htmlFor?: string;
 	id?: string;
 	asChild?: boolean;
 	type?: "single" | "multiple";
-	defaultValue?: string | string[];
+	onCheckedChange?: unknown;
+	onValueChange?: unknown;
+	onEscapeKeyDown?: unknown;
+	onPointerDown?: unknown;
+	onPointerUp?: unknown;
+	side?: unknown;
+	sideOffset?: unknown;
+	align?: unknown;
+	alignOffset?: unknown;
+	collisionBoundary?: unknown;
+	collisionPadding?: unknown;
+	arrowPadding?: unknown;
+	sticky?: unknown;
+	hideWhenDetached?: unknown;
+	avoidCollisions?: unknown;
+	modal?: unknown;
+	direction?: unknown;
+	forceMount?: unknown;
+	loop?: unknown;
+	trapFocus?: unknown;
+	disableOutsidePointerEvents?: unknown;
+	[key: string]: unknown;
 };
 
 // Strip out the Radix-only props the DOM doesn't know about so they don't
@@ -62,7 +83,8 @@ const stripRadixProps = (props: Record<string, unknown>) => {
 		asChild: _asChild,
 		...domProps
 	} = props as AnyProps;
-	return domProps as React.HTMLAttributes<HTMLElement>;
+	return domProps as React.HTMLAttributes<HTMLElement> &
+		Record<string, unknown>;
 };
 
 // The default passthrough renders a <div>. Several UI primitives need the
@@ -78,6 +100,29 @@ const stripRadixProps = (props: Record<string, unknown>) => {
 //     behaviour just enough for the tests in this repo).
 const passthrough = (props: AnyProps) =>
 	React.createElement("div", stripRadixProps(props), props.children);
+
+// Open/close state for Dialog-shaped primitives (Dialog, AlertDialog,
+// Popover, Select, Tooltip, ...). Root publishes whatever `open` prop it was
+// given (defaulting to `true` when the component is used uncontrolled, so
+// primitives that never pass `open` keep rendering their content the way
+// they always have) plus `onOpenChange`; Trigger/Close read the setter so a
+// test's `user.click(trigger)` drives the same state Content gates on --
+// without this, `open`/`onOpenChange` were silently discarded (stripped by
+// stripRadixProps and never wired anywhere) and DialogContent rendered
+// unconditionally regardless of the real open state, which is what let
+// PauseDialog's `enabled: open && !result` query fire in a way that doesn't
+// match the real Radix dialog.
+interface DialogOpenState {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+}
+const defaultDialogOpenState: DialogOpenState = {
+	open: true,
+	onOpenChange: () => {},
+};
+const DialogOpenContext = React.createContext<DialogOpenState>(
+	defaultDialogOpenState,
+);
 
 const Root = (props: AnyProps) => {
 	const dom = stripRadixProps(props);
@@ -133,7 +178,21 @@ const Root = (props: AnyProps) => {
 			props.children,
 		);
 	}
-	return React.createElement("div", dom, props.children);
+	// Dialog-shaped Root (Dialog, AlertDialog, Popover, Select, Tooltip, ...):
+	// publish open/onOpenChange via context so Trigger/Close/Content agree on
+	// the same state a real Radix Root would coordinate internally. `open`
+	// defaults to `true` for callers that never pass it (uncontrolled usage),
+	// matching the pre-existing "always render" behaviour for those.
+	const openState: DialogOpenState = {
+		open: props.open ?? true,
+		onOpenChange:
+			typeof props.onOpenChange === "function" ? props.onOpenChange : () => {},
+	};
+	return React.createElement(
+		DialogOpenContext.Provider,
+		{ value: openState },
+		React.createElement("div", dom, props.children),
+	);
 };
 
 const named = (tag: string) => {
@@ -147,8 +206,50 @@ const named = (tag: string) => {
 // Permissive exports covering every primitive the dashboard UI uses. The
 // `passthrough` helper keeps refs / props flowing through without crashing.
 export { Root, passthrough };
-export const Trigger = passthrough;
-export const Content = passthrough;
+
+// Trigger toggles the Dialog-shaped Root's open state to `true` (in addition
+// to firing any onClick the caller passed in, mirroring the Root's
+// switch/checkbox branch above) so `user.click(trigger)` opens the dialog
+// the same way it would against the real primitive. `asChild` (how every
+// call site in this codebase uses Trigger, e.g. `<DialogTrigger asChild><Button
+// .../></DialogTrigger>`) clones the single child instead of wrapping it in
+// an extra <button>, matching real Radix's asChild semantics and avoiding a
+// nested <button><button/></button> that would break `getByRole("button")`.
+const Trigger = (props: AnyProps) => {
+	const { onOpenChange } = React.useContext(DialogOpenContext);
+	const handleClick = props.onClick as
+		| ((event: React.MouseEvent<HTMLElement>) => void)
+		| undefined;
+	const onClick = (event: React.MouseEvent<HTMLElement>) => {
+		handleClick?.(event);
+		if (!event.defaultPrevented) onOpenChange(true);
+	};
+	if (props.asChild && React.isValidElement(props.children)) {
+		const child = props.children as React.ReactElement<{
+			onClick?: (event: React.MouseEvent<HTMLElement>) => void;
+		}>;
+		return React.cloneElement(child, {
+			onClick: (event: React.MouseEvent<HTMLElement>) => {
+				child.props.onClick?.(event);
+				onClick(event);
+			},
+		});
+	}
+	return React.createElement(
+		"button",
+		{ type: "button", ...stripRadixProps(props), onClick },
+		props.children,
+	);
+};
+
+// Content only renders while the nearest Dialog-shaped Root says it's open --
+// see DialogOpenContext above.
+const Content = (props: AnyProps) => {
+	const { open } = React.useContext(DialogOpenContext);
+	if (!open) return null;
+	return passthrough(props);
+};
+export { Trigger, Content };
 export const Item = passthrough;
 export const ItemIndicator = passthrough;
 export const ItemText = passthrough;
@@ -158,7 +259,23 @@ export const Title = passthrough;
 export const Description = passthrough;
 export const Portal = passthrough;
 export const Overlay = passthrough;
-export const Close = passthrough;
+// Close mirrors Trigger but drives the state to `false`.
+const Close = (props: AnyProps) => {
+	const { onOpenChange } = React.useContext(DialogOpenContext);
+	const handleClick = props.onClick as
+		| ((event: React.MouseEvent<HTMLElement>) => void)
+		| undefined;
+	const onClick = (event: React.MouseEvent<HTMLElement>) => {
+		handleClick?.(event);
+		if (!event.defaultPrevented) onOpenChange(false);
+	};
+	return React.createElement(
+		"button",
+		{ type: "button", ...stripRadixProps(props), onClick },
+		props.children,
+	);
+};
+export { Close };
 export const Action = passthrough;
 export const Cancel = passthrough;
 export const Arrow = passthrough;

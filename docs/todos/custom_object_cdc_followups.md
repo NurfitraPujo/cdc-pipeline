@@ -4,7 +4,7 @@ Out of scope for `plans/cdc_custom_object_transform_remediation.md` — recorded
 here rather than fixed as part of that change. Each is independent.
 
 See also `docs/todos/holistic_review_remediation.md`, which overlaps in places.
-(`docs/todos/lossy_type_mappings.md` covered the decimal/array half of item 1
+(`docs/todos/lossy_type_mappings.md` covered the decimal/array half of item 1 <!-- hygiene:ignore: file deliberately deleted in fd76c0f; historical note, not a live pointer -->
 below; it was fixed and the TODO deleted on 2026-08-04.)
 
 ---

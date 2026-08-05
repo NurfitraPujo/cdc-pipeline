@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,288 @@ import (
 const (
 	BearerAuthScopes bearerAuthContextKey = "BearerAuth.Scopes"
 )
+
+// Defines values for PausePipelineResponseReconciliation.
+const (
+	PausePipelineResponseReconciliationEmpty   PausePipelineResponseReconciliation = ""
+	PausePipelineResponseReconciliationIdle    PausePipelineResponseReconciliation = "idle"
+	PausePipelineResponseReconciliationRunning PausePipelineResponseReconciliation = "running"
+	PausePipelineResponseReconciliationStale   PausePipelineResponseReconciliation = "stale"
+)
+
+// Valid indicates whether the value is a known member of the PausePipelineResponseReconciliation enum.
+func (e PausePipelineResponseReconciliation) Valid() bool {
+	switch e {
+	case PausePipelineResponseReconciliationEmpty:
+		return true
+	case PausePipelineResponseReconciliationIdle:
+		return true
+	case PausePipelineResponseReconciliationRunning:
+		return true
+	case PausePipelineResponseReconciliationStale:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PausePipelineResponseState.
+const (
+	PausePipelineResponseStateFailed          PausePipelineResponseState = "Failed"
+	PausePipelineResponseStateNeedsResnapshot PausePipelineResponseState = "NeedsResnapshot"
+	PausePipelineResponseStatePaused          PausePipelineResponseState = "Paused"
+	PausePipelineResponseStatePausing         PausePipelineResponseState = "Pausing"
+	PausePipelineResponseStateResuming        PausePipelineResponseState = "Resuming"
+	PausePipelineResponseStateRunning         PausePipelineResponseState = "Running"
+	PausePipelineResponseStateSnapshotting    PausePipelineResponseState = "Snapshotting"
+	PausePipelineResponseStateStopped         PausePipelineResponseState = "Stopped"
+	PausePipelineResponseStateStopping        PausePipelineResponseState = "Stopping"
+)
+
+// Valid indicates whether the value is a known member of the PausePipelineResponseState enum.
+func (e PausePipelineResponseState) Valid() bool {
+	switch e {
+	case PausePipelineResponseStateFailed:
+		return true
+	case PausePipelineResponseStateNeedsResnapshot:
+		return true
+	case PausePipelineResponseStatePaused:
+		return true
+	case PausePipelineResponseStatePausing:
+		return true
+	case PausePipelineResponseStateResuming:
+		return true
+	case PausePipelineResponseStateRunning:
+		return true
+	case PausePipelineResponseStateSnapshotting:
+		return true
+	case PausePipelineResponseStateStopped:
+		return true
+	case PausePipelineResponseStateStopping:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineConfigDesiredState.
+const (
+	PipelineConfigDesiredStatePaused  PipelineConfigDesiredState = "paused"
+	PipelineConfigDesiredStateRunning PipelineConfigDesiredState = "running"
+	PipelineConfigDesiredStateStopped PipelineConfigDesiredState = "stopped"
+)
+
+// Valid indicates whether the value is a known member of the PipelineConfigDesiredState enum.
+func (e PipelineConfigDesiredState) Valid() bool {
+	switch e {
+	case PipelineConfigDesiredStatePaused:
+		return true
+	case PipelineConfigDesiredStateRunning:
+		return true
+	case PipelineConfigDesiredStateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineLifecycleRecordReconciliation.
+const (
+	PipelineLifecycleRecordReconciliationEmpty   PipelineLifecycleRecordReconciliation = ""
+	PipelineLifecycleRecordReconciliationIdle    PipelineLifecycleRecordReconciliation = "idle"
+	PipelineLifecycleRecordReconciliationRunning PipelineLifecycleRecordReconciliation = "running"
+	PipelineLifecycleRecordReconciliationStale   PipelineLifecycleRecordReconciliation = "stale"
+)
+
+// Valid indicates whether the value is a known member of the PipelineLifecycleRecordReconciliation enum.
+func (e PipelineLifecycleRecordReconciliation) Valid() bool {
+	switch e {
+	case PipelineLifecycleRecordReconciliationEmpty:
+		return true
+	case PipelineLifecycleRecordReconciliationIdle:
+		return true
+	case PipelineLifecycleRecordReconciliationRunning:
+		return true
+	case PipelineLifecycleRecordReconciliationStale:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineLifecycleRecordState.
+const (
+	PipelineLifecycleRecordStateFailed          PipelineLifecycleRecordState = "Failed"
+	PipelineLifecycleRecordStateNeedsResnapshot PipelineLifecycleRecordState = "NeedsResnapshot"
+	PipelineLifecycleRecordStatePaused          PipelineLifecycleRecordState = "Paused"
+	PipelineLifecycleRecordStatePausing         PipelineLifecycleRecordState = "Pausing"
+	PipelineLifecycleRecordStateResuming        PipelineLifecycleRecordState = "Resuming"
+	PipelineLifecycleRecordStateRunning         PipelineLifecycleRecordState = "Running"
+	PipelineLifecycleRecordStateSnapshotting    PipelineLifecycleRecordState = "Snapshotting"
+	PipelineLifecycleRecordStateStopped         PipelineLifecycleRecordState = "Stopped"
+	PipelineLifecycleRecordStateStopping        PipelineLifecycleRecordState = "Stopping"
+)
+
+// Valid indicates whether the value is a known member of the PipelineLifecycleRecordState enum.
+func (e PipelineLifecycleRecordState) Valid() bool {
+	switch e {
+	case PipelineLifecycleRecordStateFailed:
+		return true
+	case PipelineLifecycleRecordStateNeedsResnapshot:
+		return true
+	case PipelineLifecycleRecordStatePaused:
+		return true
+	case PipelineLifecycleRecordStatePausing:
+		return true
+	case PipelineLifecycleRecordStateResuming:
+		return true
+	case PipelineLifecycleRecordStateRunning:
+		return true
+	case PipelineLifecycleRecordStateSnapshotting:
+		return true
+	case PipelineLifecycleRecordStateStopped:
+		return true
+	case PipelineLifecycleRecordStateStopping:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineListItemDesiredState.
+const (
+	PipelineListItemDesiredStatePaused  PipelineListItemDesiredState = "paused"
+	PipelineListItemDesiredStateRunning PipelineListItemDesiredState = "running"
+	PipelineListItemDesiredStateStopped PipelineListItemDesiredState = "stopped"
+)
+
+// Valid indicates whether the value is a known member of the PipelineListItemDesiredState enum.
+func (e PipelineListItemDesiredState) Valid() bool {
+	switch e {
+	case PipelineListItemDesiredStatePaused:
+		return true
+	case PipelineListItemDesiredStateRunning:
+		return true
+	case PipelineListItemDesiredStateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineListItemHealth.
+const (
+	PipelineListItemHealthEmpty   PipelineListItemHealth = ""
+	PipelineListItemHealthError   PipelineListItemHealth = "error"
+	PipelineListItemHealthHealthy PipelineListItemHealth = "healthy"
+)
+
+// Valid indicates whether the value is a known member of the PipelineListItemHealth enum.
+func (e PipelineListItemHealth) Valid() bool {
+	switch e {
+	case PipelineListItemHealthEmpty:
+		return true
+	case PipelineListItemHealthError:
+		return true
+	case PipelineListItemHealthHealthy:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineListItemLifecycleState.
+const (
+	PipelineListItemLifecycleStateFailed          PipelineListItemLifecycleState = "Failed"
+	PipelineListItemLifecycleStateNeedsResnapshot PipelineListItemLifecycleState = "NeedsResnapshot"
+	PipelineListItemLifecycleStatePaused          PipelineListItemLifecycleState = "Paused"
+	PipelineListItemLifecycleStatePausing         PipelineListItemLifecycleState = "Pausing"
+	PipelineListItemLifecycleStateResuming        PipelineListItemLifecycleState = "Resuming"
+	PipelineListItemLifecycleStateRunning         PipelineListItemLifecycleState = "Running"
+	PipelineListItemLifecycleStateSnapshotting    PipelineListItemLifecycleState = "Snapshotting"
+	PipelineListItemLifecycleStateStopped         PipelineListItemLifecycleState = "Stopped"
+	PipelineListItemLifecycleStateStopping        PipelineListItemLifecycleState = "Stopping"
+	PipelineListItemLifecycleStateTransitioning   PipelineListItemLifecycleState = "Transitioning"
+)
+
+// Valid indicates whether the value is a known member of the PipelineListItemLifecycleState enum.
+func (e PipelineListItemLifecycleState) Valid() bool {
+	switch e {
+	case PipelineListItemLifecycleStateFailed:
+		return true
+	case PipelineListItemLifecycleStateNeedsResnapshot:
+		return true
+	case PipelineListItemLifecycleStatePaused:
+		return true
+	case PipelineListItemLifecycleStatePausing:
+		return true
+	case PipelineListItemLifecycleStateResuming:
+		return true
+	case PipelineListItemLifecycleStateRunning:
+		return true
+	case PipelineListItemLifecycleStateSnapshotting:
+		return true
+	case PipelineListItemLifecycleStateStopped:
+		return true
+	case PipelineListItemLifecycleStateStopping:
+		return true
+	case PipelineListItemLifecycleStateTransitioning:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineListItemReconciliation.
+const (
+	PipelineListItemReconciliationEmpty   PipelineListItemReconciliation = ""
+	PipelineListItemReconciliationIdle    PipelineListItemReconciliation = "idle"
+	PipelineListItemReconciliationRunning PipelineListItemReconciliation = "running"
+	PipelineListItemReconciliationStale   PipelineListItemReconciliation = "stale"
+)
+
+// Valid indicates whether the value is a known member of the PipelineListItemReconciliation enum.
+func (e PipelineListItemReconciliation) Valid() bool {
+	switch e {
+	case PipelineListItemReconciliationEmpty:
+		return true
+	case PipelineListItemReconciliationIdle:
+		return true
+	case PipelineListItemReconciliationRunning:
+		return true
+	case PipelineListItemReconciliationStale:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PipelineListItemStatus.
+const (
+	PipelineListItemStatusError         PipelineListItemStatus = "error"
+	PipelineListItemStatusHealthy       PipelineListItemStatus = "healthy"
+	PipelineListItemStatusPaused        PipelineListItemStatus = "paused"
+	PipelineListItemStatusStopped       PipelineListItemStatus = "stopped"
+	PipelineListItemStatusTransitioning PipelineListItemStatus = "transitioning"
+)
+
+// Valid indicates whether the value is a known member of the PipelineListItemStatus enum.
+func (e PipelineListItemStatus) Valid() bool {
+	switch e {
+	case PipelineListItemStatusError:
+		return true
+	case PipelineListItemStatusHealthy:
+		return true
+	case PipelineListItemStatusPaused:
+		return true
+	case PipelineListItemStatusStopped:
+		return true
+	case PipelineListItemStatusTransitioning:
+		return true
+	default:
+		return false
+	}
+}
 
 // Defines values for SinkConfigType.
 const (
@@ -55,9 +338,11 @@ func (e SourceConfigType) Valid() bool {
 
 // Defines values for ListPipelinesParamsStatus.
 const (
-	Error         ListPipelinesParamsStatus = "Error"
-	Healthy       ListPipelinesParamsStatus = "Healthy"
-	Transitioning ListPipelinesParamsStatus = "Transitioning"
+	Error         ListPipelinesParamsStatus = "error"
+	Healthy       ListPipelinesParamsStatus = "healthy"
+	Paused        ListPipelinesParamsStatus = "paused"
+	Stopped       ListPipelinesParamsStatus = "stopped"
+	Transitioning ListPipelinesParamsStatus = "transitioning"
 )
 
 // Valid indicates whether the value is a known member of the ListPipelinesParamsStatus enum.
@@ -66,6 +351,10 @@ func (e ListPipelinesParamsStatus) Valid() bool {
 	case Error:
 		return true
 	case Healthy:
+		return true
+	case Paused:
+		return true
+	case Stopped:
 		return true
 	case Transitioning:
 		return true
@@ -130,6 +419,43 @@ type LoginResponse struct {
 	Token string `json:"token"`
 }
 
+// PausePipelineProjectionResponse `GET /pipelines/{id}/pause-projection`'s body: the plan section 5 WAL-budget warning, computed read-only for a candidate `ttl` without committing a pause. Same shape and same wording as `PausePipelineResponse.warning` -- see that field's description.
+type PausePipelineProjectionResponse struct {
+	// Warning Present only when the projected time-to-breach is shorter than the `ttl` being considered.
+	Warning *string `json:"warning,omitempty"`
+}
+
+// PausePipelineRequest defines model for PausePipelineRequest.
+type PausePipelineRequest struct {
+	// Ttl Optional Go duration string (e.g. "30m", "2h") bounding how long the pause lasts before WS-3's auto-resume timer fires. Capped at a 4h ceiling (OQ-3); a `ttl` above `4h0m0s` is rejected with `400`. Converted to an absolute `paused_until` timestamp at request time (plan section 8). Omitting `ttl` does not mean "pause indefinitely" -- it defaults to the same 4h ceiling, so every pause is bounded.
+	Ttl *string `json:"ttl,omitempty"`
+}
+
+// PausePipelineResponse defines model for PausePipelineResponse.
+type PausePipelineResponse struct {
+	// PausedUntil Absolute RFC3339 timestamp. Set only while state is `Pausing`/`Paused` (invariant 3), cleared on exit -- never a duration, never a NATS KV TTL (plan section 8).
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
+
+	// Reason Optional operator-facing note attached by a system-driven transition. Set by the WS-4 WAL guard when it escalates a `Paused` pipeline straight to `Stopping` (plan section 7): either `wal_status` reached `unreserved`, or the `safe_wal_size` /fallback-lag threshold was breached. Empty for operator-requested transitions.
+	Reason *string `json:"reason,omitempty"`
+
+	// Reconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). Only meaningfully populated once WS-7 lands; carried through unchanged by this workstream's transitions.
+	Reconciliation *PausePipelineResponseReconciliation `json:"reconciliation,omitempty"`
+
+	// State See plan section 4.2 for what each state means.
+	State     PausePipelineResponseState `json:"state"`
+	UpdatedAt time.Time                  `json:"updated_at"`
+
+	// Warning Present only when the projected time-to-breach (WAL budget remaining divided by the current WAL growth rate, from the existing `cdc_source_slot_lag_bytes` probe) is shorter than this pause's effective TTL -- i.e. the pause is projected to hit the source's WAL budget and force an escalation to `Stopping` before it would otherwise expire.
+	Warning *string `json:"warning,omitempty"`
+}
+
+// PausePipelineResponseReconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). Only meaningfully populated once WS-7 lands; carried through unchanged by this workstream's transitions.
+type PausePipelineResponseReconciliation string
+
+// PausePipelineResponseState See plan section 4.2 for what each state means.
+type PausePipelineResponseState string
+
 // PipelineConfig CDC pipeline configuration.
 type PipelineConfig struct {
 	// BatchSize Per-pipeline override for global batch_size.
@@ -137,6 +463,9 @@ type PipelineConfig struct {
 
 	// BatchWait Per-pipeline override for global batch_wait.
 	BatchWait *string `json:"batch_wait,omitempty"`
+
+	// DesiredState Operator intent for this pipeline (WS-1 lifecycle control). Empty/omitted means "running" -- a request that omits this field is NOT the same as one that explicitly sets it to "running"; on `PUT`, the server preserves whatever desired_state is already persisted when the field is absent from the body, so a paused pipeline stays paused across an unrelated edit.
+	DesiredState *PipelineConfigDesiredState `json:"desired_state,omitempty"`
 
 	// Id Unique pipeline identifier (alphanumeric, dashes, underscores).
 	Id string `json:"id"`
@@ -154,9 +483,98 @@ type PipelineConfig struct {
 	// Sources IDs of source connections (must exist in NATS KV).
 	Sources []string `json:"sources"`
 
-	// Tables Tables to replicate (whitelist).
+	// Tables Tables to replicate (whitelist). Entries may be bare ("orders" means "public.orders") or schema-qualified ("sales.orders"). Names containing "=" or more than one "." are rejected.
 	Tables []string `json:"tables"`
 }
+
+// PipelineConfigDesiredState Operator intent for this pipeline (WS-1 lifecycle control). Empty/omitted means "running" -- a request that omits this field is NOT the same as one that explicitly sets it to "running"; on `PUT`, the server preserves whatever desired_state is already persisted when the field is absent from the body, so a paused pipeline stays paused across an unrelated edit.
+type PipelineConfigDesiredState string
+
+// PipelineLifecycleRecord The system-owned lifecycle state for a pipeline (plan section 4.1/4.2), as opposed to `PipelineConfig.desired_state` (operator intent). Returned by the pause/start endpoints; written only as the result of `protocol.Transition` (internal/protocol/lifecycle.go), never assigned directly.
+type PipelineLifecycleRecord struct {
+	// PausedUntil Absolute RFC3339 timestamp. Set only while state is `Pausing`/`Paused` (invariant 3), cleared on exit -- never a duration, never a NATS KV TTL (plan section 8).
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
+
+	// Reason Optional operator-facing note attached by a system-driven transition. Set by the WS-4 WAL guard when it escalates a `Paused` pipeline straight to `Stopping` (plan section 7): either `wal_status` reached `unreserved`, or the `safe_wal_size` /fallback-lag threshold was breached. Empty for operator-requested transitions.
+	Reason *string `json:"reason,omitempty"`
+
+	// Reconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). Only meaningfully populated once WS-7 lands; carried through unchanged by this workstream's transitions.
+	Reconciliation *PipelineLifecycleRecordReconciliation `json:"reconciliation,omitempty"`
+
+	// State See plan section 4.2 for what each state means.
+	State     PipelineLifecycleRecordState `json:"state"`
+	UpdatedAt time.Time                    `json:"updated_at"`
+}
+
+// PipelineLifecycleRecordReconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). Only meaningfully populated once WS-7 lands; carried through unchanged by this workstream's transitions.
+type PipelineLifecycleRecordReconciliation string
+
+// PipelineLifecycleRecordState See plan section 4.2 for what each state means.
+type PipelineLifecycleRecordState string
+
+// PipelineListItem defines model for PipelineListItem.
+type PipelineListItem struct {
+	// BatchSize Per-pipeline override for global batch_size.
+	BatchSize *int `json:"batch_size,omitempty"`
+
+	// BatchWait Per-pipeline override for global batch_wait.
+	BatchWait *string `json:"batch_wait,omitempty"`
+
+	// DesiredState Operator intent for this pipeline (WS-1 lifecycle control). Empty/omitted means "running" -- a request that omits this field is NOT the same as one that explicitly sets it to "running"; on `PUT`, the server preserves whatever desired_state is already persisted when the field is absent from the body, so a paused pipeline stays paused across an unrelated edit.
+	DesiredState *PipelineListItemDesiredState `json:"desired_state,omitempty"`
+
+	// Health Only meaningful while lifecycle_state is "Running"; empty for a paused/stopped/transitioning pipeline.
+	Health PipelineListItemHealth `json:"health"`
+
+	// Id Unique pipeline identifier (alphanumeric, dashes, underscores).
+	Id string `json:"id"`
+
+	// LifecycleState What the pipeline is actually doing right now, independent of whether it is healthy (plan section 4.1). Reflects the persisted `PipelineLifecycleRecord` (see `protocol.LifecycleState`) when one exists, falling back to `desired_state` only for pipelines that have never gone through pause/start. "Transitioning" is reported instead whenever a `PipelineTransitionState` restart is in flight, regardless of the underlying lifecycle record.
+	LifecycleState PipelineListItemLifecycleState `json:"lifecycle_state"`
+
+	// Name Human-readable pipeline name.
+	Name string `json:"name"`
+
+	// PausedUntil Absolute RFC3339 timestamp the pipeline will auto-resume at, mirrored from the persisted `PipelineLifecycleRecord` (plan section 8). Only set while lifecycle_state is `Pausing`/`Paused` with a TTL.
+	PausedUntil *time.Time         `json:"paused_until,omitempty"`
+	Processors  *[]ProcessorConfig `json:"processors,omitempty"`
+
+	// Reason Operator-facing note carried from the persisted `PipelineLifecycleRecord.reason` (see `PipelineLifecycleRecord`), e.g. why the WS-4 WAL guard escalated a `Paused` pipeline to `Stopping`. Empty unless a system-driven transition set one.
+	Reason *string `json:"reason,omitempty"`
+
+	// Reconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5), mirrored from the persisted `PipelineLifecycleRecord.reconciliation`. WS-5 is the first workstream that actually writes `stale` (a resume from `Paused` whose snapshot chunks used a non-`integer_range` partition strategy); it MUST be visible here -- hiding it would recreate the "reports healthy while diverging" failure this plan exists to prevent. Empty (`""`) means no staleness is implied.
+	Reconciliation *PipelineListItemReconciliation `json:"reconciliation,omitempty"`
+
+	// Retry Retry policy used by both global and per-pipeline config.
+	Retry *RetryConfig `json:"retry,omitempty"`
+
+	// Sinks IDs of sink connections (must exist in NATS KV).
+	Sinks []string `json:"sinks"`
+
+	// Sources IDs of source connections (must exist in NATS KV).
+	Sources []string `json:"sources"`
+
+	// Status Backward-compatible single-string status, projected from lifecycle_state/health (see `legacyStatusString`). For a deliberately paused/stopped pipeline this is "paused" / "stopped", not "error".
+	Status PipelineListItemStatus `json:"status"`
+
+	// Tables Tables to replicate (whitelist). Entries may be bare ("orders" means "public.orders") or schema-qualified ("sales.orders"). Names containing "=" or more than one "." are rejected.
+	Tables []string `json:"tables"`
+}
+
+// PipelineListItemDesiredState Operator intent for this pipeline (WS-1 lifecycle control). Empty/omitted means "running" -- a request that omits this field is NOT the same as one that explicitly sets it to "running"; on `PUT`, the server preserves whatever desired_state is already persisted when the field is absent from the body, so a paused pipeline stays paused across an unrelated edit.
+type PipelineListItemDesiredState string
+
+// PipelineListItemHealth Only meaningful while lifecycle_state is "Running"; empty for a paused/stopped/transitioning pipeline.
+type PipelineListItemHealth string
+
+// PipelineListItemLifecycleState What the pipeline is actually doing right now, independent of whether it is healthy (plan section 4.1). Reflects the persisted `PipelineLifecycleRecord` (see `protocol.LifecycleState`) when one exists, falling back to `desired_state` only for pipelines that have never gone through pause/start. "Transitioning" is reported instead whenever a `PipelineTransitionState` restart is in flight, regardless of the underlying lifecycle record.
+type PipelineListItemLifecycleState string
+
+// PipelineListItemReconciliation Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5), mirrored from the persisted `PipelineLifecycleRecord.reconciliation`. WS-5 is the first workstream that actually writes `stale` (a resume from `Paused` whose snapshot chunks used a non-`integer_range` partition strategy); it MUST be visible here -- hiding it would recreate the "reports healthy while diverging" failure this plan exists to prevent. Empty (`""`) means no staleness is implied.
+type PipelineListItemReconciliation string
+
+// PipelineListItemStatus Backward-compatible single-string status, projected from lifecycle_state/health (see `legacyStatusString`). For a deliberately paused/stopped pipeline this is "paused" / "stopped", not "error".
+type PipelineListItemStatus string
 
 // PipelineListResponse Paginated pipeline list response.
 type PipelineListResponse struct {
@@ -164,8 +582,8 @@ type PipelineListResponse struct {
 	Limit int `json:"limit"`
 
 	// Page 1-based page index.
-	Page      int              `json:"page"`
-	Pipelines []PipelineConfig `json:"pipelines"`
+	Page      int                `json:"page"`
+	Pipelines []PipelineListItem `json:"pipelines"`
 
 	// Total Total number of matching pipelines (before pagination).
 	Total int `json:"total"`
@@ -180,7 +598,7 @@ type PipelineStatusResponse struct {
 
 	// Status Raw key/value snapshot of all NATS KV entries under the
 	// pipeline's status prefix. Keys are full NATS KV keys
-	// (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats`),
+	// (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{token}.stats`, where token is the bare table name for the `public` schema and `schema=table` otherwise),
 	// values are the deserialized worker-internal type
 	// (`Checkpoint`, `TableStats`, or `PipelineTransitionState`).
 	// Modeled as `additionalProperties: true` (maps to
@@ -399,6 +817,12 @@ type ListPipelinesParams struct {
 // ListPipelinesParamsStatus defines parameters for ListPipelines.
 type ListPipelinesParamsStatus string
 
+// PausePauseProjectionParams defines parameters for PausePauseProjection.
+type PausePauseProjectionParams struct {
+	// Ttl Go duration string being considered (e.g. "2h"). Defaults to the 4h ceiling when omitted, capped at `4h0m0s` -- the same bound `POST /pipelines/{id}/pause` enforces.
+	Ttl *string `form:"ttl,omitempty" json:"ttl,omitempty"`
+}
+
 // UpdateGlobalConfigJSONRequestBody defines body for UpdateGlobalConfig for application/json ContentType.
 type UpdateGlobalConfigJSONRequestBody = GlobalConfig
 
@@ -410,6 +834,9 @@ type CreatePipelineJSONRequestBody = PipelineConfig
 
 // UpdatePipelineJSONRequestBody defines body for UpdatePipeline for application/json ContentType.
 type UpdatePipelineJSONRequestBody = PipelineConfig
+
+// PausePipelineJSONRequestBody defines body for PausePipeline for application/json ContentType.
+type PausePipelineJSONRequestBody = PausePipelineRequest
 
 // CreateSinkJSONRequestBody defines body for CreateSink for application/json ContentType.
 type CreateSinkJSONRequestBody = SinkConfig
@@ -458,12 +885,24 @@ type ServerInterface interface {
 	// Stream pipeline metrics (Server-Sent Events)
 	// (GET /pipelines/{id}/metrics)
 	StreamPipelineMetrics(c *gin.Context, id PathID)
+	// Pause a pipeline
+	// (POST /pipelines/{id}/pause)
+	PausePipeline(c *gin.Context, id PathID)
+	// Project a pause's time-to-breach before confirming it
+	// (GET /pipelines/{id}/pause-projection)
+	PausePauseProjection(c *gin.Context, id PathID, params PausePauseProjectionParams)
 	// Trigger a pipeline restart
 	// (POST /pipelines/{id}/restart)
 	RestartPipeline(c *gin.Context, id PathID)
+	// Start/resume a pipeline
+	// (POST /pipelines/{id}/start)
+	StartPipeline(c *gin.Context, id PathID)
 	// Get live pipeline status and per-table stats
 	// (GET /pipelines/{id}/status)
 	GetPipelineStatus(c *gin.Context, id PathID)
+	// Stop a pipeline
+	// (POST /pipelines/{id}/stop)
+	StopPipeline(c *gin.Context, id PathID)
 	// List all sink connections
 	// (GET /sinks)
 	ListSinks(c *gin.Context)
@@ -745,6 +1184,71 @@ func (siw *ServerInterfaceWrapper) StreamPipelineMetrics(c *gin.Context) {
 	siw.Handler.StreamPipelineMetrics(c, id)
 }
 
+// PausePipeline operation middleware
+func (siw *ServerInterfaceWrapper) PausePipeline(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	c.Set(string(BearerAuthScopes), []string{})
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.PausePipeline(c, id)
+}
+
+// PausePauseProjection operation middleware
+func (siw *ServerInterfaceWrapper) PausePauseProjection(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	c.Set(string(BearerAuthScopes), []string{})
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PausePauseProjectionParams
+
+	// ------------- Optional query parameter "ttl" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "ttl", c.Request.URL.Query(), &params.Ttl, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter ttl: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.PausePauseProjection(c, id, params)
+}
+
 // RestartPipeline operation middleware
 func (siw *ServerInterfaceWrapper) RestartPipeline(c *gin.Context) {
 
@@ -772,6 +1276,33 @@ func (siw *ServerInterfaceWrapper) RestartPipeline(c *gin.Context) {
 	siw.Handler.RestartPipeline(c, id)
 }
 
+// StartPipeline operation middleware
+func (siw *ServerInterfaceWrapper) StartPipeline(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	c.Set(string(BearerAuthScopes), []string{})
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.StartPipeline(c, id)
+}
+
 // GetPipelineStatus operation middleware
 func (siw *ServerInterfaceWrapper) GetPipelineStatus(c *gin.Context) {
 
@@ -797,6 +1328,33 @@ func (siw *ServerInterfaceWrapper) GetPipelineStatus(c *gin.Context) {
 	}
 
 	siw.Handler.GetPipelineStatus(c, id)
+}
+
+// StopPipeline operation middleware
+func (siw *ServerInterfaceWrapper) StopPipeline(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	c.Set(string(BearerAuthScopes), []string{})
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.StopPipeline(c, id)
 }
 
 // ListSinks operation middleware
@@ -1198,8 +1756,12 @@ func RegisterHandlersWithOptions(router gin.IRouter, si ServerInterface, options
 	router.GET(options.BaseURL+"/pipelines/:id", wrapper.GetPipeline)
 	router.PUT(options.BaseURL+"/pipelines/:id", wrapper.UpdatePipeline)
 	router.GET(options.BaseURL+"/pipelines/:id/metrics", wrapper.StreamPipelineMetrics)
+	router.POST(options.BaseURL+"/pipelines/:id/pause", wrapper.PausePipeline)
+	router.GET(options.BaseURL+"/pipelines/:id/pause-projection", wrapper.PausePauseProjection)
 	router.POST(options.BaseURL+"/pipelines/:id/restart", wrapper.RestartPipeline)
+	router.POST(options.BaseURL+"/pipelines/:id/start", wrapper.StartPipeline)
 	router.GET(options.BaseURL+"/pipelines/:id/status", wrapper.GetPipelineStatus)
+	router.POST(options.BaseURL+"/pipelines/:id/stop", wrapper.StopPipeline)
 	router.GET(options.BaseURL+"/sinks", wrapper.ListSinks)
 	router.POST(options.BaseURL+"/sinks", wrapper.CreateSink)
 	router.POST(options.BaseURL+"/sinks/test", wrapper.TestSinkConnection)
@@ -1630,7 +2192,7 @@ type GetPipelineResponseObject interface {
 	VisitGetPipelineResponse(w http.ResponseWriter) error
 }
 
-type GetPipeline200JSONResponse PipelineConfig
+type GetPipeline200JSONResponse PipelineListItem
 
 func (response GetPipeline200JSONResponse) VisitGetPipelineResponse(w http.ResponseWriter) error {
 
@@ -1852,6 +2414,182 @@ func (response StreamPipelineMetrics500JSONResponse) VisitStreamPipelineMetricsR
 	return err
 }
 
+type PausePipelineRequestObject struct {
+	Id   PathID `json:"id"`
+	Body *PausePipelineJSONRequestBody
+}
+
+type PausePipelineResponseObject interface {
+	VisitPausePipelineResponse(w http.ResponseWriter) error
+}
+
+type PausePipeline200JSONResponse PausePipelineResponse
+
+func (response PausePipeline200JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePipeline400JSONResponse ErrorResponse
+
+func (response PausePipeline400JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePipeline401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PausePipeline401JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePipeline404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response PausePipeline404JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePipeline409JSONResponse ErrorResponse
+
+func (response PausePipeline409JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePipeline500JSONResponse struct {
+	InternalServerErrorJSONResponse
+}
+
+func (response PausePipeline500JSONResponse) VisitPausePipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePauseProjectionRequestObject struct {
+	Id     PathID `json:"id"`
+	Params PausePauseProjectionParams
+}
+
+type PausePauseProjectionResponseObject interface {
+	VisitPausePauseProjectionResponse(w http.ResponseWriter) error
+}
+
+type PausePauseProjection200JSONResponse PausePipelineProjectionResponse
+
+func (response PausePauseProjection200JSONResponse) VisitPausePauseProjectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePauseProjection400JSONResponse ErrorResponse
+
+func (response PausePauseProjection400JSONResponse) VisitPausePauseProjectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePauseProjection401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PausePauseProjection401JSONResponse) VisitPausePauseProjectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePauseProjection404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response PausePauseProjection404JSONResponse) VisitPausePauseProjectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PausePauseProjection500JSONResponse struct {
+	InternalServerErrorJSONResponse
+}
+
+func (response PausePauseProjection500JSONResponse) VisitPausePauseProjectionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type RestartPipelineRequestObject struct {
 	Id PathID `json:"id"`
 }
@@ -1918,6 +2656,86 @@ func (response RestartPipeline500JSONResponse) VisitRestartPipelineResponse(w ht
 	return err
 }
 
+type StartPipelineRequestObject struct {
+	Id PathID `json:"id"`
+}
+
+type StartPipelineResponseObject interface {
+	VisitStartPipelineResponse(w http.ResponseWriter) error
+}
+
+type StartPipeline200JSONResponse PipelineLifecycleRecord
+
+func (response StartPipeline200JSONResponse) VisitStartPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartPipeline401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response StartPipeline401JSONResponse) VisitStartPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartPipeline404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response StartPipeline404JSONResponse) VisitStartPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartPipeline409JSONResponse ErrorResponse
+
+func (response StartPipeline409JSONResponse) VisitStartPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartPipeline500JSONResponse struct {
+	InternalServerErrorJSONResponse
+}
+
+func (response StartPipeline500JSONResponse) VisitStartPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetPipelineStatusRequestObject struct {
 	Id PathID `json:"id"`
 }
@@ -1959,6 +2777,86 @@ type GetPipelineStatus500JSONResponse struct {
 }
 
 func (response GetPipelineStatus500JSONResponse) VisitGetPipelineStatusResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopPipelineRequestObject struct {
+	Id PathID `json:"id"`
+}
+
+type StopPipelineResponseObject interface {
+	VisitStopPipelineResponse(w http.ResponseWriter) error
+}
+
+type StopPipeline200JSONResponse PipelineLifecycleRecord
+
+func (response StopPipeline200JSONResponse) VisitStopPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopPipeline401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response StopPipeline401JSONResponse) VisitStopPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopPipeline404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response StopPipeline404JSONResponse) VisitStopPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopPipeline409JSONResponse ErrorResponse
+
+func (response StopPipeline409JSONResponse) VisitStopPipelineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopPipeline500JSONResponse struct {
+	InternalServerErrorJSONResponse
+}
+
+func (response StopPipeline500JSONResponse) VisitStopPipelineResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -2730,6 +3628,14 @@ func (response GetSourceSchema401JSONResponse) VisitGetSourceSchemaResponse(w ht
 	return err
 }
 
+type GetSourceSchema502Response struct {
+}
+
+func (response GetSourceSchema502Response) VisitGetSourceSchemaResponse(w http.ResponseWriter) error {
+	w.WriteHeader(502)
+	return nil
+}
+
 type ListSourceTablesRequestObject struct {
 	Id PathID `json:"id"`
 }
@@ -2778,6 +3684,20 @@ func (response ListSourceTables500JSONResponse) VisitListSourceTablesResponse(w 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListSourceTables502JSONResponse ErrorResponse
+
+func (response ListSourceTables502JSONResponse) VisitListSourceTablesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(502)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2963,12 +3883,24 @@ type StrictServerInterface interface {
 	// Stream pipeline metrics (Server-Sent Events)
 	// (GET /pipelines/{id}/metrics)
 	StreamPipelineMetrics(ctx context.Context, request StreamPipelineMetricsRequestObject) (StreamPipelineMetricsResponseObject, error)
+	// Pause a pipeline
+	// (POST /pipelines/{id}/pause)
+	PausePipeline(ctx context.Context, request PausePipelineRequestObject) (PausePipelineResponseObject, error)
+	// Project a pause's time-to-breach before confirming it
+	// (GET /pipelines/{id}/pause-projection)
+	PausePauseProjection(ctx context.Context, request PausePauseProjectionRequestObject) (PausePauseProjectionResponseObject, error)
 	// Trigger a pipeline restart
 	// (POST /pipelines/{id}/restart)
 	RestartPipeline(ctx context.Context, request RestartPipelineRequestObject) (RestartPipelineResponseObject, error)
+	// Start/resume a pipeline
+	// (POST /pipelines/{id}/start)
+	StartPipeline(ctx context.Context, request StartPipelineRequestObject) (StartPipelineResponseObject, error)
 	// Get live pipeline status and per-table stats
 	// (GET /pipelines/{id}/status)
 	GetPipelineStatus(ctx context.Context, request GetPipelineStatusRequestObject) (GetPipelineStatusResponseObject, error)
+	// Stop a pipeline
+	// (POST /pipelines/{id}/stop)
+	StopPipeline(ctx context.Context, request StopPipelineRequestObject) (StopPipelineResponseObject, error)
 	// List all sink connections
 	// (GET /sinks)
 	ListSinks(ctx context.Context, request ListSinksRequestObject) (ListSinksResponseObject, error)
@@ -3333,6 +4265,69 @@ func (sh *strictHandler) StreamPipelineMetrics(ctx *gin.Context, id PathID) {
 	}
 }
 
+// PausePipeline operation middleware
+func (sh *strictHandler) PausePipeline(ctx *gin.Context, id PathID) {
+	var request PausePipelineRequestObject
+
+	request.Id = id
+
+	var body PausePipelineJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(ctx, err)
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.PausePipeline(ctx, request.(PausePipelineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PausePipeline")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(PausePipelineResponseObject); ok {
+		if err := validResponse.VisitPausePipelineResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PausePauseProjection operation middleware
+func (sh *strictHandler) PausePauseProjection(ctx *gin.Context, id PathID, params PausePauseProjectionParams) {
+	var request PausePauseProjectionRequestObject
+
+	request.Id = id
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.PausePauseProjection(ctx, request.(PausePauseProjectionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PausePauseProjection")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(PausePauseProjectionResponseObject); ok {
+		if err := validResponse.VisitPausePauseProjectionResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // RestartPipeline operation middleware
 func (sh *strictHandler) RestartPipeline(ctx *gin.Context, id PathID) {
 	var request RestartPipelineRequestObject
@@ -3359,6 +4354,32 @@ func (sh *strictHandler) RestartPipeline(ctx *gin.Context, id PathID) {
 	}
 }
 
+// StartPipeline operation middleware
+func (sh *strictHandler) StartPipeline(ctx *gin.Context, id PathID) {
+	var request StartPipelineRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.StartPipeline(ctx, request.(StartPipelineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StartPipeline")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(StartPipelineResponseObject); ok {
+		if err := validResponse.VisitStartPipelineResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetPipelineStatus operation middleware
 func (sh *strictHandler) GetPipelineStatus(ctx *gin.Context, id PathID) {
 	var request GetPipelineStatusRequestObject
@@ -3378,6 +4399,32 @@ func (sh *strictHandler) GetPipelineStatus(ctx *gin.Context, id PathID) {
 		sh.options.HandlerErrorFunc(ctx, err)
 	} else if validResponse, ok := response.(GetPipelineStatusResponseObject); ok {
 		if err := validResponse.VisitGetPipelineStatusResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// StopPipeline operation middleware
+func (sh *strictHandler) StopPipeline(ctx *gin.Context, id PathID) {
+	var request StopPipelineRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.StopPipeline(ctx, request.(StopPipelineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StopPipeline")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(StopPipelineResponseObject); ok {
+		if err := validResponse.VisitStopPipelineResponse(ctx.Writer); err != nil {
 			sh.options.ResponseErrorHandlerFunc(ctx, err)
 		}
 	} else if response != nil {

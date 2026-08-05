@@ -7,7 +7,9 @@ import {
 	Database,
 	Edit,
 	Monitor,
+	Play,
 	RefreshCw,
+	Square,
 	Table,
 	Wifi,
 	WifiOff,
@@ -21,7 +23,10 @@ import type {
 	SSEMessage,
 	TableStats,
 } from "@/api/types";
+import { LifecycleBadge } from "@/components/LifecycleBadge";
 import { MetricCard } from "@/components/MetricCard";
+import { PauseDialog } from "@/components/pipelines/PauseDialog";
+import { ReconciliationBadge } from "@/components/ReconciliationBadge";
 import { StatusBadge, type StatusBadgeStatus } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -86,8 +91,13 @@ function PipelineDetailPage() {
 
 	const sourceById = new Map(sources.map((s) => [s.id, s]));
 
-	// GET /pipelines/{id} now carries the server-computed status.
-	const livePipelineStatus = pipeline?.status ?? "unknown";
+	// GET /pipelines/{id} now carries the server-computed status, but that
+	// legacy `status` string still conflates lifecycle and health (it maps
+	// NeedsResnapshot/Snapshotting/Resuming/Failed to "transitioning" and
+	// Paused/Stopped to "paused"/"stopped", none of which are health
+	// values). The dedicated `health` field is only ever written while
+	// lifecycleState is Running (plan section 4.1/invariant 4), so drive
+	// the badge from that instead once a lifecycle record exists.
 
 	// Fetch initial status
 	const { data: initialStatus } = useQuery({
@@ -206,6 +216,20 @@ function PipelineDetailPage() {
 		},
 	});
 
+	const startMutation = useMutation({
+		mutationFn: () => pipelinesApi.start(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["pipeline", id] });
+		},
+	});
+
+	const stopMutation = useMutation({
+		mutationFn: () => pipelinesApi.stop(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["pipeline", id] });
+		},
+	});
+
 	if (isLoadingPipeline) {
 		return (
 			<div className="page-wrap px-4 pb-8 pt-14">
@@ -254,6 +278,25 @@ function PipelineDetailPage() {
 			)
 		: 0;
 
+	// Health is only meaningful while lifecycleState is "Running" (plan
+	// section 4.1/invariant 4) -- for any other lifecycle state (Paused,
+	// Stopped, Failed, ...) the field comes back "" and rendering a health
+	// opinion for it is exactly the "reports healthy/transitioning while
+	// diverging" bug this replaces. Pre-lifecycle pipelines (no
+	// lifecycleState on the record at all) still fall back to the legacy
+	// `status` string so old pipelines keep a badge.
+	const showHealthBadge =
+		!pipeline?.lifecycleState || pipeline.lifecycleState === "Running";
+	const healthBadgeStatus: StatusBadgeStatus = pipeline?.lifecycleState
+		? transition?.status?.toLowerCase() === "transitioning"
+			? "transitioning"
+			: pipeline.health === "healthy" || pipeline.health === "error"
+				? pipeline.health
+				: "unknown"
+		: ((transition?.status?.toLowerCase() === "transitioning"
+				? "transitioning"
+				: (pipeline?.status ?? "unknown")) as StatusBadgeStatus);
+
 	return (
 		<div className="page-wrap px-4 pb-8 pt-14">
 			{/* Header */}
@@ -265,19 +308,41 @@ function PipelineDetailPage() {
 							Back
 						</Link>
 					</Button>
-					{/* Live status, not a hardcoded "Configured" literal. A
-					    transition event from the stream wins over the value the
-					    status query returned when the page loaded. */}
-					<StatusBadge
-						status={
-							(transition?.status?.toLowerCase() === "transitioning"
-								? "transitioning"
-								: livePipelineStatus) as StatusBadgeStatus
-						}
-					/>
+					{/* Lifecycle state ("what is it doing") is its own badge,
+					    distinct from the health badge below ("is it doing it
+					    well") -- plan section 4.1. A Paused pipeline is
+					    neither healthy nor unhealthy, so collapsing the two
+					    would misreport it as one or the other. */}
+					{pipeline.lifecycleState && (
+						<LifecycleBadge state={pipeline.lifecycleState} />
+					)}
+					{/* Health -- only meaningful while lifecycleState is Running
+					    (plan section 4.1/invariant 4); driven from
+					    pipeline.health rather than the legacy status string,
+					    and not rendered at all for a Paused/Stopped/Failed
+					    pipeline. */}
+					{showHealthBadge && <StatusBadge status={healthBadgeStatus} />}
+					{/* Best-effort delete-reconciliation sub-status (plan section
+					    4.4 invariant 5). MUST stay visible when "stale" -- hiding
+					    it recreates the "reports healthy while diverging" failure
+					    the plan exists to prevent. */}
+					<ReconciliationBadge status={pipeline.reconciliation} />
 					{transition?.startedAt && (
 						<span className="text-xs text-muted-foreground">
 							since {new Date(transition.startedAt).toLocaleTimeString()}
+						</span>
+					)}
+					{pipeline.pausedUntil && (
+						<span
+							className="text-xs text-muted-foreground"
+							data-testid="paused-until"
+						>
+							resumes {new Date(pipeline.pausedUntil).toLocaleString()}
+						</span>
+					)}
+					{pipeline.reason && (
+						<span className="text-xs text-muted-foreground" title="reason">
+							{pipeline.reason}
 						</span>
 					)}
 					{isConnected ? (
@@ -302,6 +367,68 @@ function PipelineDetailPage() {
 						</p>
 					</div>
 					<div className="flex gap-2">
+						{/* Lifecycle controls: which of pause/extend/start/stop makes
+						    sense depends on lifecycle_state (plan section 4.3's
+						    transition table), not on health -- a Failed pipeline
+						    can still be "start"ed to re-evaluate.
+						    PauseDialog and Start stay mounted unconditionally
+						    (only their label/visibility changes) rather than being
+						    swapped for a differently-shaped element tree when the
+						    lifecycle state flips -- e.g. Running's plain
+						    <PauseDialog> for Paused's <>...<PauseDialog isExtend>.
+						    Unmounting mid-dialog (which a live pause/start actually
+						    triggers, via the query invalidation on success) drops
+						    the dialog's own open/result state and closes it out
+						    from under the operator. */}
+						{pipeline.lifecycleState !== "Stopped" &&
+							pipeline.lifecycleState !== "NeedsResnapshot" &&
+							pipeline.lifecycleState !== "Failed" &&
+							pipeline.lifecycleState !== "Stopping" && (
+								<PauseDialog
+									pipelineId={id}
+									isExtend={pipeline.lifecycleState === "Paused"}
+									disabled={
+										pipeline.lifecycleState !== "Running" &&
+										pipeline.lifecycleState !== "Paused" &&
+										pipeline.lifecycleState !== undefined
+									}
+								/>
+							)}
+						{(pipeline.lifecycleState === "Paused" ||
+							pipeline.lifecycleState === "Stopped" ||
+							pipeline.lifecycleState === "NeedsResnapshot" ||
+							pipeline.lifecycleState === "Failed") && (
+							<Button
+								variant="outline"
+								onClick={() => startMutation.mutate()}
+								disabled={startMutation.isPending}
+							>
+								<Play className="mr-2 h-4 w-4" />
+								Start
+							</Button>
+						)}
+						{(pipeline.lifecycleState === "Running" ||
+							pipeline.lifecycleState === "Paused" ||
+							pipeline.lifecycleState === undefined) && (
+							<Button
+								variant="outline"
+								onClick={() => stopMutation.mutate()}
+								disabled={stopMutation.isPending}
+							>
+								<Square className="mr-2 h-4 w-4" />
+								Stop
+							</Button>
+						)}
+						{startMutation.isError && (
+							<span className="text-xs text-destructive self-center">
+								{(startMutation.error as Error).message}
+							</span>
+						)}
+						{stopMutation.isError && (
+							<span className="text-xs text-destructive self-center">
+								{(stopMutation.error as Error).message}
+							</span>
+						)}
 						<Button
 							variant="outline"
 							onClick={() => restartMutation.mutate()}

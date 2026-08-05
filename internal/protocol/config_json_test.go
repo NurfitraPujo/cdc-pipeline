@@ -152,7 +152,8 @@ func TestPipelineConfigRoundTrip(t *testing.T) {
 			Options:        map[string]any{"maxLength": float64(8), "field_1": "email"},
 			OperationTypes: []OperationType{OpInsert},
 		}},
-		Retry: &RetryConfig{MaxRetries: 2, InitialInterval: time.Second, MaxInterval: 10 * time.Second},
+		Retry:        &RetryConfig{MaxRetries: 2, InitialInterval: time.Second, MaxInterval: 10 * time.Second},
+		DesiredState: DesiredStatePaused,
 	}
 
 	data, err := json.Marshal(want)
@@ -162,6 +163,9 @@ func TestPipelineConfigRoundTrip(t *testing.T) {
 	if strings.Contains(string(data), "250000000") {
 		t.Fatalf("batch_wait marshalled as nanoseconds: %s", data)
 	}
+	if !strings.Contains(string(data), `"desired_state":"paused"`) {
+		t.Fatalf("desired_state missing or wrong from marshalled output: %s", data)
+	}
 
 	var got PipelineConfig
 	if err := json.Unmarshal(data, &got); err != nil {
@@ -170,6 +174,9 @@ func TestPipelineConfigRoundTrip(t *testing.T) {
 
 	if got.BatchWait != want.BatchWait {
 		t.Errorf("batch_wait = %v, want %v", got.BatchWait, want.BatchWait)
+	}
+	if got.DesiredState != DesiredStatePaused {
+		t.Errorf("desired_state = %q, want %q -- the alias+shadow MarshalJSON pattern (config_json.go) silently drops fields an embedded MarshalJSON doesn't know about", got.DesiredState, DesiredStatePaused)
 	}
 	if got.Retry == nil || got.Retry.InitialInterval != time.Second {
 		t.Errorf("retry did not survive: %+v", got.Retry)

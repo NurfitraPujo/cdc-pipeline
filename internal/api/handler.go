@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/metrics"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
@@ -74,10 +75,80 @@ func validateHost(host string) string {
 type Handler struct {
 	kv nats.KeyValue
 	sf singleflight.Group
+
+	// lagRateSampler is WS-3's optional hook for the time-to-breach warning
+	// (plan section 5): when set, PausePipeline uses it to estimate the
+	// current WAL growth rate and warns if projected time-to-breach is
+	// shorter than the requested (or, absent a ttl, the maximum) TTL. Nil
+	// by default -- WS-4 owns wiring a real sampler against the existing
+	// cdc_source_slot_lag_bytes probe (querySlotLagBytes in
+	// internal/source/postgres/source.go); until then pauses proceed
+	// without a projection rather than block on one.
+	lagRateSampler SlotLagRateSampler
+
+	// partitionStrategyChecker is WS-5's seam for the Paused -> Resuming
+	// per-table strategy check (plan section 10, OQ-5/OQ-7): the operator
+	// states every prioritised table has a single integer PK, so resuming
+	// with Resnapshot: false (existing cdc_snapshot_chunks retained) is
+	// assumed safe -- but that is an assumption to DETECT, not trust. Nil
+	// by default, meaning StartPipeline resumes without the check (the
+	// pre-WS-5 behaviour); cmd/api/main.go installs the real probe
+	// (NewPartitionStrategyChecker) against cdc_snapshot_chunks.
+	partitionStrategyChecker PartitionStrategyChecker
+
+	// slotHealthChecker is StartPipeline's seam for the (Paused, start) ->
+	// Resuming guard (plan section 4.3): the same replication-slot health
+	// probe the pause-expiry ticker already consults on timer expiry
+	// (config.SlotHealthChecker / config.NewPostgresSlotHealthChecker),
+	// reused rather than reinvented so the operator-driven resume path and
+	// the timer-driven one can never disagree about what "the slot is
+	// alive" means. Nil by default, meaning StartPipeline resumes
+	// optimistically (SlotAlive: true) -- the pre-WS-5 behaviour;
+	// cmd/api/main.go installs the real probe.
+	slotHealthChecker config.SlotHealthChecker
 }
+
+// SlotLagRateSampler estimates a pipeline's current WAL growth rate in
+// bytes/sec, typically from two samples of the existing
+// cdc_source_slot_lag_bytes probe taken apart in time. See Handler.lagRateSampler.
+type SlotLagRateSampler func(ctx context.Context, pipelineID string, cfg protocol.PipelineConfig) (bytesPerSec float64, ok bool)
+
+// PartitionStrategyChecker inspects a pipeline's recorded snapshot chunks
+// (cdc_snapshot_chunks.partition_strategy) and reports whether any belong
+// to a table chunked with a strategy resume cannot guarantee coverage for
+// (plan section 10, OQ-5: only integer_range is stable across a resume;
+// ctid_block and offset address physical row position, which drifts under
+// concurrent UPDATE/DELETE/VACUUM). ok is false when the probe itself could
+// not run (no source, connection failure, missing chunks table on a
+// pipeline that has never snapshotted) -- callers must treat that the same
+// as "nothing to report", never as "degraded confirmed". tables lists the
+// distinct non-integer_range table names found, for logging/Reason text.
+type PartitionStrategyChecker func(ctx context.Context, pipelineID string, cfg protocol.PipelineConfig) (degraded bool, tables []string, ok bool)
 
 func NewHandler(kv nats.KeyValue) *Handler {
 	return &Handler{kv: kv}
+}
+
+// SetSlotLagRateSampler installs the WAL-growth-rate sampler PausePipeline
+// consults for its time-to-breach warning (plan section 5). Pass nil to go
+// back to "no projection available".
+func (h *Handler) SetSlotLagRateSampler(sampler SlotLagRateSampler) {
+	h.lagRateSampler = sampler
+}
+
+// SetPartitionStrategyChecker installs the per-table partition-strategy
+// probe StartPipeline consults when resuming from Paused (plan section 10,
+// OQ-5/OQ-7). Pass nil to resume without the check.
+func (h *Handler) SetPartitionStrategyChecker(checker PartitionStrategyChecker) {
+	h.partitionStrategyChecker = checker
+}
+
+// SetSlotHealthChecker installs the replication-slot health probe
+// StartPipeline consults for the (Paused, start) -> Resuming guard (plan
+// section 4.3). Pass nil to resume optimistically (SlotAlive: true), the
+// pre-WS-5 behaviour.
+func (h *Handler) SetSlotHealthChecker(checker config.SlotHealthChecker) {
+	h.slotHealthChecker = checker
 }
 
 // --- Global Config ---
@@ -416,8 +487,12 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	})
 }
 
-// pipelineWithStatus renders a pipeline config with its computed "status"
-// spliced in alongside the config fields.
+// pipelineWithStatus renders a pipeline config with its computed status
+// fields spliced in alongside the config fields: the legacy "status" string
+// (kept for backward compatibility -- see getPipelineStatusString's doc
+// comment for the one place it is not fully compatible) plus the new
+// "lifecycle_state" / "health" pair from PipelineLifecycleStatus (plan
+// section 4.1).
 //
 // This deliberately does not use a struct embedding protocol.PipelineConfig.
 // PipelineConfig has a MarshalJSON method (internal/protocol/config_json.go,
@@ -431,14 +506,27 @@ func (h *Handler) pipelineWithStatus(cfg protocol.PipelineConfig) (json.RawMessa
 		return nil, err
 	}
 
-	extra, err := json.Marshal(map[string]string{
-		"status": h.getPipelineStatusString(cfg.ID),
+	lifecycle := h.getPipelineLifecycleStatus(cfg.ID)
+	extra, err := json.Marshal(struct {
+		Status         string                        `json:"status"`
+		LifecycleState string                        `json:"lifecycle_state"`
+		Health         string                        `json:"health"`
+		PausedUntil    *time.Time                     `json:"paused_until,omitempty"`
+		Reason         string                        `json:"reason,omitempty"`
+		Reconciliation protocol.ReconciliationStatus `json:"reconciliation,omitempty"`
+	}{
+		Status:         legacyStatusString(lifecycle),
+		LifecycleState: lifecycle.Lifecycle,
+		Health:         lifecycle.Health,
+		PausedUntil:    lifecycle.PausedUntil,
+		Reason:         lifecycle.Reason,
+		Reconciliation: lifecycle.Reconciliation,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// {"a":1} + {"status":"healthy"} -> {"a":1,"status":"healthy"}
+	// {"a":1} + {"status":"healthy",...} -> {"a":1,"status":"healthy",...}
 	merged := make([]byte, 0, len(encoded)+len(extra))
 	merged = append(merged, encoded[:len(encoded)-1]...)
 	merged = append(merged, ',')
@@ -446,23 +534,97 @@ func (h *Handler) pipelineWithStatus(cfg protocol.PipelineConfig) (json.RawMessa
 	return merged, nil
 }
 
-func (h *Handler) getPipelineStatusString(id string) string {
-	actualStatus := "healthy"
+// PipelineLifecycleStatus splits "what is this pipeline doing" from "is it
+// doing it well" per plan section 4.1: Lifecycle is the system's view of
+// what is actually happening (Running/Paused/Stopped/Transitioning for now
+// -- the fuller state machine in internal/protocol/lifecycle.go lands in
+// WS-2+), and Health is only meaningful while Lifecycle is "Running". A
+// deliberately paused or stopped pipeline is neither healthy nor unhealthy,
+// so Health is empty for it -- reporting "error" there, as the previous
+// single-string status did for "no worker", is exactly the conflation this
+// plan exists to fix.
+type PipelineLifecycleStatus struct {
+	Lifecycle   string     `json:"lifecycle_state"`
+	Health      string     `json:"health"`
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+	// Reconciliation carries WS-5/WS-7's degrade signal (plan invariant 5:
+	// "stale must be visible in the UI ... hiding it would recreate the
+	// 'reports healthy while diverging' failure this plan exists to
+	// prevent"). omitempty relies on ReconciliationOK being "" (see its doc
+	// comment), the same convention protocol.PipelineLifecycleRecord already
+	// uses for this field.
+	Reconciliation protocol.ReconciliationStatus `json:"reconciliation,omitempty"`
+}
 
+// getPipelineLifecycleStatus computes the split lifecycle/health view for a
+// pipeline. It fetches the pipeline's config to read desired_state --
+// getPipelineStatusString (the pre-existing, still-used single-string form)
+// wraps this rather than duplicating the KV reads.
+//
+// The persisted lifecycle record (written only by PausePipeline/
+// StartPipeline via protocol.Transition, see getLifecycleRecord) is
+// authoritative whenever one exists: it is the only place paused_until
+// lives, and it is the only source that can distinguish e.g.
+// NeedsResnapshot/Snapshotting/Failed, none of which desired_state alone
+// can express. desired_state is used only as the fallback for pipelines
+// that predate WS-2 or have never been paused/started, mirroring
+// getLifecycleRecord's own "no record" default of Running.
+func (h *Handler) getPipelineLifecycleStatus(id string) PipelineLifecycleStatus {
 	tsKey := protocol.TransitionStateKey(id)
 	if tsEntry, err := h.kv.Get(tsKey); err == nil {
 		var ts protocol.PipelineTransitionState
 		if err := json.Unmarshal(tsEntry.Value(), &ts); err == nil && ts.Status == "Transitioning" {
-			return "transitioning"
+			return PipelineLifecycleStatus{Lifecycle: "Transitioning"}
 		}
 	}
 
+	if recEntry, err := h.kv.Get(protocol.LifecycleStateKey(id)); err == nil {
+		var rec protocol.PipelineLifecycleRecord
+		if err := json.Unmarshal(recEntry.Value(), &rec); err == nil && rec.State != "" {
+			st := PipelineLifecycleStatus{
+				Lifecycle:      string(rec.State),
+				PausedUntil:    rec.PausedUntil,
+				Reason:         rec.Reason,
+				Reconciliation: rec.Reconciliation,
+			}
+			if rec.State == protocol.StateRunning {
+				st.Health = h.workerHealth(id)
+			}
+			return st
+		}
+	}
+
+	desired := protocol.DesiredStateRunning
+	if entry, err := h.kv.Get(protocol.PipelineConfigKey(id)); err == nil {
+		var cfg protocol.PipelineConfig
+		if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+			desired = cfg.EffectiveDesiredState()
+		}
+	}
+
+	switch desired {
+	case protocol.DesiredStatePaused:
+		return PipelineLifecycleStatus{Lifecycle: "Paused"}
+	case protocol.DesiredStateStopped:
+		return PipelineLifecycleStatus{Lifecycle: "Stopped"}
+	}
+
+	return PipelineLifecycleStatus{Lifecycle: "Running", Health: h.workerHealth(id)}
+}
+
+// workerHealth reports the running-worker heartbeat health used whenever
+// lifecycle state is (effectively) "Running" -- the only case where a
+// missing or stale heartbeat is meaningful, since a paused/stopped/
+// transitioning pipeline has no worker by design.
+func (h *Handler) workerHealth(id string) string {
+	health := "healthy"
 	hbKey := protocol.WorkerHeartbeatKey(id)
 	if hbEntry, err := h.kv.Get(hbKey); err == nil {
 		var hb protocol.WorkerHeartbeat
 		if err := json.Unmarshal(hbEntry.Value(), &hb); err == nil {
 			if time.Since(hb.UpdatedAt) > 60*time.Second {
-				actualStatus = "error"
+				health = "error"
 			} else if hb.Status != "" && hb.Status != "Running" {
 				// A fresh heartbeat that reports a non-"Running" status (e.g. a
 				// worker that failed to start and is looping in the retry
@@ -470,14 +632,48 @@ func (h *Handler) getPipelineStatusString(id string) string {
 				// reported "healthy" just because it is being updated on
 				// schedule (WS-8/WS-9: "a pipeline that fails to construct a
 				// processor must no longer be reported healthy").
-				actualStatus = "error"
+				health = "error"
 			}
 		}
 	} else {
-		actualStatus = "error"
+		health = "error"
 	}
+	return health
+}
 
-	return actualStatus
+// getPipelineStatusString is the backward-compatible single-string status
+// used by the existing "status" field and the ?status= filter. It is a thin
+// projection of getPipelineLifecycleStatus: "transitioning" unchanged,
+// "healthy"/"error" unchanged for a running pipeline, and now "paused" /
+// "stopped" instead of the old behaviour of reporting "error" for any
+// pipeline with no worker -- callers filtering on status="error" will no
+// longer match a deliberately paused/stopped pipeline. That is the one
+// place this is not backward compatible; see plan section 4.1.
+func (h *Handler) getPipelineStatusString(id string) string {
+	return legacyStatusString(h.getPipelineLifecycleStatus(id))
+}
+
+// legacyStatusString projects a PipelineLifecycleStatus down to the single
+// "status" string the API returned before this plan. See
+// getPipelineStatusString's doc comment for the one behaviour change.
+func legacyStatusString(st PipelineLifecycleStatus) string {
+	switch st.Lifecycle {
+	case "Transitioning":
+		return "transitioning"
+	case string(protocol.StateRunning):
+		return st.Health
+	case string(protocol.StatePaused), string(protocol.StatePausing):
+		return "paused"
+	case string(protocol.StateStopped), string(protocol.StateStopping):
+		return "stopped"
+	default:
+		// NeedsResnapshot/Snapshotting/Resuming/Failed have no pre-WS-2
+		// equivalent single-string status; "transitioning" is the closest
+		// existing meaning ("the pipeline is neither settled-healthy nor
+		// settled-paused/stopped right now") and keeps the legacy field
+		// non-empty for status= filtering.
+		return "transitioning"
+	}
 }
 
 // RestartPipeline triggers a reload for a specific pipeline.
@@ -510,6 +706,684 @@ func (h *Handler) RestartPipeline(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{"status": "restart triggered"})
+}
+
+// getLifecycleRecord reads the persisted lifecycle record for a pipeline,
+// defaulting to protocol.StateRunning when none exists yet -- every
+// pipeline created before WS-2, or that has never been paused/stopped, has
+// no record, and "no record" must mean the same thing PipelineConfig's
+// EffectiveDesiredState zero value means: running.
+func (h *Handler) getLifecycleRecord(id string) protocol.PipelineLifecycleRecord {
+	entry, err := h.kv.Get(protocol.LifecycleStateKey(id))
+	if err != nil {
+		return protocol.PipelineLifecycleRecord{State: protocol.StateRunning}
+	}
+	var rec protocol.PipelineLifecycleRecord
+	if err := json.Unmarshal(entry.Value(), &rec); err != nil || rec.State == "" {
+		return protocol.PipelineLifecycleRecord{State: protocol.StateRunning}
+	}
+	return rec
+}
+
+// putLifecycleRecord persists the lifecycle record. This, plus
+// getLifecycleRecord above, is the only place the API package touches
+// protocol.LifecycleStateKey -- every write is the result of a
+// protocol.Transition call, never a direct state assignment (section 4.5).
+func (h *Handler) putLifecycleRecord(id string, rec protocol.PipelineLifecycleRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	_, err = h.kv.Put(protocol.LifecycleStateKey(id), data)
+	return err
+}
+
+// pausePipelineRequest is the optional body for POST /pipelines/{id}/pause.
+// TTL, when set, is a Go duration string (e.g. "30m", "2h"). It is
+// converted to an absolute paused_until timestamp at request time and
+// stored that way (PipelineLifecycleRecord.PausedUntil) -- see plan
+// section 8. The 4h ceiling and the WAL-budget projection that warns
+// before confirming a pause (plan section 5) are WS-3/WS-4's guard, not
+// this handler's: any positive TTL is accepted here.
+type pausePipelineRequest struct {
+	TTL string `json:"ttl,omitempty"`
+}
+
+// PausePipeline requests that a running pipeline stop consuming while
+// retaining its replication slot (plan section 4.2), optionally for a
+// bounded TTL. It only sets operator intent (desired_state) and the
+// lifecycle record; it does not drain the worker itself. The actual drain
+// reuses ConfigManager's existing stopWorker (manager.go,
+// honourDesiredState), which the desired_state write below triggers
+// asynchronously via ConfigManager's existing config-watch -- see plan
+// section 9 (WS-2 must not add a second drain path).
+//
+// Because that drain is not observed here, the lifecycle record advances
+// straight from Running through Pausing to Paused within this request,
+// mirroring the same simplification StartPipeline makes for
+// Resuming -> Running: WS-2 has no async drain-complete/worker-healthy
+// watcher yet (that machinery arrives with WS-3's ticker), so the two
+// legal hops are taken back-to-back rather than left half-finished.
+//
+// @Summary      Pause pipeline
+// @Description  Stop consuming while retaining the replication slot, optionally for a bounded TTL
+// @Tags         pipelines
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        id    path  string                true  "Pipeline ID"
+// @Param        body  body  pausePipelineRequest  false "Optional TTL"
+// @Success      200  {object}  protocol.PipelineLifecycleRecord
+// @Failure      400  {object}  map[string]string "invalid ttl"
+// @Failure      404  {object}  map[string]string "not found"
+// @Failure      409  {object}  map[string]string "illegal transition"
+// @Router       /pipelines/{id}/pause [post]
+//nolint:gocyclo // lifecycle validation + state-machine handler; each branch is a distinct precondition/transition and extracting them would scatter the request flow
+func (h *Handler) PausePipeline(c *gin.Context) {
+	id := c.Param("id")
+	entry, err := h.kv.Get(protocol.PipelineConfigKey(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
+		return
+	}
+	var cfg protocol.PipelineConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Always attempt to read and bind the body rather than gating on
+	// ContentLength: chunked requests, HTTP/2 streamed bodies, and any
+	// client that omits Content-Length report ContentLength == -1 (and a
+	// request with a nil Body, as in some test harnesses, isn't even
+	// bindable via gin's own ShouldBindJSON, which returns a bare
+	// "invalid request" for req.Body == nil rather than io.EOF). Skipping
+	// the bind for any of those silently drops ttl -- turning a bounded
+	// pause into an unbounded one, defeating the whole point of the TTL
+	// backstop (plan section 2). Reading the raw body ourselves and only
+	// unmarshalling non-empty bytes handles a nil body, a zero-length
+	// body, and a chunked/streamed body identically: the only body that
+	// legitimately binds to nothing is a truly empty one.
+	var req pausePipelineRequest
+	if c.Request != nil && c.Request.Body != nil {
+		body, err := c.GetRawData()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
+
+	var ttl time.Duration
+	if req.TTL != "" {
+		ttl, err = time.ParseDuration(req.TTL)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid ttl: %s", err.Error())})
+			return
+		}
+		if ttl <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ttl must be positive"})
+			return
+		}
+		// WS-3: enforce the 4h ceiling (plan section 2/OQ-3) here, at the
+		// point the TTL is accepted, rather than silently clamping it --
+		// silently truncating an operator's requested window would defeat
+		// the point of asking for one.
+		if ttl > protocol.MaxPauseTTL {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("ttl exceeds the maximum pause duration of %s", protocol.MaxPauseTTL)})
+			return
+		}
+	}
+
+	rec := h.getLifecycleRecord(id)
+
+	// Running -> Pausing, or Paused -> Paused (extending an in-progress
+	// pause, plan section 11: "show the resume time and make extending it
+	// trivial"). Anything else (Stopping, Stopped, ...) is rejected with
+	// the transition table's own error, so this handler carries no
+	// separate "already paused" special case beyond the extend row itself.
+	firstOutcome, err := protocol.Transition(rec.State, protocol.EventPause, protocol.Guards{})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	outcome := firstOutcome
+	// Pausing -> Paused, taken immediately -- see doc comment above. Only
+	// needed when the first hop actually landed in Pausing (Running ->
+	// Pausing); the extend leg (Paused -> Paused) is already terminal and
+	// re-running drain_complete against it would be a second, undocumented
+	// transition.
+	if firstOutcome.To == protocol.StatePausing {
+		outcome, err = protocol.Transition(protocol.StatePausing, protocol.EventDrainComplete, protocol.Guards{})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	now := time.Now().UTC()
+	newRec := protocol.PipelineLifecycleRecord{
+		State:          outcome.To,
+		Reconciliation: rec.Reconciliation,
+		UpdatedAt:      now,
+	}
+	// A pause with no ttl in the body must still expire: an unbounded pause
+	// is exactly the "forgotten pause filling the source disk" scenario the
+	// timer exists to prevent (plan section 2). Falling back to the 4h
+	// ceiling here -- rather than leaving PausedUntil nil -- closes that
+	// hole; maybeResumeExpiredPause (internal/config/pause_expiry.go) only
+	// acts on a non-nil PausedUntil, so a nil value here would retain the
+	// slot forever regardless of the ceiling enforced above on an explicit
+	// ttl.
+	effectiveTTL := ttl
+	if effectiveTTL <= 0 {
+		effectiveTTL = protocol.MaxPauseTTL
+	}
+	pausedUntil := now.Add(effectiveTTL)
+	newRec.PausedUntil = &pausedUntil
+
+	// Marshal + write desired_state before the lifecycle record, and check
+	// the marshal error instead of discarding it. Ordering matters: if the
+	// config write fails, the lifecycle record must NOT have already been
+	// committed to "Paused" -- otherwise the handler has reported 500 while
+	// leaving a record that claims the pipeline is paused even though
+	// desired_state (and therefore the running worker) never changed, and a
+	// retried pause then gets rejected 409 by the transition table with no
+	// way to reconcile except calling start. A dropped marshal error is
+	// worse than cosmetic here too: a nil `data` would Put an empty value
+	// into the config key, handing ConfigManager's watcher something it
+	// cannot unmarshal (manager.go:351).
+	cfg.DesiredState = protocol.DesiredStatePaused
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := h.kv.Put(protocol.PipelineConfigKey(id), data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.putLifecycleRecord(id, newRec); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, h.pauseResponse(c, id, cfg, ttl, newRec))
+}
+
+// pausePipelineResponse mirrors protocol.PipelineLifecycleRecord with one
+// extra field: the plan section 5 time-to-breach warning, populated only
+// when a SlotLagRateSampler is installed and its projection is shorter
+// than the requested TTL. Embedding (rather than a new generated schema)
+// keeps this additive and avoids the openapi.yaml regen this endpoint's
+// core response shape doesn't otherwise need.
+type pausePipelineResponse struct {
+	protocol.PipelineLifecycleRecord
+	Warning string `json:"warning,omitempty"`
+}
+
+// pauseResponse computes the optional WAL-budget warning for PausePipeline.
+// effectiveTTL is protocol.MaxPauseTTL when the request left ttl
+// unspecified -- newRec.PausedUntil is always set by the caller now (an
+// unbounded request is capped to the 4h ceiling there, see PausePipeline),
+// so MaxPauseTTL is genuinely the longest window the projection ever needs
+// to warn about.
+//
+// The remaining budget fed into ProjectedTimeToBreach is the slot's actual
+// headroom (protocol.WALBudgetBytes minus WAL already retained,
+// remainingWALBudgetBytes), not the constant full budget: a slot already
+// 20 GB into its 30 GB budget has far less runway than a fresh one, and
+// passing the constant systematically under-warns (see WS-3 blocking
+// finding). Fetching it costs a second short-lived query against the same
+// connection the rate sampler already opened; on any failure it falls back
+// to the full budget, which is the sampler's previous (optimistic, but not
+// wrong-in-a-new-way) behaviour.
+func (h *Handler) pauseResponse(c *gin.Context, id string, cfg protocol.PipelineConfig, ttl time.Duration, rec protocol.PipelineLifecycleRecord) pausePipelineResponse {
+	resp := pausePipelineResponse{PipelineLifecycleRecord: rec}
+	projected, ok := h.projectPauseBreach(c.Request.Context(), id, cfg)
+	if !ok {
+		return resp
+	}
+	effectiveTTL := ttl
+	if effectiveTTL <= 0 {
+		effectiveTTL = protocol.MaxPauseTTL
+	}
+	if projected < effectiveTTL {
+		resp.Warning = breachWarning(projected)
+	}
+	return resp
+}
+
+// breachWarning renders the plan section 5 time-to-breach message shared by
+// PausePipeline's post-commit warning and PausePauseProjection's pre-commit
+// one -- the two endpoints must say the same thing about the same
+// projection, just at different points in the operator's flow.
+func breachWarning(projected time.Duration) string {
+	return fmt.Sprintf(
+		"at the current WAL growth rate this pause will hit the WAL budget in ~%s",
+		projected.Round(time.Minute),
+	)
+}
+
+// projectPauseBreach computes the plan section 5 projected time-to-breach
+// for a pipeline: how long, at the WAL growth rate sampled from the
+// existing cdc_source_slot_lag_bytes probe, until the source's slot exceeds
+// its WAL budget. It is the single place both PausePipeline's post-commit
+// warning (pauseResponse, above) and the pause-projection endpoint's
+// pre-commit read (PausePauseProjection, below) get this number from, so
+// the two can never drift apart on what "the projection" means.
+//
+// Returns false when no sampler is installed, the sampler cannot produce a
+// rate (e.g. too little history yet), or the growth rate is non-positive
+// (ProjectedTimeToBreach's own "never breaches" case) -- callers treat that
+// as "no projection available" rather than a hard error, matching the
+// sampler's existing best-effort contract.
+func (h *Handler) projectPauseBreach(ctx context.Context, id string, cfg protocol.PipelineConfig) (time.Duration, bool) {
+	if h.lagRateSampler == nil {
+		return 0, false
+	}
+	rate, ok := h.lagRateSampler(ctx, id, cfg)
+	if !ok {
+		return 0, false
+	}
+
+	remaining := protocol.WALBudgetBytes
+	if len(cfg.Sources) > 0 {
+		if db, srcCfg, err := h.openSourceDBByID(cfg.Sources[0]); err == nil {
+			if r, ok := remainingWALBudgetBytes(ctx, db, srcCfg.SlotName); ok {
+				remaining = r
+			}
+			_ = db.Close()
+		}
+	}
+
+	return protocol.ProjectedTimeToBreach(remaining, rate)
+}
+
+// pausePipelineProjectionResponse is GET /pipelines/{id}/pause-projection's
+// body: the plan section 5 warning, read-only and computed against whatever
+// ttl the operator is currently considering, without committing a pause.
+// Deliberately the same shape as pausePipelineResponse's warning field so
+// the frontend's post-commit and pre-commit code paths render identically.
+type pausePipelineProjectionResponse struct {
+	Warning string `json:"warning,omitempty"`
+}
+
+// PausePauseProjectionRoute adapts PausePauseProjection to gin.HandlerFunc.
+//
+// The generated oapi-codegen signature takes the path and query parameters as
+// arguments, but this server registers its routes by hand (cmd/api/main.go)
+// rather than through RegisterHandlers, so nothing would otherwise bind them.
+// Without this adapter the route simply is not mounted and the endpoint 404s
+// -- which the pause dialog reads as "no warning to show", silently defeating
+// the whole point of a pre-commit projection.
+func (h *Handler) PausePauseProjectionRoute(c *gin.Context) {
+	var params PausePauseProjectionParams
+	if ttl := c.Query("ttl"); ttl != "" {
+		params.Ttl = &ttl
+	}
+	h.PausePauseProjection(c, c.Param("id"), params)
+}
+
+// PausePauseProjection answers "if I paused for this ttl right now, would I
+// hit the WAL budget guard first?" without taking any action -- no
+// desired_state write, no lifecycle transition. Plan section 5 is explicit
+// that the projection must be shown "before the pause is confirmed"; this
+// is that read. PauseDialog calls it as the operator adjusts the TTL slider
+// and re-renders the same warning PausePipeline would otherwise only show
+// after commit.
+//
+// @Summary      Project a pause's time-to-breach
+// @Description  Read-only projection of when a pause of the given ttl would hit the WAL budget guard, shown before the pause is confirmed
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path   string  true   "Pipeline ID"
+// @Param        ttl  query  string  false  "Go duration string being considered, e.g. \"2h\" (defaults to the 4h ceiling)"
+// @Success      200  {object}  pausePipelineProjectionResponse
+// @Failure      400  {object}  map[string]string "invalid ttl"
+// @Failure      404  {object}  map[string]string "not found"
+// @Router       /pipelines/{id}/pause-projection [get]
+func (h *Handler) PausePauseProjection(c *gin.Context, id PathID, params PausePauseProjectionParams) {
+	entry, err := h.kv.Get(protocol.PipelineConfigKey(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
+		return
+	}
+	var cfg protocol.PipelineConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ttl := protocol.MaxPauseTTL
+	if params.Ttl != nil && *params.Ttl != "" {
+		parsed, err := time.ParseDuration(*params.Ttl)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid ttl: %s", err.Error())})
+			return
+		}
+		if parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ttl must be positive"})
+			return
+		}
+		if parsed > protocol.MaxPauseTTL {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("ttl exceeds the maximum pause duration of %s", protocol.MaxPauseTTL)})
+			return
+		}
+		ttl = parsed
+	}
+
+	resp := pausePipelineProjectionResponse{}
+	if projected, ok := h.projectPauseBreach(c.Request.Context(), id, cfg); ok && projected < ttl {
+		resp.Warning = breachWarning(projected)
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// StartPipeline requests that a pipeline resume. For the common case
+// (Paused -> Running) it closes the loop synchronously, the same way
+// PausePipeline does for Running -> Paused, and flips desired_state back
+// to running so ConfigManager's existing config-watch starts the worker
+// (manager.go startNewWorker); it does not start the worker itself.
+//
+// For (NeedsResnapshot, start) -> Snapshotting, WS-6 drives it too: it sets
+// desired_state=running so ConfigManager starts a worker that re-snapshots
+// (see the branch below), but does not itself advance the lifecycle state
+// any further -- that happens asynchronously once the re-snapshot completes
+// (internal/config/resnapshot_watcher.go).
+//
+// For every other state outside this handler's scope -- Stopped, Failed --
+// Transition is still consulted so the call is forward-compatible, but the
+// resulting lifecycle state is only persisted, not driven further, and
+// desired_state is deliberately left untouched: setting it to running for
+// Stopped -> NeedsResnapshot would let ConfigManager start a plain worker
+// for a pipeline that needs a re-snapshot first, which is exactly
+// invariant 1.
+//
+// @Summary      Start/resume pipeline
+// @Description  Resume a paused pipeline, or advance a stopped/failed pipeline's lifecycle state
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path  string  true  "Pipeline ID"
+// @Success      200  {object}  protocol.PipelineLifecycleRecord
+// @Failure      404  {object}  map[string]string "not found"
+// @Failure      409  {object}  map[string]string "illegal transition"
+// @Router       /pipelines/{id}/start [post]
+//nolint:gocyclo // lifecycle validation + state-machine handler; each branch is a distinct precondition/transition and extracting them would scatter the request flow
+func (h *Handler) StartPipeline(c *gin.Context) {
+	id := c.Param("id")
+	entry, err := h.kv.Get(protocol.PipelineConfigKey(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
+		return
+	}
+	var cfg protocol.PipelineConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	rec := h.getLifecycleRecord(id)
+
+	guards := protocol.Guards{
+		// Optimistic default: SlotAlive true, WALStatusLost false. Real
+		// once WS-5 wires up SetSlotHealthChecker below -- until a checker
+		// is installed this preserves the pre-WS-5 behaviour.
+		SlotAlive: true,
+	}
+	if h.slotHealthChecker != nil {
+		// WS-5: the slot can now genuinely be gone or invalidated by the
+		// time an operator hits /start on a long-paused pipeline (plan
+		// section 4.3) -- reuse the same probe the pause-expiry ticker
+		// consults on timer expiry (config.SlotHealthChecker) rather than
+		// trusting the constant above, so the operator-driven and
+		// timer-driven resume paths can never disagree about slot health.
+		// (Paused, start) only consults SlotAlive (see the transition
+		// table, internal/protocol/lifecycle.go) -- WALStatusLost is
+		// (Paused, timer_expiry)'s guard, not this one's.
+		health := h.slotHealthChecker(c.Request.Context(), id, cfg)
+		guards.SlotAlive = health.Alive
+	}
+	// RM-2: (Failed, start) is the only row that consults NeedsResnapshot
+	// (protocol/lifecycle.go), and it was previously always left false --
+	// unconditionally routing a recovered-from-Failed pipeline to Resuming
+	// regardless of slot health. Derive it from the same SlotAlive probe
+	// this handler already runs for (Paused, start): if the slot did not
+	// survive whatever put the pipeline in Failed, a plain resume cannot
+	// safely continue and must re-snapshot instead, mirroring
+	// (Paused, timer_expiry)'s !SlotAlive -> NeedsResnapshot row.
+	guards.NeedsResnapshot = !guards.SlotAlive
+	outcome, err := protocol.Transition(rec.State, protocol.EventStart, guards)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	newRec := protocol.PipelineLifecycleRecord{
+		State:          outcome.To,
+		Reconciliation: rec.Reconciliation,
+		UpdatedAt:      time.Now().UTC(),
+	}
+
+	if outcome.To == protocol.StateResuming {
+		// Resuming -> Running, taken immediately -- see doc comment above.
+		final, err := protocol.Transition(protocol.StateResuming, protocol.EventWorkerHealthy, protocol.Guards{})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		newRec.State = final.To
+		newRec.PausedUntil = nil // invariant 3: cleared on exit from Paused/Pausing
+
+		// WS-5: resume from Paused continues the existing snapshot
+		// (Resnapshot: false -- internal/source/postgres/source.go never
+		// sets Snapshot.Resnapshot, so LoadJob resumes cdc_snapshot_chunks
+		// rather than wiping it). That is only safe for chunks recorded as
+		// integer_range (plan section 10, OQ-5): ctid_block/offset chunks
+		// key off physical row position, which can drift from concurrent
+		// UPDATE/DELETE/VACUUM even while the slot stays alive through a
+		// pause. The operator states every prioritised table has a single
+		// integer PK (OQ-7), but that is an assumption to detect, not
+		// trust -- read what each table's chunks actually recorded, and
+		// degrade explicitly (log + reconciliation stale) rather than
+		// resuming on a strategy that cannot guarantee coverage.
+		if h.partitionStrategyChecker != nil {
+			if degraded, tables, ok := h.partitionStrategyChecker(c.Request.Context(), id, cfg); ok && degraded {
+				log.Warn().
+					Str("pipeline_id", id).
+					Strs("tables", tables).
+					Msg("resume: some tables' snapshot chunks use a non-integer_range partition strategy; coverage cannot be guaranteed, marking reconciliation stale")
+				newRec.Reconciliation = protocol.ReconciliationStale
+				newRec.Reason = fmt.Sprintf(
+					"resume detected non-integer_range snapshot chunks for table(s) %s; delete/update coverage during the pause cannot be guaranteed until reconciled",
+					strings.Join(tables, ", "),
+				)
+			}
+		}
+
+		// See PausePipeline's matching comment: write desired_state (and
+		// check the marshal error) before the lifecycle record, so a failed
+		// config write never leaves a lifecycle record claiming "Running"
+		// while desired_state -- and therefore ConfigManager's worker --
+		// never actually resumed.
+		cfg.DesiredState = protocol.DesiredStateRunning
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := h.kv.Put(protocol.PipelineConfigKey(id), data); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	} else if outcome.To == protocol.StateSnapshotting {
+		// WS-6: (NeedsResnapshot, start) -> Snapshotting is the one other
+		// outcome this handler must actually drive, not just persist. Unlike
+		// the WS-5-era comment above (now superseded for this specific row),
+		// invariant 1 does not forbid setting desired_state=running here --
+		// it forbids reaching Running WITHOUT passing through Snapshotting,
+		// and Snapshotting is exactly the state being entered. Flipping
+		// desired_state lets ConfigManager's config-watch start a worker,
+		// and PostgresSource.shouldResnapshot (internal/source/postgres/
+		// source.go) reads this very record back to set
+		// Snapshot.Resnapshot: true for that worker, wiping
+		// cdc_snapshot_chunks and re-snapshotting from scratch. Completion
+		// is detected asynchronously by the pause-expiry ticker's WS-6
+		// sweep (maybeCompleteResnapshot, internal/config/
+		// resnapshot_watcher.go), which fires (Snapshotting, complete) once
+		// cdc_snapshot_job.completed flips -- that is what actually lands
+		// the pipeline on Running with reconciliation marked stale
+		// (invariant 5), not this handler.
+		//
+		// Write ordering here follows StopPipeline's rule, not
+		// PausePipeline/StartPipeline's Resuming shortcut above: the second
+		// hop (a worker actually starting and re-snapshotting) is
+		// asynchronous, driven by ConfigManager's config-watch once
+		// desired_state flips. PostgresSource.shouldResnapshot
+		// (internal/source/postgres/source.go) reads this very lifecycle
+		// record back to decide Snapshot.Resnapshot, so the record MUST be
+		// durable as Snapshotting before desired_state is written -- writing
+		// desired_state first would let a worker start, read the still-
+		// NeedsResnapshot record, and boot without wiping
+		// cdc_snapshot_chunks, silently skipping the re-snapshot.
+		newRec.PausedUntil = nil
+		if err := h.putLifecycleRecord(id, newRec); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		cfg.DesiredState = protocol.DesiredStateRunning
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := h.kv.Put(protocol.PipelineConfigKey(id), data); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, newRec)
+		return
+	} else {
+		// Any other legal outcome (e.g. Stopped -> NeedsResnapshot):
+		// paused_until is only meaningful in Pausing/Paused (invariant 3),
+		// so it stays cleared for every state this branch can reach.
+		// desired_state is deliberately left untouched here -- setting it to
+		// running for Stopped -> NeedsResnapshot would let ConfigManager
+		// start a plain (non-resnapshotting) worker before the operator's
+		// second /start call actually reaches Snapshotting, which is
+		// exactly invariant 1.
+		newRec.PausedUntil = nil
+	}
+
+	if err := h.putLifecycleRecord(id, newRec); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, newRec)
+}
+
+// StopPipeline requests that a running or paused pipeline stop consuming
+// and drop its replication slot, releasing WAL (plan section 4.2 -- the
+// distinction from pause). Unlike PausePipeline/StartPipeline's
+// Pausing->Paused and Resuming->Running shortcuts, the Stopping->Stopped
+// leg is NOT taken synchronously here: dropping the slot only after the
+// worker has genuinely finished draining is ConfigManager's job
+// (honourDesiredState -> finalizeStop, internal/config/manager.go), and
+// that drain is asynchronous. This handler performs only the
+// Running/Paused -> Stopping half and hands off.
+//
+// Write ordering is deliberately the REVERSE of PausePipeline/StartPipeline:
+// the lifecycle record is written before desired_state, not after. Those
+// two endpoints write desired_state first because their second hop is taken
+// synchronously in the same request, and the concern there is a failed
+// config write leaving a record that claims a state change desired_state
+// never made. Stop's second hop is asynchronous: the instant desired_state
+// is written, ConfigManager's config-watch can fire and finalizeStop will
+// look for State == Stopping. Writing desired_state first here would let
+// that watcher race ahead of a lifecycle record that does not exist yet,
+// so finalizeStop's guard would (harmlessly, but pointlessly) no-op on its
+// first attempt. Writing the record first closes that race: by the time
+// desired_state is written, Stopping is already durable.
+//
+// @Summary      Stop pipeline
+// @Description  Stop consuming and drop the replication slot, releasing WAL
+// @Tags         pipelines
+// @Produce      json
+// @Security     Bearer
+// @Param        id   path  string  true  "Pipeline ID"
+// @Success      200  {object}  protocol.PipelineLifecycleRecord
+// @Failure      404  {object}  map[string]string "not found"
+// @Failure      409  {object}  map[string]string "illegal transition"
+// @Router       /pipelines/{id}/stop [post]
+func (h *Handler) StopPipeline(c *gin.Context) {
+	id := c.Param("id")
+	entry, err := h.kv.Get(protocol.PipelineConfigKey(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pipeline not found"})
+		return
+	}
+	var cfg protocol.PipelineConfig
+	if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	rec := h.getLifecycleRecord(id)
+
+	// Running -> Stopping and Paused -> Stopping are both legal rows (plan
+	// section 4.3); everything else (already Stopping/Stopped, etc.) is
+	// rejected by the transition table's own error, so this handler carries
+	// no separate "already stopped" special case.
+	outcome, err := protocol.Transition(rec.State, protocol.EventStop, protocol.Guards{})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	newRec := protocol.PipelineLifecycleRecord{
+		State: outcome.To,
+		// invariant 3: paused_until is only meaningful in Pausing/Paused.
+		// Stopping from Paused must clear it here, not carry it forward --
+		// it stops meaning anything the moment the pipeline leaves Paused.
+		Reconciliation: rec.Reconciliation,
+		UpdatedAt:      time.Now().UTC(),
+	}
+
+	if err := h.putLifecycleRecord(id, newRec); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg.DesiredState = protocol.DesiredStateStopped
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		// The lifecycle record already claims Stopping but desired_state
+		// never changed, so the worker (if any) is still running and would
+		// never be handed to finalizeStop. Best-effort restore the prior
+		// record so a retried stop is not permanently rejected 409 by a
+		// Stopping record nothing will ever advance.
+		_ = h.putLifecycleRecord(id, rec)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := h.kv.Put(protocol.PipelineConfigKey(id), data); err != nil {
+		_ = h.putLifecycleRecord(id, rec)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, newRec)
 }
 
 // CreatePipeline creates a new pipeline.
@@ -562,6 +1436,19 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 		}
 	}
 
+	// RM-1 (invariant 1, plan section 4.4): a plain desired_state=running
+	// write must never be the thing that starts a worker for a pipeline
+	// whose lifecycle record is Stopped or NeedsResnapshot -- that skips
+	// Snapshotting entirely. CreatePipeline reuses cfg.ID as the KV key
+	// (protocol.PipelineConfigKey below), so re-creating a pipeline that was
+	// previously stopped (its lifecycle record, protocol.LifecycleStateKey,
+	// outlives the config delete) hits exactly the same bypass UpdatePipeline
+	// closes; see that handler's matching check for the full rationale.
+	if err := h.rejectBypassOfInvariant1(cfg.ID, cfg); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
 	data, _ := json.Marshal(cfg)
 	key := protocol.PipelineConfigKey(cfg.ID)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -586,10 +1473,42 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 // @Router       /pipelines/{id} [put]
 func (h *Handler) UpdatePipeline(c *gin.Context) {
 	id := c.Param("id")
-	var cfg protocol.PipelineConfig
-	if err := c.ShouldBindJSON(&cfg); err != nil {
+
+	// Read the raw body so we can tell whether the request explicitly set
+	// desired_state, as opposed to omitting it. This matters because
+	// DesiredState's zero value ("") means "running" (EffectiveDesiredState),
+	// so binding straight into a fresh protocol.PipelineConfig would make an
+	// update body that omits desired_state indistinguishable from one that
+	// explicitly asks for running -- silently clobbering a paused/stopped
+	// pipeline back to running. The frontend never even sends the field
+	// (web/src/api/pipelines.ts UpdatePipelineRequest has no desired_state),
+	// so this is not a theoretical gap.
+	raw, err := c.GetRawData()
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	var cfg protocol.PipelineConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var bodyFields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &bodyFields); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if _, sentDesiredState := bodyFields["desired_state"]; !sentDesiredState {
+		// Carry the currently-persisted desired_state forward instead of
+		// letting the zero value silently mean "running".
+		if entry, err := h.kv.Get(protocol.PipelineConfigKey(id)); err == nil {
+			var existing protocol.PipelineConfig
+			if err := json.Unmarshal(entry.Value(), &existing); err == nil {
+				cfg.DesiredState = existing.DesiredState
+			}
+		}
 	}
 
 	cfg.ID = id
@@ -624,6 +1543,26 @@ func (h *Handler) UpdatePipeline(c *gin.Context) {
 		}
 	}
 
+	// RM-1 (invariant 1, plan section 4.4): "the invariant the whole plan
+	// exists to protect". docs/openapi.yaml still publishes desired_state as
+	// a writable property (it drives pause/stop-adjacent bookkeeping and is
+	// the field the frontend reads back), but PUT is no longer allowed to be
+	// a second, parallel path into Running: only protocol.Transition may
+	// decide that (section 4.5). A caller setting desired_state=running
+	// while the persisted lifecycle record is Stopped or NeedsResnapshot
+	// gets rejected here rather than silently handed a plain worker with no
+	// Snapshotting hop -- they must call POST /pipelines/{id}/start, which
+	// drives Stopped -> NeedsResnapshot -> Snapshotting -> Running (plan
+	// section 4.3) through the same Transition choke point StartPipeline
+	// uses. This is intentionally a rejection, not a translation: silently
+	// rewriting the caller's PUT into a /start call here would be a second
+	// hand-rolled state-change path, which section 4.5 forbids just as much
+	// as a bypass would be.
+	if err := h.rejectBypassOfInvariant1(id, cfg); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
 	data, _ := json.Marshal(cfg)
 	key := protocol.PipelineConfigKey(id)
 	if _, err := h.kv.Put(key, data); err != nil {
@@ -632,6 +1571,38 @@ func (h *Handler) UpdatePipeline(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, cfg)
+}
+
+// rejectBypassOfInvariant1 enforces plan section 4.4 invariant 1 at the API
+// layer: desired_state=running must never be the thing that starts a worker
+// for a pipeline whose lifecycle record isn't already worker-bearing,
+// because that skips the transitions (Snapshotting/Resuming, each gated by
+// their own guards -- see the plan's section 4.3 transition table) that are
+// the only sanctioned paths to Running. Rather than enumerate the bad
+// states, this allow-lists the states that already carry (or are actively
+// starting) a worker -- Running, Snapshotting, Resuming -- and rejects
+// everything else, including Paused/Pausing/Stopping: a raw PUT must never
+// be able to resume a Paused pipeline directly, because that skips the
+// SlotAlive guard on Paused->Resuming (a dead slot must force
+// NeedsResnapshot, not a silent resume from a stale/recreated slot) and the
+// /start path's partition-strategy staleness check. getLifecycleRecord
+// defaults to StateRunning when no record exists (a pipeline that predates
+// WS-2, or was never paused/stopped), which is correct here too: "no
+// record" is treated as already-running and never trips this check.
+func (h *Handler) rejectBypassOfInvariant1(id string, cfg protocol.PipelineConfig) error {
+	if cfg.EffectiveDesiredState() != protocol.DesiredStateRunning {
+		return nil
+	}
+	rec := h.getLifecycleRecord(id)
+	switch rec.State {
+	case protocol.StateRunning, protocol.StateSnapshotting, protocol.StateResuming:
+		return nil
+	default:
+		return fmt.Errorf(
+			"cannot set desired_state=running directly: pipeline %s lifecycle state is %s -- call POST /pipelines/%s/start instead",
+			id, rec.State, id,
+		)
+	}
 }
 
 // GetPipeline returns a single pipeline.

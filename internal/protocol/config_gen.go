@@ -7,6 +7,58 @@ import (
 )
 
 // DecodeMsg implements msgp.Decodable
+func (z *DesiredState) DecodeMsg(dc *msgp.Reader) (err error) {
+	{
+		var zb0001 string
+		zb0001, err = dc.ReadString()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		(*z) = DesiredState(zb0001)
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z DesiredState) EncodeMsg(en *msgp.Writer) (err error) {
+	err = en.WriteString(string(z))
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z DesiredState) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	o = msgp.AppendString(o, string(z))
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *DesiredState) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	{
+		var zb0001 string
+		zb0001, bts, err = msgp.ReadStringBytes(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		(*z) = DesiredState(zb0001)
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z DesiredState) Msgsize() (s int) {
+	s = msgp.StringPrefixSize + len(string(z))
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
 func (z *GlobalConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
@@ -424,6 +476,16 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 					return
 				}
 			}
+		case "desired_state":
+			{
+				var zb0006 string
+				zb0006, err = dc.ReadString()
+				if err != nil {
+					err = msgp.WrapError(err, "DesiredState")
+					return
+				}
+				z.DesiredState = DesiredState(zb0006)
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -437,9 +499,9 @@ func (z *PipelineConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 9
+	// map header, size 10
 	// write "id"
-	err = en.Append(0x89, 0xa2, 0x69, 0x64)
+	err = en.Append(0x8a, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -563,15 +625,25 @@ func (z *PipelineConfig) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
+	// write "desired_state"
+	err = en.Append(0xad, 0x64, 0x65, 0x73, 0x69, 0x72, 0x65, 0x64, 0x5f, 0x73, 0x74, 0x61, 0x74, 0x65)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(string(z.DesiredState))
+	if err != nil {
+		err = msgp.WrapError(err, "DesiredState")
+		return
+	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 9
+	// map header, size 10
 	// string "id"
-	o = append(o, 0x89, 0xa2, 0x69, 0x64)
+	o = append(o, 0x8a, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "name"
 	o = append(o, 0xa4, 0x6e, 0x61, 0x6d, 0x65)
@@ -621,6 +693,9 @@ func (z *PipelineConfig) MarshalMsg(b []byte) (o []byte, err error) {
 			return
 		}
 	}
+	// string "desired_state"
+	o = append(o, 0xad, 0x64, 0x65, 0x73, 0x69, 0x72, 0x65, 0x64, 0x5f, 0x73, 0x74, 0x61, 0x74, 0x65)
+	o = msgp.AppendString(o, string(z.DesiredState))
 	return
 }
 
@@ -759,6 +834,16 @@ func (z *PipelineConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 					return
 				}
 			}
+		case "desired_state":
+			{
+				var zb0006 string
+				zb0006, bts, err = msgp.ReadStringBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "DesiredState")
+					return
+				}
+				z.DesiredState = DesiredState(zb0006)
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -795,6 +880,7 @@ func (z *PipelineConfig) Msgsize() (s int) {
 	} else {
 		s += z.Retry.Msgsize()
 	}
+	s += 14 + msgp.StringPrefixSize + len(string(z.DesiredState))
 	return
 }
 

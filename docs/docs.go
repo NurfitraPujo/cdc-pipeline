@@ -388,6 +388,136 @@ const docTemplate = `{
                 "responses": {}
             }
         },
+        "/pipelines/{id}/pause": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Stop consuming while retaining the replication slot, optionally for a bounded TTL",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Pause pipeline",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Optional TTL",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.pausePipelineRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid ttl",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "illegal transition",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/pipelines/{id}/pause-projection": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Read-only projection of when a pause of the given ttl would hit the WAL budget guard, shown before the pause is confirmed",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Project a pause's time-to-breach",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Go duration string being considered, e.g. \\",
+                        "name": "ttl",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.pausePipelineProjectionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid ttl",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/pipelines/{id}/restart": {
             "post": {
                 "security": [
@@ -415,6 +545,58 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/pipelines/{id}/start": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Resume a paused pipeline, or advance a stopped/failed pipeline's lifecycle state",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Start/resume pipeline",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord"
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "illegal transition",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -455,6 +637,58 @@ const docTemplate = `{
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/pipelines/{id}/stop": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "Stop consuming and drop the replication slot, releasing WAL",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Stop pipeline",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord"
+                        }
+                    },
+                    "404": {
+                        "description": "not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "illegal transition",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
                         }
                     }
                 }
@@ -986,6 +1220,19 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.DesiredState": {
+            "type": "string",
+            "enum": [
+                "running",
+                "paused",
+                "stopped"
+            ],
+            "x-enum-varnames": [
+                "DesiredStateRunning",
+                "DesiredStatePaused",
+                "DesiredStateStopped"
+            ]
+        },
         "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig": {
             "type": "object",
             "properties": {
@@ -1084,6 +1331,14 @@ const docTemplate = `{
                     "type": "string",
                     "example": "10s"
                 },
+                "desired_state": {
+                    "description": "DesiredState records operator intent -- running, paused or stopped.\nEmpty means \"running\" (see EffectiveDesiredState), so configs written\nbefore this field existed round-trip unchanged.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.DesiredState"
+                        }
+                    ]
+                },
                 "id": {
                     "type": "string"
                 },
@@ -1119,6 +1374,26 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord": {
+            "type": "object",
+            "properties": {
+                "paused_until": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "reconciliation": {
+                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ReconciliationStatus"
+                },
+                "state": {
+                    "$ref": "#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.State"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
         "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig": {
             "type": "object",
             "properties": {
@@ -1140,6 +1415,19 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
+        },
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ReconciliationStatus": {
+            "type": "string",
+            "enum": [
+                "",
+                "stale",
+                "running"
+            ],
+            "x-enum-varnames": [
+                "ReconciliationOK",
+                "ReconciliationStale",
+                "ReconciliationRunning"
+            ]
         },
         "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig": {
             "type": "object",
@@ -1247,6 +1535,31 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.State": {
+            "type": "string",
+            "enum": [
+                "Running",
+                "Pausing",
+                "Paused",
+                "Stopping",
+                "Stopped",
+                "NeedsResnapshot",
+                "Snapshotting",
+                "Resuming",
+                "Failed"
+            ],
+            "x-enum-varnames": [
+                "StateRunning",
+                "StatePausing",
+                "StatePaused",
+                "StateStopping",
+                "StateStopped",
+                "StateNeedsResnapshot",
+                "StateSnapshotting",
+                "StateResuming",
+                "StateFailed"
+            ]
+        },
         "github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary": {
             "type": "object",
             "properties": {
@@ -1316,6 +1629,22 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "worker_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_api.pausePipelineProjectionResponse": {
+            "type": "object",
+            "properties": {
+                "warning": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_api.pausePipelineRequest": {
+            "type": "object",
+            "properties": {
+                "ttl": {
                     "type": "string"
                 }
             }

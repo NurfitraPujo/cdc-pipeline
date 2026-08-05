@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/api"
+	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/infra"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
 	_ "github.com/NurfitraPujo/cdc-pipeline/docs"
@@ -74,6 +75,24 @@ func main() {
 
 	h := api.NewHandler(kv)
 
+	// WS-3: install the WAL-growth-rate sampler so PausePipeline's
+	// time-to-breach warning (plan section 5) is populated in production
+	// instead of always skipping the projection (h.lagRateSampler nil).
+	h.SetSlotLagRateSampler(h.NewSlotLagRateSampler())
+
+	// WS-5: install the per-table partition-strategy probe so resuming
+	// from Paused detects (rather than assumes) whether every table's
+	// recorded snapshot chunks are actually integer_range (plan section
+	// 10, OQ-5/OQ-7) before trusting a plain resume to cover them.
+	h.SetPartitionStrategyChecker(h.NewPartitionStrategyChecker())
+
+	// WS-5: install the same replication-slot health probe the pause-expiry
+	// ticker (internal/config) already consults on timer expiry, so
+	// StartPipeline's (Paused, start) -> Resuming guard stops trusting a
+	// hardcoded SlotAlive: true and can actually reject a resume onto a
+	// dead/invalidated slot (plan section 4.3).
+	h.SetSlotHealthChecker(config.NewPostgresSlotHealthChecker(kv))
+
 	// Seed default admin credentials for local dev / E2E (no-op in production
 	// and when an auth config already exists in NATS KV).
 	if err := api.EnsureDevAuth(kv); err != nil {
@@ -125,6 +144,10 @@ func main() {
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
 				pipelines.POST("/:id/restart", h.RestartPipeline)
+				pipelines.POST("/:id/pause", h.PausePipeline)
+				pipelines.POST("/:id/start", h.StartPipeline)
+				pipelines.POST("/:id/stop", h.StopPipeline)
+				pipelines.GET("/:id/pause-projection", h.PausePauseProjectionRoute)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
 

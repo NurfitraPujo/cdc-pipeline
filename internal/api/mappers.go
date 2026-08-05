@@ -6,12 +6,12 @@ import (
 	"github.com/NurfitraPujo/cdc-pipeline/internal/protocol"
 )
 
-func strPtr(s string) *string { return &s }
-func intPtr(i int) *int       { return &i }
-func i64Ptr(i int64) *int64   { return &i }
-func f64Ptr(f float64) *float64 { return &f }
-func tsPtr(t time.Time) *time.Time { return &t }
-func strSlicePtr(s []string) *[]string { return &s }
+func strPtr(s string) *string                                 { return &s }
+func intPtr(i int) *int                                       { return &i }
+func i64Ptr(i int64) *int64                                   { return &i }
+func f64Ptr(f float64) *float64                               { return &f }
+func tsPtr(t time.Time) *time.Time                            { return &t }
+func strSlicePtr(s []string) *[]string                        { return &s }
 func mapPtr(m map[string]interface{}) *map[string]interface{} { return &m }
 
 func timePtrOrNil(t time.Time) *time.Time {
@@ -185,16 +185,20 @@ func PipelineConfigFromProtocol(p protocol.PipelineConfig) PipelineConfig {
 		r := RetryConfigFromProtocol(*p.Retry)
 		out.Retry = &r
 	}
+	if p.DesiredState != "" {
+		ds := PipelineConfigDesiredState(p.DesiredState)
+		out.DesiredState = &ds
+	}
 	return out
 }
 
 func PipelineConfigToProtocol(a PipelineConfig) protocol.PipelineConfig {
 	out := protocol.PipelineConfig{
-		ID:       a.Id,
-		Name:     a.Name,
-		Sources:  append([]string(nil), a.Sources...),
-		Sinks:    append([]string(nil), a.Sinks...),
-		Tables:   append([]string(nil), a.Tables...),
+		ID:        a.Id,
+		Name:      a.Name,
+		Sources:   append([]string(nil), a.Sources...),
+		Sinks:     append([]string(nil), a.Sinks...),
+		Tables:    append([]string(nil), a.Tables...),
 		BatchSize: intValueOrZero(a.BatchSize),
 		BatchWait: durationValueOrZero(a.BatchWait),
 	}
@@ -208,6 +212,9 @@ func PipelineConfigToProtocol(a PipelineConfig) protocol.PipelineConfig {
 	if a.Retry != nil {
 		rc := RetryConfigToProtocol(*a.Retry)
 		out.Retry = &rc
+	}
+	if a.DesiredState != nil {
+		out.DesiredState = protocol.DesiredState(*a.DesiredState)
 	}
 	return out
 }
@@ -441,10 +448,30 @@ func TableMetadataToProtocol(a TableMetadata) protocol.TableMetadata {
 
 // --- List/Status/Schema response wrappers ---
 
+// PipelineListResponseFromProtocol maps the wire response to the generated
+// type. protocol.PipelineListResponse carries bare PipelineConfig entries
+// (it predates the WS-1 status/lifecycle_state/health fields, which the
+// handler merges in ad hoc via Handler.pipelineWithStatus rather than
+// through this protocol type -- see internal/api/handler.go), so the
+// status/lifecycle_state/health fields on the generated PipelineListItem
+// are left at their zero value here; callers that need those must go
+// through pipelineWithStatus's raw JSON path instead of this mapper.
 func PipelineListResponseFromProtocol(p protocol.PipelineListResponse) PipelineListResponse {
-	ps := make([]PipelineConfig, len(p.Pipelines))
+	ps := make([]PipelineListItem, len(p.Pipelines))
 	for i, pp := range p.Pipelines {
-		ps[i] = PipelineConfigFromProtocol(pp)
+		cfg := PipelineConfigFromProtocol(pp)
+		ps[i] = PipelineListItem{
+			Id:           cfg.Id,
+			Name:         cfg.Name,
+			Sources:      cfg.Sources,
+			Sinks:        cfg.Sinks,
+			Processors:   cfg.Processors,
+			Tables:       cfg.Tables,
+			BatchSize:    cfg.BatchSize,
+			BatchWait:    cfg.BatchWait,
+			Retry:        cfg.Retry,
+			DesiredState: (*PipelineListItemDesiredState)(cfg.DesiredState),
+		}
 	}
 	return PipelineListResponse{
 		Pipelines: ps,
@@ -493,9 +520,9 @@ func PipelineStatusResponseFromProtocol(p protocol.PipelineStatusResponse) Pipel
 
 func SourceSchemaResponseFromProtocol(p protocol.SourceSchemaResponse) SourceSchemaResponse {
 	return SourceSchemaResponse{
-		SourceId:        p.SourceID,
+		SourceId:         p.SourceID,
 		AvailableSchemas: append([]string(nil), p.AvailableSchemas...),
-		DiscoveryStatus: p.DiscoveryStatus,
+		DiscoveryStatus:  p.DiscoveryStatus,
 	}
 }
 

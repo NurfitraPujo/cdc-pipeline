@@ -86,6 +86,63 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start config watcher")
 	}
 
+	// WS-3: install the real slot-health probe so the pause-expiry ticker
+	// below actually consults wal_status before resuming (plan section 4.3)
+	// instead of the optimistic default (Alive: true unconditionally).
+	mgr.SetSlotHealthChecker(config.NewPostgresSlotHealthChecker(kv))
+
+	// WS-5: install the real slot-dropper so a Stopping pipeline's slot is
+	// actually dropped once its worker has drained (finalizeStop,
+	// internal/config/manager.go), releasing WAL instead of the optimistic
+	// default (defaultSlotDropper, which reports success without touching
+	// PostgreSQL).
+	mgr.SetSlotDropper(config.NewPostgresSlotDropper(kv))
+
+	// WS-4/WS-5: NewPostgresWALGuardChecker (internal/config/wal_guard_checker.go)
+	// implements the real safe_wal_size/lag-threshold probe. It was left
+	// unwired at WS-4 because escalation fires EventWALGuardBreach, whose
+	// only defined exit is (StateStopping, EventSlotDropped), and nothing
+	// emitted EventSlotDropped yet -- a busy source's guard would have driven
+	// a Paused pipeline into Stopping with no operator-reachable way back.
+	// WS-5's finalizeStop (above) now emits EventSlotDropped once the slot
+	// dropper confirms the drop, so the dead end is closed; wire the real
+	// probe in.
+	mgr.SetWALGuardChecker(config.NewPostgresWALGuardChecker(kv))
+
+	// WS-6: install the real re-snapshot completion probe so the same
+	// ticker below drives a Snapshotting pipeline on to Running (with
+	// reconciliation marked stale, invariant 5) once the worker's forced
+	// re-snapshot (source.go's shouldResnapshot -> Snapshot.Resnapshot)
+	// actually finishes, instead of the pessimistic default that never
+	// reports completion.
+	mgr.SetResnapshotStatusChecker(config.NewPostgresResnapshotStatusChecker(kv))
+
+	// WS-7: install the real chunked delete-reconciliation stepper so the
+	// same ticker below sweeps a Stale pipeline one integer_range chunk at
+	// a time (plan section 4.4 invariant 5, section 11: reconciliation
+	// must never gate Running and must not clear stale on its own -- see
+	// internal/config/reconciliation.go/reconciliation_checker.go). Left
+	// unwired, a pipeline that entered Snapshotting after a stop window
+	// would stay reported "stale" forever, which is the safe direction but
+	// not the intended end state.
+	mgr.SetReconcileStepper(config.NewPostgresDatabendReconcileStepper(kv))
+
+	// WS-3: manager-level ticker that resumes pipelines whose paused_until
+	// has elapsed. Neither of the existing timers can do this -- the
+	// per-worker heartbeat below has no worker to tick for a paused
+	// pipeline, and the config watch above is event-driven while a paused
+	// pipeline emits no events. See internal/config/pause_expiry.go.
+	mgr.StartPauseExpiryTicker(ctx, time.Minute)
+
+	// RM-3: production runs 3-20 replicas of this pod
+	// (deploy/helm-chart/values.production.yml minReplicas/maxReplicas), so
+	// the ticker above must not run its sweep body on every one of them --
+	// see internal/config/lease.go. workerID (minted above for
+	// heartbeats/logging) doubles as this replica's lease-owner identity.
+	// A 2-minute TTL bounds failover to roughly 2 minutes if the leader
+	// pod dies, comfortably inside the once-a-minute sweep cadence above.
+	mgr.StartLeaseLoop(ctx, workerID, 2*time.Minute)
+
 	// 5. Worker Lifecycle (Heartbeat)
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)

@@ -32,6 +32,17 @@ const (
 	// Summary and Cache Keys
 	KeyGlobalSummary     = "cdc.stats.global_summary"
 	PrefixDiscoveryCache = "cdc.discovery."
+
+	// KeyManagerSweepLease is the single, bucket-wide leader-election key
+	// StartLeaseLoop (internal/config/lease.go) uses to elect the one
+	// ConfigManager replica (of the 3-20 production pods,
+	// deploy/helm-chart/values.production.yml minReplicas/maxReplicas)
+	// allowed to run the pause-expiry ticker's sweep body (WS-3/WS-4/WS-6/
+	// WS-7). Deliberately outside PrefixPipelineState: it is not
+	// per-pipeline state and must never collide with
+	// pipelineIDFromLifecycleKey's ".lifecycle"-suffix scan over
+	// PrefixPipelineState keys (internal/config/pause_expiry.go).
+	KeyManagerSweepLease = "cdc.control.manager_sweep_lease"
 )
 
 // Helper functions for key construction
@@ -238,6 +249,46 @@ func (p ProcessorConfig) Validate() error {
 	)
 }
 
+// DesiredState is operator intent for a pipeline, distinct from lifecycle
+// state (what the system is actually doing, internal/protocol/lifecycle.go
+// State) and health (derived from heartbeat). See
+// plans/2026-08-03-pipeline-lifecycle-control.md section 4.1.
+//
+// Deliberately small: it records intent, not mechanism. The full lifecycle
+// machinery that turns "paused" into a drained worker with a retained slot,
+// or "stopped" into a dropped slot, arrives in later workstreams (WS-2+);
+// WS-1 only wires the field through config, validation and ConfigManager's
+// decision to run a worker at all.
+type DesiredState string
+
+// DesiredState values: the operator intents desired_state may hold.
+const (
+	DesiredStateRunning DesiredState = "running"
+	DesiredStatePaused  DesiredState = "paused"
+	DesiredStateStopped DesiredState = "stopped"
+)
+
+// validDesiredStates is the closed set desired_state may hold. Empty is also
+// accepted by Validate -- see EffectiveDesiredState -- so that every
+// PipelineConfig written before this field existed keeps loading and keeps
+// meaning "running".
+var validDesiredStates = map[DesiredState]bool{
+	DesiredStateRunning: true,
+	DesiredStatePaused:  true,
+	DesiredStateStopped: true,
+}
+
+func validateDesiredState(value interface{}) error {
+	ds, _ := value.(DesiredState)
+	if ds == "" {
+		return nil
+	}
+	if !validDesiredStates[ds] {
+		return fmt.Errorf("unknown desired_state %q", string(ds))
+	}
+	return nil
+}
+
 type PipelineConfig struct {
 	ID         string            `msg:"id" yaml:"id" json:"id"`
 	Name       string            `msg:"name" yaml:"name" json:"name"`
@@ -248,6 +299,20 @@ type PipelineConfig struct {
 	BatchSize  int               `msg:"batch_size" yaml:"batch_size" json:"batch_size"`                                    // Override
 	BatchWait  time.Duration     `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"10s"` // Override
 	Retry      *RetryConfig      `msg:"retry" yaml:"retry" json:"retry"`
+	// DesiredState records operator intent -- running, paused or stopped.
+	// Empty means "running" (see EffectiveDesiredState), so configs written
+	// before this field existed round-trip unchanged.
+	DesiredState DesiredState `msg:"desired_state" yaml:"desired_state" json:"desired_state"`
+}
+
+// EffectiveDesiredState returns the operator's intent for this pipeline,
+// treating an empty (pre-WS-1) value as DesiredStateRunning so old configs
+// keep their prior behaviour of "every configured pipeline runs".
+func (p PipelineConfig) EffectiveDesiredState() DesiredState {
+	if p.DesiredState == "" {
+		return DesiredStateRunning
+	}
+	return p.DesiredState
 }
 
 func (p PipelineConfig) Validate() error {
@@ -265,6 +330,7 @@ func (p PipelineConfig) Validate() error {
 		// ProcessorConfig.Validate() a second time, producing duplicate
 		// error keys).
 		validation.Field(&p.Processors),
+		validation.Field(&p.DesiredState, validation.By(validateDesiredState)),
 	)
 }
 
@@ -289,7 +355,7 @@ type SourceConfig struct {
 	// defaulting to all would silently begin replicating unrelated schemas on
 	// upgrade (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 item 4).
 	Schemas []string `msg:"schemas" yaml:"schemas" json:"schemas"`
-	Tables            []string      `msg:"tables" yaml:"tables" json:"tables"`
+	Tables  []string `msg:"tables" yaml:"tables" json:"tables"`
 }
 
 func (s SourceConfig) Validate() error {

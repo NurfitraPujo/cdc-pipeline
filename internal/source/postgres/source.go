@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -925,6 +926,14 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			ChunkSize:         snapshotChunkSize(srcConfig.SnapshotChunkSize),
 			ClaimTimeout:      30 * time.Second,
 			HeartbeatInterval: 5 * time.Second,
+			// WS-6: wipe cdc_snapshot_chunks and force a full re-snapshot
+			// when the persisted lifecycle record says this pipeline is in
+			// Snapshotting (NeedsResnapshot -> start, i.e. resuming after a
+			// stop window). See shouldResnapshot's doc comment -- every
+			// other lifecycle state (including Resuming from a pause)
+			// leaves this false, preserving WS-5's "resume the existing
+			// chunks" behaviour.
+			Resnapshot: s.shouldResnapshot(ctx),
 		},
 		Metric: config.MetricConfig{Port: s.resolveMetricPort()},
 		// ManualCommit is gated by the §6 strict_ack flag (CDC_STRICT_ACK,
@@ -1237,6 +1246,45 @@ func (s *PostgresSource) runAckCoordinator(ctx context.Context, slotName string,
 			lastFlushedWatermark = wm
 		}
 	}
+}
+
+// shouldResnapshot reports whether this Start call must wipe
+// cdc_snapshot_chunks and re-snapshot from scratch (WS-6:
+// Snapshot.Resnapshot -- internal/vendor/go-pq-cdc/connector.go:370/467)
+// rather than resume the existing chunk metadata (WS-5's Resnapshot: false
+// default, preserved below when this returns false).
+//
+// It is read, not assumed: the worker has no in-memory notion of "this is a
+// re-snapshot run" of its own, so it consults the same persisted lifecycle
+// record (protocol.LifecycleStateKey) StartPipeline
+// (internal/api/handler.go) just wrote when it drove NeedsResnapshot ->
+// Snapshotting. Only StateSnapshotting means "resnapshot"; Running,
+// Resuming and every other state resume normally, matching WS-5's existing
+// "LoadJob resumes cdc_snapshot_chunks" behaviour. A missing/unreadable
+// record (kv nil, pipelineID unset -- e.g. a test harness that never calls
+// WithKV, or a pipeline whose lifecycle record has not been written yet)
+// fails toward false: a spurious full re-snapshot is far more expensive and
+// surprising than the pre-WS-6 default of "resume", so an unreadable signal
+// must never be read as "wipe everything".
+func (s *PostgresSource) shouldResnapshot(_ context.Context) bool {
+	s.mu.RLock()
+	kv := s.kv
+	pipelineID := s.pipelineID
+	s.mu.RUnlock()
+
+	if kv == nil || pipelineID == "" {
+		return false
+	}
+
+	entry, err := kv.Get(protocol.LifecycleStateKey(pipelineID))
+	if err != nil {
+		return false
+	}
+	var rec protocol.PipelineLifecycleRecord
+	if err := json.Unmarshal(entry.Value(), &rec); err != nil {
+		return false
+	}
+	return rec.State == protocol.StateSnapshotting
 }
 
 // persistWatermark is a best-effort, non-blocking KV write of the current

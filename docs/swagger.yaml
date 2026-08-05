@@ -1,5 +1,15 @@
 basePath: /api/v1
 definitions:
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.DesiredState:
+    enum:
+    - running
+    - paused
+    - stopped
+    type: string
+    x-enum-varnames:
+    - DesiredStateRunning
+    - DesiredStatePaused
+    - DesiredStateStopped
   github_com_NurfitraPujo_cdc-pipeline_internal_protocol.GlobalConfig:
     properties:
       batch_size:
@@ -75,6 +85,13 @@ definitions:
         description: Override
         example: 10s
         type: string
+      desired_state:
+        allOf:
+        - $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.DesiredState'
+        description: |-
+          DesiredState records operator intent -- running, paused or stopped.
+          Empty means "running" (see EffectiveDesiredState), so configs written
+          before this field existed round-trip unchanged.
       id:
         type: string
       name:
@@ -98,6 +115,19 @@ definitions:
           type: string
         type: array
     type: object
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord:
+    properties:
+      paused_until:
+        type: string
+      reason:
+        type: string
+      reconciliation:
+        $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ReconciliationStatus'
+      state:
+        $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.State'
+      updated_at:
+        type: string
+    type: object
   github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ProcessorConfig:
     properties:
       name:
@@ -113,6 +143,16 @@ definitions:
         description: e.g., "mask", "filter", "custom"
         type: string
     type: object
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.ReconciliationStatus:
+    enum:
+    - ""
+    - stale
+    - running
+    type: string
+    x-enum-varnames:
+    - ReconciliationOK
+    - ReconciliationStale
+    - ReconciliationRunning
   github_com_NurfitraPujo_cdc-pipeline_internal_protocol.RetryConfig:
     properties:
       enable_dlq:
@@ -191,6 +231,28 @@ definitions:
       user:
         type: string
     type: object
+  github_com_NurfitraPujo_cdc-pipeline_internal_protocol.State:
+    enum:
+    - Running
+    - Pausing
+    - Paused
+    - Stopping
+    - Stopped
+    - NeedsResnapshot
+    - Snapshotting
+    - Resuming
+    - Failed
+    type: string
+    x-enum-varnames:
+    - StateRunning
+    - StatePausing
+    - StatePaused
+    - StateStopping
+    - StateStopped
+    - StateNeedsResnapshot
+    - StateSnapshotting
+    - StateResuming
+    - StateFailed
   github_com_NurfitraPujo_cdc-pipeline_internal_protocol.StatsSummary:
     properties:
       avg_lag_ms:
@@ -238,6 +300,16 @@ definitions:
       uptime_sec:
         type: integer
       worker_id:
+        type: string
+    type: object
+  internal_api.pausePipelineProjectionResponse:
+    properties:
+      warning:
+        type: string
+    type: object
+  internal_api.pausePipelineRequest:
+    properties:
+      ttl:
         type: string
     type: object
 host: localhost:8080
@@ -484,6 +556,91 @@ paths:
       summary: Stream pipeline metrics
       tags:
       - pipelines
+  /pipelines/{id}/pause:
+    post:
+      consumes:
+      - application/json
+      description: Stop consuming while retaining the replication slot, optionally
+        for a bounded TTL
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Optional TTL
+        in: body
+        name: body
+        schema:
+          $ref: '#/definitions/internal_api.pausePipelineRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord'
+        "400":
+          description: invalid ttl
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: illegal transition
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Pause pipeline
+      tags:
+      - pipelines
+  /pipelines/{id}/pause-projection:
+    get:
+      description: Read-only projection of when a pause of the given ttl would hit
+        the WAL budget guard, shown before the pause is confirmed
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Go duration string being considered, e.g. \
+        in: query
+        name: ttl
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_api.pausePipelineProjectionResponse'
+        "400":
+          description: invalid ttl
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Project a pause's time-to-breach
+      tags:
+      - pipelines
   /pipelines/{id}/restart:
     post:
       description: Trigger a manual restart/reload for a pipeline
@@ -507,6 +664,40 @@ paths:
       summary: Restart pipeline
       tags:
       - pipelines
+  /pipelines/{id}/start:
+    post:
+      description: Resume a paused pipeline, or advance a stopped/failed pipeline's
+        lifecycle state
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: illegal transition
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Start/resume pipeline
+      tags:
+      - pipelines
   /pipelines/{id}/status:
     get:
       description: Retrieve aggregated multi-table status and stats for a pipeline
@@ -527,6 +718,39 @@ paths:
       security:
       - Bearer: []
       summary: Get pipeline status
+      tags:
+      - pipelines
+  /pipelines/{id}/stop:
+    post:
+      description: Stop consuming and drop the replication slot, releasing WAL
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_NurfitraPujo_cdc-pipeline_internal_protocol.PipelineLifecycleRecord'
+        "404":
+          description: not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: illegal transition
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - Bearer: []
+      summary: Stop pipeline
       tags:
       - pipelines
   /sinks:

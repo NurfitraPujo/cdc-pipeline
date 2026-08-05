@@ -43,7 +43,7 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				stats.GET("/summary", h.GetStatsSummary)
 				stats.GET("/history", h.GetStatsHistory)
 			}
-			
+
 			pipelines := authorized.Group("/pipelines")
 			{
 				pipelines.GET("", h.ListPipelines)
@@ -53,6 +53,10 @@ func setupTestRouter(kv nats.KeyValue) *gin.Engine {
 				pipelines.DELETE("/:id", h.DeletePipeline)
 				pipelines.GET("/:id/status", h.GetPipelineStatus)
 				pipelines.POST("/:id/restart", h.RestartPipeline)
+				pipelines.POST("/:id/pause", h.PausePipeline)
+				pipelines.POST("/:id/start", h.StartPipeline)
+				pipelines.POST("/:id/stop", h.StopPipeline)
+				pipelines.GET("/:id/pause-projection", h.PausePauseProjectionRoute)
 				pipelines.GET("/:id/metrics", h.StreamMetrics)
 			}
 
@@ -108,20 +112,21 @@ type mockEntry struct {
 	key   string
 	value []byte
 }
-func (m mockEntry) Key() string { return m.key }
-func (m mockEntry) Value() []byte { return m.value }
-func (m mockEntry) Revision() uint64 { return 0 }
-func (m mockEntry) Created() time.Time { return time.Now() }
-func (m mockEntry) Delta() uint64 { return 0 }
+
+func (m mockEntry) Key() string                { return m.key }
+func (m mockEntry) Value() []byte              { return m.value }
+func (m mockEntry) Revision() uint64           { return 0 }
+func (m mockEntry) Created() time.Time         { return time.Now() }
+func (m mockEntry) Delta() uint64              { return 0 }
 func (m mockEntry) Operation() nats.KeyValueOp { return 0 }
-func (m mockEntry) Bucket() string { return "test" }
+func (m mockEntry) Bucket() string             { return "test" }
 
 var _ nats.KeyValueEntry = mockEntry{}
 
 func TestEnsureDevAuth(t *testing.T) {
 	tests := []struct {
-		name            string
-		env             string
+		name           string
+		env            string
 		usernameEnv    string
 		passwordEnv    string
 		kvGetErr       error
@@ -129,29 +134,29 @@ func TestEnsureDevAuth(t *testing.T) {
 		wantSeedCalled bool
 	}{
 		{
-			name:            "ENV=production skips seed",
-			env:             "production",
+			name:           "ENV=production skips seed",
+			env:            "production",
 			wantSeedCalled: false,
 		},
 		{
-			name:            "ENV=staging skips seed",
-			env:             "staging",
+			name:           "ENV=staging skips seed",
+			env:            "staging",
 			wantSeedCalled: false,
 		},
 		{
-			name:            "ENV=development seeds default",
-			env:             "development",
-			kvGetErr:        nats.ErrKeyNotFound,
-			wantUsername:    "admin",
-			wantSeedCalled:  true,
+			name:           "ENV=development seeds default",
+			env:            "development",
+			kvGetErr:       nats.ErrKeyNotFound,
+			wantUsername:   "admin",
+			wantSeedCalled: true,
 		},
 		{
-			name:            "ENV=dev with DEV_ADMIN_USERNAME seeds custom",
-			env:             "dev",
-			usernameEnv:     "foo",
-			kvGetErr:        nats.ErrKeyNotFound,
-			wantUsername:    "foo",
-			wantSeedCalled:  true,
+			name:           "ENV=dev with DEV_ADMIN_USERNAME seeds custom",
+			env:            "dev",
+			usernameEnv:    "foo",
+			kvGetErr:       nats.ErrKeyNotFound,
+			wantUsername:   "foo",
+			wantSeedCalled: true,
 		},
 	}
 
@@ -199,9 +204,10 @@ func TestEnsureDevAuth(t *testing.T) {
 type MockWatcher struct {
 	updates chan nats.KeyValueEntry
 }
+
 func (m *MockWatcher) Updates() <-chan nats.KeyValueEntry { return m.updates }
-func (m *MockWatcher) Stop() error { return nil }
-func (m *MockWatcher) Context() context.Context { return context.Background() }
+func (m *MockWatcher) Stop() error                        { return nil }
+func (m *MockWatcher) Context() context.Context           { return context.Background() }
 
 func TestAPI_Full(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -231,7 +237,7 @@ func TestAPI_Full(t *testing.T) {
 		// PUT (Success)
 		mockKV.EXPECT().Keys().Return([]string{"other.key"}, nil)
 		mockKV.EXPECT().Put(protocol.KeyGlobalConfig, gomock.Any()).Return(uint64(1), nil)
-		
+
 		putBody, _ := json.Marshal(gCfg)
 		req, _ = http.NewRequest("PUT", "/api/v1/global", bytes.NewBuffer(putBody))
 		req.Header.Set("Authorization", authHeader)
@@ -253,6 +259,11 @@ func TestAPI_Full(t *testing.T) {
 		mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound)
 		mockKV.EXPECT().Get(protocol.SourceConfigKey("s1")).Return(mockEntry{value: []byte("{}")}, nil)
 		mockKV.EXPECT().Get(protocol.SinkConfigKey("snk1")).Return(mockEntry{value: []byte("{}")}, nil)
+		// RM-1: CreatePipeline now consults the lifecycle record before
+		// accepting an (implicit, zero-value) desired_state=running create;
+		// no record exists yet for a brand-new ID, which getLifecycleRecord
+		// treats as Running (never a bypass target), so this must succeed.
+		mockKV.EXPECT().Get(protocol.LifecycleStateKey("p1")).Return(nil, nats.ErrKeyNotFound)
 		mockKV.EXPECT().Put(protocol.PipelineConfigKey("p1"), gomock.Any()).Return(uint64(1), nil)
 
 		req, _ := http.NewRequest("POST", "/api/v1/pipelines", bytes.NewBuffer(pData))
@@ -265,8 +276,9 @@ func TestAPI_Full(t *testing.T) {
 		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineConfigKey("p1")}, nil).AnyTimes()
 		mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
 		mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
+		mockKV.EXPECT().Get(protocol.LifecycleStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
-		
+
 		req, _ = http.NewRequest("GET", "/api/v1/pipelines", nil)
 		req.Header.Set("Authorization", authHeader)
 		w = httptest.NewRecorder()
@@ -275,7 +287,7 @@ func TestAPI_Full(t *testing.T) {
 
 		// GET STATUS
 		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineStatusPrefix("p1") + "table1.stats"}, nil).AnyTimes()
-		mockKV.EXPECT().Get(protocol.PipelineStatusPrefix("p1") + "table1.stats").Return(mockEntry{value: []byte("{}")}, nil).AnyTimes()
+		mockKV.EXPECT().Get(protocol.PipelineStatusPrefix("p1")+"table1.stats").Return(mockEntry{value: []byte("{}")}, nil).AnyTimes()
 
 		req, _ = http.NewRequest("GET", "/api/v1/pipelines/p1/status", nil)
 		req.Header.Set("Authorization", authHeader)
@@ -395,13 +407,71 @@ func TestAPI_Full(t *testing.T) {
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
-	}
+}
 
 // TestDiscoverySchemas_EmptyMeansPublicOnly pins MULTI_SCHEMA_PLAN.md §2.4/§8
 // item 4: an empty/unset Schemas whitelist must query "public" only, never a
 // wildcard. Every pre-Stage-3 source config has Schemas empty (the field was
 // dead), so treating empty as "all schemas" would silently start
 // discovering every schema on the database the moment this stage lands.
+
+// TestUpdatePipeline_PreservesDesiredStateWhenOmitted is the WS-1 validator
+// regression test: a PUT body that omits desired_state (the dashboard's
+// UpdatePipelineRequest never sends it -- web/src/api/pipelines.ts) must not
+// silently clobber a paused pipeline back to "running". The zero value of
+// DesiredState means "running" per EffectiveDesiredState, so binding the
+// request straight into a fresh PipelineConfig would make an update body
+// that omits the field indistinguishable from one that explicitly asks for
+// running.
+func TestUpdatePipeline_PreservesDesiredStateWhenOmitted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockKV := mocks.NewMockKeyValue(ctrl)
+	router := setupTestRouter(mockKV)
+	token := getTestToken(t, router, mockKV)
+	authHeader := "Bearer " + token
+
+	stored := protocol.PipelineConfig{
+		ID: "p1", Name: "Pipe 1", Sources: []string{"s1"}, Sinks: []string{"snk1"},
+		Tables:       []string{"t1"},
+		DesiredState: protocol.DesiredStatePaused,
+	}
+	storedData, _ := json.Marshal(stored)
+
+	// Update body carries a change (adding a table) but omits desired_state
+	// entirely, matching what the dashboard sends.
+	updateBody, _ := json.Marshal(map[string]any{
+		"name":    "Pipe 1",
+		"sources": []string{"s1"},
+		"sinks":   []string{"snk1"},
+		"tables":  []string{"t1", "t2"},
+	})
+
+	mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: storedData}, nil)
+	mockKV.EXPECT().Get(protocol.SourceConfigKey("s1")).Return(mockEntry{value: []byte("{}")}, nil)
+	mockKV.EXPECT().Get(protocol.SinkConfigKey("snk1")).Return(mockEntry{value: []byte("{}")}, nil)
+	mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound)
+
+	var putData []byte
+	mockKV.EXPECT().Put(protocol.PipelineConfigKey("p1"), gomock.Any()).DoAndReturn(func(_ string, data []byte) (uint64, error) {
+		putData = data
+		return uint64(2), nil
+	})
+
+	req, _ := http.NewRequest("PUT", "/api/v1/pipelines/p1", bytes.NewBuffer(updateBody))
+	req.Header.Set("Authorization", authHeader)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var persisted protocol.PipelineConfig
+	if err := json.Unmarshal(putData, &persisted); err != nil {
+		t.Fatalf("failed to unmarshal persisted config: %v", err)
+	}
+	assert.Equal(t, protocol.DesiredStatePaused, persisted.DesiredState, "desired_state must be carried forward when omitted from the update body")
+	assert.ElementsMatch(t, []string{"t1", "t2"}, persisted.Tables)
+}
 
 func TestDiscoverySchemas_EmptyMeansPublicOnly(t *testing.T) {
 	got := discoverySchemas(nil)
@@ -417,7 +487,6 @@ func TestDiscoverySchemas_EmptyMeansPublicOnly(t *testing.T) {
 		t.Fatalf("configured Schemas should pass through unchanged, got %v", got)
 	}
 }
-
 
 func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -460,6 +529,7 @@ func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
 	// For ListPipelines: pipeline config entries
 	mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
 	mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
+	mockKV.EXPECT().Get(protocol.LifecycleStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 	mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 
 	// For cleanupStaleHeartbeats: worker heartbeat entries (stale, should be cleaned up)
@@ -590,6 +660,7 @@ func TestListPipelines_PaginationClamping(t *testing.T) {
 		p := protocol.PipelineConfig{ID: fmt.Sprintf("p%d", i), Name: fmt.Sprintf("Pipe %d", i), Sources: []string{"s1"}, Sinks: []string{"snk1"}, Tables: []string{"t1"}}
 		pData, _ := json.Marshal(p)
 		mockKV.EXPECT().Get(protocol.TransitionStateKey(fmt.Sprintf("p%d", i))).Return(nil, nats.ErrKeyNotFound).AnyTimes()
+		mockKV.EXPECT().Get(protocol.LifecycleStateKey(fmt.Sprintf("p%d", i))).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey(fmt.Sprintf("p%d", i))).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		mockKV.EXPECT().Get(protocol.PipelineConfigKey(fmt.Sprintf("p%d", i))).Return(mockEntry{value: pData}, nil).AnyTimes()
 	}

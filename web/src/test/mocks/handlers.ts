@@ -142,6 +142,15 @@ export const handlers = [
 		},
 	),
 
+	// Pause projection (plan section 5 pre-commit WAL-budget projection):
+	// default to "no warning" so components that just need the dialog to
+	// open/close (not specifically testing the projection) don't have to
+	// each stub this endpoint themselves; PauseDialog.test.tsx overrides it
+	// per-test to exercise the warning/error paths.
+	http.get(`${API_BASE}/pipelines/:id/pause-projection`, () => {
+		return HttpResponse.json({});
+	}),
+
 	// Sources
 	http.get(`${API_BASE}/sources`, () => {
 		return HttpResponse.json({ sources: mockSources });

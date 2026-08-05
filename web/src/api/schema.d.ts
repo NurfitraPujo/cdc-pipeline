@@ -225,6 +225,168 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/pipelines/{id}/pause": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Pause a pipeline
+		 * @description Stops the pipeline from consuming while retaining its replication
+		 *     slot (WS-2, plan section 4.2 -- as opposed to `POST
+		 *     /pipelines/{id}/stop`, which drops the slot). Sets
+		 *     `desired_state` to `paused`, which triggers `ConfigManager`'s
+		 *     existing drain path (`stopWorker`/`honourDesiredState`); this
+		 *     endpoint does not drain the worker itself.
+		 *
+		 *     Legal only when the pipeline's lifecycle state is `Running`; any
+		 *     other current state (already `Paused`, `Stopping`, ...) is
+		 *     rejected with `409` by the underlying transition table
+		 *     (`internal/protocol/lifecycle.go`).
+		 *
+		 *     An optional `ttl` bounds how long the pause lasts before the
+		 *     auto-resume timer (WS-3) fires, capped at a 4h ceiling (OQ-3): a
+		 *     `ttl` above `4h0m0s` is rejected with `400`. Omitting `ttl` does
+		 *     *not* mean "pause indefinitely" -- it still gets a `paused_until`,
+		 *     defaulted to the same 4h ceiling, so an unbounded pause can never
+		 *     retain the replication slot (and accumulate WAL) forever. Either
+		 *     way it is stored as an absolute `paused_until` timestamp computed
+		 *     at request time, not a duration -- see plan section 8.
+		 *
+		 *     The response may include a `warning` (plan section 5) projecting
+		 *     when this pause will exhaust the source's WAL budget, using the
+		 *     existing `cdc_source_slot_lag_bytes` probe's growth rate. Present
+		 *     only when that projection is shorter than the pause's effective
+		 *     TTL.
+		 */
+		post: operations["pausePipeline"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pipelines/{id}/pause-projection": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		/**
+		 * Project a pause's time-to-breach before confirming it
+		 * @description Read-only: answers "if I paused for this `ttl` right now, would I
+		 *     hit the WAL budget guard first?" without taking any action -- no
+		 *     `desired_state` write, no lifecycle transition, callable from any
+		 *     current state. Plan section 5 is explicit that the projection must
+		 *     be shown "before the pause is confirmed"; `POST
+		 *     /pipelines/{id}/pause`'s own `warning` field is the same
+		 *     computation but only ever visible after the pause has already been
+		 *     committed. `PauseDialog` calls this endpoint as the operator adjusts
+		 *     the TTL slider/presets and re-renders the same warning text this
+		 *     would otherwise produce post-commit.
+		 *
+		 *     Reuses the same `cdc_source_slot_lag_bytes` growth-rate sample and
+		 *     WAL-budget arithmetic as the pause endpoint (WS-3/WS-4); the two are
+		 *     computed from one shared helper so they cannot drift apart on what
+		 *     "the projection" means.
+		 */
+		get: operations["pausePauseProjection"];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pipelines/{id}/start": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Start/resume a pipeline
+		 * @description Resumes a paused pipeline (WS-2, plan section 4.3: `Paused ->
+		 *     Resuming -> Running`), clearing `paused_until` and setting
+		 *     `desired_state` back to `running`, which triggers
+		 *     `ConfigManager`'s existing start path; this endpoint does not
+		 *     start the worker itself.
+		 *
+		 *     The underlying transition table also accepts `start` from other
+		 *     states (`Stopped`, `NeedsResnapshot`, `Failed`), but those legs of
+		 *     the machine -- re-snapshot on resume, delete reconciliation --
+		 *     arrive in later workstreams. When called from one of those
+		 *     states, the lifecycle record still advances to whatever the
+		 *     transition table says, but `desired_state` is deliberately left
+		 *     unchanged so a pipeline that needs a re-snapshot is never handed
+		 *     to `ConfigManager` as a plain restart.
+		 */
+		post: operations["startPipeline"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pipelines/{id}/stop": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Stop a pipeline
+		 * @description Stops the pipeline from consuming and drops its replication slot,
+		 *     releasing WAL (WS-5, plan section 4.2 -- as opposed to `pause`,
+		 *     which retains the slot). Sets `desired_state` to `stopped`, which
+		 *     triggers `ConfigManager`'s existing drain path
+		 *     (`stopWorker`/`honourDesiredState`); the slot itself is dropped
+		 *     only after that drain completes
+		 *     (`internal/config/manager.go:finalizeStop`), so the response
+		 *     reflects the `Stopping` lifecycle state, not yet `Stopped` --
+		 *     poll `GET /pipelines/{id}` to observe the `Stopping -> Stopped`
+		 *     transition complete.
+		 *
+		 *     Legal from `Running` or `Paused`; any other current state (already
+		 *     `Stopping`/`Stopped`, ...) is rejected with `409` by the underlying
+		 *     transition table (`internal/protocol/lifecycle.go`).
+		 *
+		 *     Resuming a stopped pipeline (`POST /pipelines/{id}/start`) always
+		 *     requires a re-snapshot (`Stopped -> NeedsResnapshot -> Snapshotting`,
+		 *     WS-6) -- unlike resuming from `Paused`, which continues the
+		 *     existing snapshot in place.
+		 */
+		post: operations["stopPipeline"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/pipelines/{id}/metrics": {
 		parameters: {
 			query?: never;
@@ -326,9 +488,12 @@ export interface paths {
 		};
 		/**
 		 * List available schemas for a source
-		 * @description Returns the schemas discoverable on the source database. The
-		 *     current implementation returns a static list; in a future
-		 *     release this may trigger live discovery via a worker.
+		 * @description Queries pg_namespace on the source database live, excluding
+		 *     system schemas (pg_catalog, information_schema, pg_*).
+		 *
+		 *     Note the whitelist semantic this feeds: an empty or omitted
+		 *     `schemas` list on a source means "public" ONLY, never "all
+		 *     schemas".
 		 */
 		get: operations["getSourceSchema"];
 		put?: never;
@@ -354,6 +519,14 @@ export interface paths {
 		 * @description Returns all tables whose metadata has been discovered and
 		 *     persisted by the worker. Tables are filtered to those whose
 		 *     NATS KV key matches `*.sources.{id}.tables.*.metadata`.
+		 *
+		 *     When no metadata has been persisted yet, the API falls back to
+		 *     querying `information_schema.tables` on the source directly. If
+		 *     that query fails — most commonly because the source is
+		 *     unreachable — the response is `502`, matching
+		 *     `GET /sources/{id}/schema`. It is deliberately not a `200` with
+		 *     an empty list, which made "cannot connect" indistinguishable
+		 *     from "connected, no tables".
 		 */
 		get: operations["listSourceTables"];
 		put?: never;
@@ -622,7 +795,7 @@ export interface components {
 			/** @description IDs of sink connections (must exist in NATS KV). */
 			sinks: string[];
 			processors?: components["schemas"]["ProcessorConfig"][] | null;
-			/** @description Tables to replicate (whitelist). */
+			/** @description Tables to replicate (whitelist). Entries may be bare ("orders" means "public.orders") or schema-qualified ("sales.orders"). Names containing "=" or more than one "." are rejected. */
 			tables: string[];
 			/** @description Per-pipeline override for global batch_size. */
 			batch_size?: number | null;
@@ -633,6 +806,105 @@ export interface components {
 			batch_wait?: string | null;
 			/** @description Per-pipeline retry override; falls back to global. */
 			retry?: components["schemas"]["RetryConfig"];
+			/**
+			 * @description Operator intent for this pipeline (WS-1 lifecycle control). Empty/omitted means "running" -- a request that omits this field is NOT the same as one that explicitly sets it to "running"; on `PUT`, the server preserves whatever desired_state is already persisted when the field is absent from the body, so a paused pipeline stays paused across an unrelated edit.
+			 * @enum {string|null}
+			 */
+			desired_state?: "running" | "paused" | "stopped" | null;
+		};
+		/** @description A `PipelineConfig` as returned in list/detail responses, with the server-computed status fields merged in (see `Handler.pipelineWithStatus`, internal/api/handler.go). */
+		PipelineListItem: components["schemas"]["PipelineConfig"] & {
+			/**
+			 * @description Backward-compatible single-string status, projected from lifecycle_state/health (see `legacyStatusString`). For a deliberately paused/stopped pipeline this is "paused" / "stopped", not "error".
+			 * @enum {string}
+			 */
+			status: "healthy" | "error" | "transitioning" | "paused" | "stopped";
+			/**
+			 * @description What the pipeline is actually doing right now, independent of whether it is healthy (plan section 4.1). Reflects the persisted `PipelineLifecycleRecord` (see `protocol.LifecycleState`) when one exists, falling back to `desired_state` only for pipelines that have never gone through pause/start. "Transitioning" is reported instead whenever a `PipelineTransitionState` restart is in flight, regardless of the underlying lifecycle record.
+			 * @enum {string}
+			 */
+			lifecycle_state:
+				| "Running"
+				| "Pausing"
+				| "Paused"
+				| "Stopping"
+				| "Stopped"
+				| "NeedsResnapshot"
+				| "Snapshotting"
+				| "Resuming"
+				| "Failed"
+				| "Transitioning";
+			/**
+			 * Format: date-time
+			 * @description Absolute RFC3339 timestamp the pipeline will auto-resume at, mirrored from the persisted `PipelineLifecycleRecord` (plan section 8). Only set while lifecycle_state is `Pausing`/`Paused` with a TTL.
+			 */
+			paused_until?: string | null;
+			/**
+			 * @description Only meaningful while lifecycle_state is "Running"; empty for a paused/stopped/transitioning pipeline.
+			 * @enum {string}
+			 */
+			health: "healthy" | "error" | "";
+			/** @description Operator-facing note carried from the persisted `PipelineLifecycleRecord.reason` (see `PipelineLifecycleRecord`), e.g. why the WS-4 WAL guard escalated a `Paused` pipeline to `Stopping`. Empty unless a system-driven transition set one. */
+			reason?: string | null;
+			/**
+			 * @description Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5), mirrored from the persisted `PipelineLifecycleRecord.reconciliation`. WS-5 is the first workstream that actually writes `stale` (a resume from `Paused` whose snapshot chunks used a non-`integer_range` partition strategy); it MUST be visible here -- hiding it would recreate the "reports healthy while diverging" failure this plan exists to prevent. Empty (`""`) means no staleness is implied.
+			 * @enum {string}
+			 */
+			reconciliation?: "" | "idle" | "running" | "stale";
+		};
+		PausePipelineRequest: {
+			/**
+			 * @description Optional Go duration string (e.g. "30m", "2h") bounding how long the pause lasts before WS-3's auto-resume timer fires. Capped at a 4h ceiling (OQ-3); a `ttl` above `4h0m0s` is rejected with `400`. Converted to an absolute `paused_until` timestamp at request time (plan section 8). Omitting `ttl` does not mean "pause indefinitely" -- it defaults to the same 4h ceiling, so every pause is bounded.
+			 * @example 2h
+			 */
+			ttl?: string | null;
+		};
+		/** @description `GET /pipelines/{id}/pause-projection`'s body: the plan section 5 WAL-budget warning, computed read-only for a candidate `ttl` without committing a pause. Same shape and same wording as `PausePipelineResponse.warning` -- see that field's description. */
+		PausePipelineProjectionResponse: {
+			/**
+			 * @description Present only when the projected time-to-breach is shorter than the `ttl` being considered.
+			 * @example at the current WAL growth rate this pause will hit the WAL budget in ~1h45m0s
+			 */
+			warning?: string | null;
+		};
+		/** @description `PipelineLifecycleRecord` plus the optional WAL-budget warning (plan section 5) confirming, after the pause has been committed, whether it is projected to hit the WAL budget guard early. `GET /pipelines/{id}/pause-projection` is the read-only counterpart that shows the same projection *before* the pause is confirmed, per plan section 5 ("project the breach and show it before the pause is confirmed") -- this field remains as a post-commit confirmation. */
+		PausePipelineResponse: components["schemas"]["PipelineLifecycleRecord"] & {
+			/**
+			 * @description Present only when the projected time-to-breach (WAL budget remaining divided by the current WAL growth rate, from the existing `cdc_source_slot_lag_bytes` probe) is shorter than this pause's effective TTL -- i.e. the pause is projected to hit the source's WAL budget and force an escalation to `Stopping` before it would otherwise expire.
+			 * @example at the current WAL growth rate this pause will hit the WAL budget in ~1h45m0s
+			 */
+			warning?: string | null;
+		};
+		/** @description The system-owned lifecycle state for a pipeline (plan section 4.1/4.2), as opposed to `PipelineConfig.desired_state` (operator intent). Returned by the pause/start endpoints; written only as the result of `protocol.Transition` (internal/protocol/lifecycle.go), never assigned directly. */
+		PipelineLifecycleRecord: {
+			/**
+			 * @description See plan section 4.2 for what each state means.
+			 * @enum {string}
+			 */
+			state:
+				| "Running"
+				| "Pausing"
+				| "Paused"
+				| "Stopping"
+				| "Stopped"
+				| "NeedsResnapshot"
+				| "Snapshotting"
+				| "Resuming"
+				| "Failed";
+			/**
+			 * Format: date-time
+			 * @description Absolute RFC3339 timestamp. Set only while state is `Pausing`/`Paused` (invariant 3), cleared on exit -- never a duration, never a NATS KV TTL (plan section 8).
+			 */
+			paused_until?: string | null;
+			/**
+			 * @description Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). Only meaningfully populated once WS-7 lands; carried through unchanged by this workstream's transitions.
+			 * @enum {string}
+			 */
+			reconciliation?: "" | "idle" | "running" | "stale";
+			/** @description Optional operator-facing note attached by a system-driven transition. Set by the WS-4 WAL guard when it escalates a `Paused` pipeline straight to `Stopping` (plan section 7): either `wal_status` reached `unreserved`, or the `safe_wal_size` /fallback-lag threshold was breached. Empty for operator-requested transitions. */
+			reason?: string;
+			/** Format: date-time */
+			updated_at: string;
 		};
 		/** @description Source database connection configuration. */
 		SourceConfig: {
@@ -750,7 +1022,7 @@ export interface components {
 		};
 		/** @description Paginated pipeline list response. */
 		PipelineListResponse: {
-			pipelines: components["schemas"]["PipelineConfig"][];
+			pipelines: components["schemas"]["PipelineListItem"][];
 			/**
 			 * @description Total number of matching pipelines (before pagination).
 			 * @example 42
@@ -774,7 +1046,7 @@ export interface components {
 			/**
 			 * @description Raw key/value snapshot of all NATS KV entries under the
 			 *     pipeline's status prefix. Keys are full NATS KV keys
-			 *     (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{table}.stats`),
+			 *     (e.g. `cdc.pipeline.{id}.sources.{sid}.sinks.{sinkID}.tables.{token}.stats`, where token is the bare table name for the `public` schema and `schema=table` otherwise),
 			 *     values are the deserialized worker-internal type
 			 *     (`Checkpoint`, `TableStats`, or `PipelineTransitionState`).
 			 *     Modeled as `additionalProperties: true` (maps to
@@ -1025,7 +1297,7 @@ export interface operations {
 		parameters: {
 			query?: {
 				search?: string;
-				status?: "Healthy" | "Transitioning" | "Error";
+				status?: "healthy" | "error" | "transitioning" | "paused" | "stopped";
 				page?: number;
 				limit?: number;
 			};
@@ -1088,13 +1360,13 @@ export interface operations {
 		};
 		requestBody?: never;
 		responses: {
-			/** @description Pipeline configuration */
+			/** @description Pipeline configuration merged with its computed status fields (see `Handler.pipelineWithStatus`). */
 			200: {
 				headers: {
 					[name: string]: unknown;
 				};
 				content: {
-					"application/json": components["schemas"]["PipelineConfig"];
+					"application/json": components["schemas"]["PipelineListItem"];
 				};
 			};
 			401: components["responses"]["Unauthorized"];
@@ -1204,6 +1476,165 @@ export interface operations {
 			};
 			401: components["responses"]["Unauthorized"];
 			404: components["responses"]["NotFound"];
+			500: components["responses"]["InternalServerError"];
+		};
+	};
+	pausePipeline: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		requestBody?: {
+			content: {
+				"application/json": components["schemas"]["PausePipelineRequest"];
+			};
+		};
+		responses: {
+			/** @description Pipeline paused */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PausePipelineResponse"];
+				};
+			};
+			/** @description Invalid request body, or `ttl` exceeds the maximum pause duration of `4h0m0s`. */
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
+			401: components["responses"]["Unauthorized"];
+			404: components["responses"]["NotFound"];
+			/** @description Illegal lifecycle transition (e.g. the pipeline is not currently Running). */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
+			500: components["responses"]["InternalServerError"];
+		};
+	};
+	pausePauseProjection: {
+		parameters: {
+			query?: {
+				/**
+				 * @description Go duration string being considered (e.g. "2h"). Defaults to the 4h ceiling when omitted, capped at `4h0m0s` -- the same bound `POST /pipelines/{id}/pause` enforces.
+				 * @example 2h
+				 */
+				ttl?: string;
+			};
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Projection for the given ttl */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PausePipelineProjectionResponse"];
+				};
+			};
+			/** @description Invalid `ttl`, or `ttl` exceeds the maximum pause duration of `4h0m0s`. */
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
+			401: components["responses"]["Unauthorized"];
+			404: components["responses"]["NotFound"];
+			500: components["responses"]["InternalServerError"];
+		};
+	};
+	startPipeline: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Pipeline lifecycle state after the transition */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PipelineLifecycleRecord"];
+				};
+			};
+			401: components["responses"]["Unauthorized"];
+			404: components["responses"]["NotFound"];
+			/** @description Illegal lifecycle transition. */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
+			500: components["responses"]["InternalServerError"];
+		};
+	};
+	stopPipeline: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description Resource identifier (alphanumeric, dashes, underscores). */
+				id: components["parameters"]["PathID"];
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Pipeline lifecycle state after the transition (Stopping) */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PipelineLifecycleRecord"];
+				};
+			};
+			401: components["responses"]["Unauthorized"];
+			404: components["responses"]["NotFound"];
+			/** @description Illegal lifecycle transition. */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
 			500: components["responses"]["InternalServerError"];
 		};
 	};
@@ -1382,6 +1813,13 @@ export interface operations {
 				};
 			};
 			401: components["responses"]["Unauthorized"];
+			/** @description Source database unreachable or schema discovery failed */
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
 		};
 	};
 	listSourceTables: {
@@ -1407,6 +1845,15 @@ export interface operations {
 			};
 			401: components["responses"]["Unauthorized"];
 			500: components["responses"]["InternalServerError"];
+			/** @description Live table discovery against the source failed */
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorResponse"];
+				};
+			};
 		};
 	};
 	testSourceConnection: {

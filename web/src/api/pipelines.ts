@@ -5,6 +5,31 @@ import { apiClient, unwrap } from "./schema-client";
 type WirePipeline = components["schemas"]["PipelineConfig"];
 type WirePipelineList = components["schemas"]["PipelineListResponse"];
 type WirePipelineStatus = components["schemas"]["PipelineStatusResponse"];
+type WirePipelineListItem = components["schemas"]["PipelineListItem"];
+type WirePausePipelineResponse = components["schemas"]["PausePipelineResponse"];
+type WirePausePipelineProjectionResponse =
+	components["schemas"]["PausePipelineProjectionResponse"];
+type WirePipelineLifecycleRecord =
+	components["schemas"]["PipelineLifecycleRecord"];
+
+/**
+ * Lifecycle state as reported by the server (plan section 4.2). Mirrors
+ * `PipelineListItem.lifecycle_state` / `PipelineLifecycleRecord.state`.
+ */
+export type LifecycleState =
+	| "Running"
+	| "Pausing"
+	| "Paused"
+	| "Stopping"
+	| "Stopped"
+	| "NeedsResnapshot"
+	| "Snapshotting"
+	| "Resuming"
+	| "Failed"
+	| "Transitioning";
+
+/** Best-effort delete-reconciliation sub-status (plan section 4.2/4.4 invariant 5). */
+export type ReconciliationStatus = "" | "idle" | "running" | "stale";
 
 /**
  * Retry settings, camelCase.
@@ -45,6 +70,16 @@ export interface Pipeline {
 	batchWait?: string;
 	retry?: PipelineRetryConfig;
 	status?: string;
+	/** What the pipeline is actually doing right now (plan section 4.1). */
+	lifecycleState?: LifecycleState;
+	/** Only meaningful while lifecycleState is "Running"; empty otherwise. */
+	health?: "healthy" | "error" | "";
+	/** Set only while Pausing/Paused with a TTL (plan invariant 3). */
+	pausedUntil?: string | null;
+	/** Operator-facing note, e.g. why a WAL guard escalated a pause to a stop. */
+	reason?: string | null;
+	/** Best-effort delete-reconciliation sub-status; MUST stay visible when "stale". */
+	reconciliation?: ReconciliationStatus;
 }
 
 export interface ListPipelinesParams {
@@ -83,6 +118,37 @@ export interface CreatePipelineRequest {
 
 export type UpdatePipelineRequest = Partial<CreatePipelineRequest>;
 
+/** The system-owned lifecycle record returned by pause/start/stop. */
+export interface PipelineLifecycleRecord {
+	state: LifecycleState;
+	pausedUntil?: string | null;
+	reconciliation?: ReconciliationStatus;
+	reason?: string;
+	updatedAt: string;
+}
+
+export interface PausePipelineResult extends PipelineLifecycleRecord {
+	/**
+	 * Present only when the projected time-to-breach (plan section 5) is
+	 * shorter than this pause's effective TTL -- the pause is projected to
+	 * hit the source's WAL budget and force an escalation to Stopping
+	 * before it would otherwise expire.
+	 */
+	warning?: string;
+}
+
+/** GET /pipelines/{id}/pause-projection's body -- see PauseDialog. */
+export interface PausePipelineProjectionResult {
+	/**
+	 * Present only when the projected time-to-breach (plan section 5) is
+	 * shorter than the candidate `ttl` being considered. Read-only: unlike
+	 * `PausePipelineResult.warning`, this is computed BEFORE any pause is
+	 * committed, so the dialog can warn while the operator is still
+	 * choosing a duration.
+	 */
+	warning?: string;
+}
+
 export const pipelinesApi = {
 	async list(params: ListPipelinesParams = {}): Promise<PipelineListResponse> {
 		// The server supports search/status/page/limit; previously none were
@@ -102,7 +168,7 @@ export const pipelinesApi = {
 		const result = await apiClient.GET("/pipelines/{id}", {
 			params: { path: { id } },
 		});
-		return snakeToCamel<Pipeline>(unwrap<WirePipeline>(result));
+		return snakeToCamel<Pipeline>(unwrap<WirePipelineListItem>(result));
 	},
 
 	async getStatus(id: string): Promise<PipelineStatus> {
@@ -139,5 +205,61 @@ export const pipelinesApi = {
 			params: { path: { id } },
 		});
 		unwrap<undefined>(result);
+	},
+
+	/**
+	 * Pause a running pipeline while retaining its replication slot (plan
+	 * section 4.2). `ttl` is a Go duration string (e.g. "2h"), capped at a
+	 * 4h ceiling; omitting it still bounds the pause at that same ceiling
+	 * server-side -- it does not mean "pause indefinitely". Extending an
+	 * existing pause is just calling this again with a new `ttl`.
+	 */
+	async pause(id: string, ttl?: string): Promise<PausePipelineResult> {
+		const result = await apiClient.POST("/pipelines/{id}/pause", {
+			params: { path: { id } },
+			body: ttl ? { ttl } : undefined,
+		});
+		return snakeToCamel<PausePipelineResult>(
+			unwrap<WirePausePipelineResponse>(result),
+		);
+	},
+
+	/**
+	 * Read-only projection of whether pausing for `ttl` right now would hit
+	 * the WAL budget guard, WITHOUT committing a pause (plan section 5:
+	 * "project the breach and show it before the pause is confirmed").
+	 * `PauseDialog` calls this as the operator adjusts the TTL, then calls
+	 * `pause()` itself only on "Confirm pause".
+	 */
+	async pauseProjection(
+		id: string,
+		ttl?: string,
+	): Promise<PausePipelineProjectionResult> {
+		const result = await apiClient.GET("/pipelines/{id}/pause-projection", {
+			params: { path: { id }, query: ttl ? { ttl } : undefined },
+		});
+		return snakeToCamel<PausePipelineProjectionResult>(
+			unwrap<WirePausePipelineProjectionResponse>(result),
+		);
+	},
+
+	/** Resume a paused pipeline, or advance a stopped/failed one's lifecycle state. */
+	async start(id: string): Promise<PipelineLifecycleRecord> {
+		const result = await apiClient.POST("/pipelines/{id}/start", {
+			params: { path: { id } },
+		});
+		return snakeToCamel<PipelineLifecycleRecord>(
+			unwrap<WirePipelineLifecycleRecord>(result),
+		);
+	},
+
+	/** Stop a running or paused pipeline, dropping its replication slot. */
+	async stop(id: string): Promise<PipelineLifecycleRecord> {
+		const result = await apiClient.POST("/pipelines/{id}/stop", {
+			params: { path: { id } },
+		});
+		return snakeToCamel<PipelineLifecycleRecord>(
+			unwrap<WirePipelineLifecycleRecord>(result),
+		);
 	},
 };

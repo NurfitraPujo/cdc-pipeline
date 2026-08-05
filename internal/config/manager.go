@@ -41,22 +41,22 @@ var heartbeatKVWritesTotal = promauto.NewCounter(prometheus.CounterOpts{
 })
 
 type ConfigManager struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	kv             nats.KeyValue
-	factory        WorkerFactory
-	workers        map[string]engine.PipelineWorker
-	configs        map[string]protocol.PipelineConfig // Track current configs for comparison
-	revisions      map[string]uint64                  // Track last seen revision per pipeline
-	supervisors    map[string]context.CancelFunc      // Track supervisor cancel functions
+	ctx         context.Context
+	cancel      context.CancelFunc
+	kv          nats.KeyValue
+	factory     WorkerFactory
+	workers     map[string]engine.PipelineWorker
+	configs     map[string]protocol.PipelineConfig // Track current configs for comparison
+	revisions   map[string]uint64                  // Track last seen revision per pipeline
+	supervisors map[string]context.CancelFunc      // Track supervisor cancel functions
 	// invalidCfgAttempts tracks consecutive validation-failure retries per
 	// pipeline so the retry loop backs off instead of hammering KV/logs every
 	// ~5s forever for a permanently-broken config (WS-9 round-3 LOW fix).
 	// Reset once the pipeline validates successfully (see startNewWorker).
 	invalidCfgAttempts map[string]int
 	workersMu          sync.RWMutex
-	globalConfig   protocol.GlobalConfig
-	globalConfigMu sync.RWMutex
+	globalConfig       protocol.GlobalConfig
+	globalConfigMu     sync.RWMutex
 
 	// natsConn is an optional reference to a NATS connection that callers may inject
 	// via SetNatsConn. When set, worker heartbeats are published via regular NATS
@@ -64,6 +64,51 @@ type ConfigManager struct {
 	// cadence remains for the API to render status. See T1-31.
 	natsConnMu sync.RWMutex
 	natsConn   *nats.Conn
+
+	// pauseMu guards clock, slotHealthChecker, walGuardChecker and
+	// walGuardLagThresholdBytes -- the seams WS-3's pause-expiry ticker
+	// (pause_expiry.go) and WS-4's WAL guard (wal_guard.go) need
+	// injectable for testing without real time or a live replication
+	// slot. Kept separate from workersMu because they are read on every
+	// ticker sweep independently of worker/config bookkeeping.
+	pauseMu                   sync.RWMutex
+	clock                     Clock
+	slotHealthChecker         SlotHealthChecker
+	walGuardChecker           WALGuardChecker
+	walGuardLagThresholdBytes int64
+	// resnapshotStatusChecker is WS-6's seam: the probe
+	// maybeCompleteResnapshot consults to decide whether a Snapshotting
+	// pipeline's forced re-snapshot has finished. See
+	// ResnapshotStatusChecker's doc comment for the default.
+	resnapshotStatusChecker ResnapshotStatusChecker
+	// slotDropper is WS-5's seam: the probe finalizeStop consults to
+	// actually drop the replication slot once a Stopping pipeline's worker
+	// has drained. See SlotDropper's doc comment for the default.
+	slotDropper SlotDropper
+	// reconcileStepper is WS-7's seam: the function maybeSweepReconciliation
+	// consults to advance a Paused/Stale pipeline's chunked delete
+	// reconciliation by one chunk per tick. See ReconcileStepFunc's doc
+	// comment for the default (nil, i.e. "do nothing" -- reconciliation
+	// stale must never clear on its own, per invariant 5, so an unwired
+	// sweep must leave it exactly where it is, never fake progress).
+	reconcileStepper ReconcileStepFunc
+
+	// leaseMu guards leaseEnabled/isLeader -- StartLeaseLoop's leader-
+	// election state (internal/config/lease.go, RM-3). Kept separate from
+	// pauseMu because it is written from the lease-renewal goroutine and
+	// read from every ticker tick, independently of the checker/clock
+	// seams pauseMu protects.
+	leaseMu sync.RWMutex
+	// leaseEnabled is false until StartLeaseLoop is called. tickPauseExpiry
+	// treats "lease never started" as "no leader election configured" and
+	// runs the sweep unconditionally -- the pre-RM-3 single-manager
+	// behavior every existing test relies on -- rather than requiring every
+	// caller to also start a lease loop.
+	leaseEnabled bool
+	// isLeader is this ConfigManager's most recently known leadership
+	// status, updated by the lease-renewal loop. Only consulted when
+	// leaseEnabled is true.
+	isLeader bool
 }
 
 // NewConfigManager constructs a ConfigManager backed by the supplied NATS KeyValue
@@ -80,14 +125,24 @@ func NewConfigManager(kv nats.KeyValue, factory WorkerFactory) *ConfigManager {
 	}
 	cfg.SetDefaults()
 	return &ConfigManager{
-		kv:           kv,
-		factory:      factory,
-		workers:      make(map[string]engine.PipelineWorker),
-		configs:      make(map[string]protocol.PipelineConfig),
-		revisions:    make(map[string]uint64),
-		supervisors:  make(map[string]context.CancelFunc),
+		kv:                 kv,
+		factory:            factory,
+		workers:            make(map[string]engine.PipelineWorker),
+		configs:            make(map[string]protocol.PipelineConfig),
+		revisions:          make(map[string]uint64),
+		supervisors:        make(map[string]context.CancelFunc),
 		invalidCfgAttempts: make(map[string]int),
-		globalConfig: cfg,
+		globalConfig:       cfg,
+		clock:              realClock{},
+		slotHealthChecker:  defaultSlotHealthChecker,
+		slotDropper:        defaultSlotDropper,
+		// walGuardChecker is deliberately left nil (not defaultWALGuardChecker)
+		// rather than following SlotHealthChecker's "always installed, defaults
+		// optimistic" pattern: maybeEscalateWALGuardBreach checks for nil and
+		// skips the sweep's config lookup entirely when unset, so a manager
+		// that never calls SetWALGuardChecker (every test that predates WS-4)
+		// pays no extra per-tick KV read. cmd/pipeline/main.go always installs
+		// a real one via SetWALGuardChecker.
 	}
 }
 
@@ -294,6 +349,12 @@ func (m *ConfigManager) reloadAllWorkers(ctx context.Context) {
 		m.revisions[id] = entry.Revision()
 		m.workersMu.Unlock()
 
+		// A global reload must not resurrect a pipeline the operator has
+		// deliberately paused or stopped -- see honourDesiredState.
+		if !m.honourDesiredState(ctx, id, cfg) {
+			continue
+		}
+
 		m.transitionWorker(ctx, id, cfg)
 	}
 }
@@ -338,7 +399,7 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 				m.workersMu.Unlock()
 
 				log.Info().Str("pipeline_id", pipelineID).Uint64("revision", entry.Revision()).Msg("Pipeline deleted")
-				m.stopWorker(ctx, pipelineID)
+				m.stopWorker(ctx, pipelineID, true)
 				continue
 			}
 
@@ -406,6 +467,13 @@ func (m *ConfigManager) handlePipelineUpdates(ctx context.Context, watcher nats.
 			m.configs[pipelineID] = cfg
 			m.revisions[pipelineID] = entry.Revision()
 			m.workersMu.Unlock()
+
+			// desired_state governs whether this pipeline should have a worker
+			// at all -- honourDesiredState stops one if the operator has paused
+			// or stopped the pipeline, and skips starting one otherwise.
+			if !m.honourDesiredState(ctx, pipelineID, cfg) {
+				continue
+			}
 
 			log.Info().
 				Str("pipeline_id", pipelineID).
@@ -581,6 +649,86 @@ func (m *ConfigManager) startNewWorker(ctx context.Context, id string, cfg proto
 	parentCtx := m.ctx
 	if parentCtx == nil {
 		parentCtx = ctx
+	}
+
+	// WS-1: startNewWorker is the single choke point every config-load path
+	// funnels through (see the WS-9 comment below), including two paths that
+	// used to bypass desired_state entirely: transitionWorker's async
+	// two-phase goroutine (which can land here well after the watcher event
+	// that scheduled it, by which point the operator may have paused the
+	// pipeline) and attemptRestart's supervisor retry loop (which re-fetches
+	// "latest" config from KV but previously never consulted desired_state).
+	// Gating here, rather than only at the watcher call sites, closes that
+	// race by construction: no matter which path reaches startNewWorker, a
+	// paused/stopped pipeline never gets a worker.
+	//
+	// The desired_state check must consult m.configs[id] -- the latest value
+	// the watcher has observed -- rather than trust the cfg argument's own
+	// DesiredState field. transitionWorker's goroutine closes over the cfg
+	// that was current when the transition *started*; if the operator pauses
+	// the pipeline while that goroutine is mid-drain/shutdown/stabilize, the
+	// closed-over cfg is stale by the time startNewWorker runs, even though
+	// the watcher already wrote the pause into m.configs[id] and tore the
+	// worker down via honourDesiredState. Falling back to cfg itself when no
+	// cached entry exists preserves today's behaviour for brand-new
+	// pipelines (initial start, where honourDesiredState's caller has
+	// already populated m.configs[id] with the same cfg anyway).
+	m.workersMu.RLock()
+	effectiveCfg, cached := m.configs[id]
+	m.workersMu.RUnlock()
+	if !cached {
+		effectiveCfg = cfg
+	}
+	if effectiveCfg.EffectiveDesiredState() != protocol.DesiredStateRunning {
+		log.Info().
+			Str("pipeline_id", id).
+			Str("desired_state", string(effectiveCfg.EffectiveDesiredState())).
+			Msg("Refusing to start worker: desired_state is not running")
+		m.workersMu.Lock()
+		if cancel, exists := m.supervisors[id]; exists {
+			cancel()
+			delete(m.supervisors, id)
+		}
+		delete(m.invalidCfgAttempts, id)
+		m.workersMu.Unlock()
+		return
+	}
+
+	// RM-1 backstop (defence in depth for invariant 1, plan section 4.4):
+	// desired_state=running is not, on its own, sufficient authority to
+	// start a plain worker. Unless the persisted lifecycle record is
+	// already worker-bearing (Running/Snapshotting/Resuming), a plain
+	// worker start would land the pipeline on Running without passing
+	// through the guarded transitions the state machine requires --
+	// including Paused/Pausing/Stopping, where a raw start would skip the
+	// SlotAlive guard on Paused->Resuming (a dead slot must force
+	// NeedsResnapshot, not a silent resume from a stale/recreated slot).
+	// The API layer (UpdatePipeline/CreatePipeline,
+	// internal/api/handler.go) already rejects a raw desired_state flip for
+	// these states, but startNewWorker is the single choke point every
+	// config-load path funnels through (see the WS-1 comment above), so it
+	// gets its own check rather than trusting the caller never bypasses the
+	// API-layer guard -- a stale KV write, a bootstrap path, or a future
+	// caller that forgets the check must still be unable to launch a worker
+	// out of these states. This is a read-only check: it never writes the
+	// lifecycle-state key itself (only protocol.Transition may do that) --
+	// it just refuses to start.
+	if rec, ok := m.getLifecycleRecord(id); ok &&
+		rec.State != protocol.StateRunning &&
+		rec.State != protocol.StateSnapshotting &&
+		rec.State != protocol.StateResuming {
+		log.Warn().
+			Str("pipeline_id", id).
+			Str("lifecycle_state", string(rec.State)).
+			Msg("Refusing to start worker: desired_state is running but lifecycle record forbids a direct Running start (invariant 1); call POST /pipelines/{id}/start instead")
+		m.workersMu.Lock()
+		if cancel, exists := m.supervisors[id]; exists {
+			cancel()
+			delete(m.supervisors, id)
+		}
+		delete(m.invalidCfgAttempts, id)
+		m.workersMu.Unlock()
+		return
 	}
 
 	// WS-9: every config-load path (initial bootstrap, KV read-back on reload,
@@ -996,12 +1144,161 @@ func (m *ConfigManager) InternalCrashWorker(ctx context.Context, id string) {
 	}
 }
 
-func (m *ConfigManager) stopWorker(ctx context.Context, id string) {
+// honourDesiredState is the WS-1 choke point for the *tear-down* side of
+// desired_state: it stops a running worker when the operator has paused or
+// stopped a pipeline. (The start-up side is enforced unconditionally inside
+// startNewWorker, since honourDesiredState's callers -- handlePipelineUpdates
+// and reloadAllWorkers -- are not the only paths that can start a worker; see
+// the comment there.) It reports whether the caller should proceed to
+// transitionWorker/startNewWorker.
+//
+// desired_state is operator intent, not the full lifecycle machine
+// (internal/protocol/lifecycle.go) -- that arrives in WS-2+. For now,
+// "paused" and "stopped" both mean the same thing to ConfigManager: no
+// worker should be running. The distinction between them (slot retained vs.
+// dropped, auto-resume timer, re-snapshot on resume) is system-level state
+// tracked elsewhere, not something ConfigManager enforces here.
+func (m *ConfigManager) honourDesiredState(ctx context.Context, id string, cfg protocol.PipelineConfig) bool {
+	if cfg.EffectiveDesiredState() == protocol.DesiredStateRunning {
+		return true
+	}
+
+	log.Info().
+		Str("pipeline_id", id).
+		Str("desired_state", string(cfg.EffectiveDesiredState())).
+		Msg("Pipeline desired_state is not running; stopping worker if present")
+
+	// stopWorker is a no-op (beyond map bookkeeping) if no worker exists for
+	// id, so this is safe to call unconditionally -- reuses the same
+	// drain-then-shutdown sequence used for pipeline deletion (manager.go)
+	// rather than reinventing worker teardown.
+	//
+	// dropConfig=false: unlike a real pipeline deletion, a pause/stop must
+	// keep m.configs[id]/m.revisions[id] populated (the caller already wrote
+	// the paused config and its revision into those maps before calling us).
+	// Dropping them here would erase the T1-27 out-of-order-redelivery
+	// watermark, letting a redelivered pre-pause revision sail through the
+	// `exists`-gated staleness check in handlePipelineUpdates and resurrect
+	// the paused pipeline.
+	m.stopWorker(ctx, id, false)
+
+	// WS-5: desired_state == stopped additionally requires dropping the
+	// replication slot once the drain above has completed -- releasing WAL
+	// is the entire point of stop, as opposed to pause (plan section 1).
+	// finalizeStop only acts if it observes the lifecycle record already at
+	// Stopping (written synchronously by StopPipeline before desired_state,
+	// see that handler's doc comment), so a pipeline whose desired_state
+	// happens to be stopped without ever having gone through StopPipeline
+	// (e.g. a config authored directly) is left alone here.
+	if cfg.EffectiveDesiredState() == protocol.DesiredStateStopped {
+		m.finalizeStop(ctx, id, cfg)
+	}
+	return false
+}
+
+// finalizeStop is the second half of stop that pause does not need: once
+// stopWorker's drain has completed, drop the replication slot and persist
+// the Stopping -> Stopped transition (plan section 4.3, "Stopping | drain
+// complete, slot dropped | Stopped"). Called from honourDesiredState right
+// after stopWorker, for the same reason WS-1's comment on stopWorker gives
+// for reusing it rather than reinventing worker teardown -- this reuses the
+// drain honourDesiredState already performed instead of running a second
+// one.
+//
+// RM-2: a failed slot drop does NOT leave the record at Stopping for some
+// future call to retry -- a pipeline whose desired_state is already
+// "stopped" fires no further config-watch events, so honourDesiredState's
+// only production caller (handlePipelineUpdates/reloadAllWorkers) never
+// runs again for it, and there is no "next reconcile". Instead the failure
+// is routed through Transition into StateFailed with the error persisted
+// as Reason, so POST /start ({Failed, start}) can recover it instead of
+// the pipeline being permanently wedged with both (Stopping, stop) and
+// (Stopping, start) illegal.
+//
+// Guarded on the persisted record actually being Stopping: StopPipeline
+// (internal/api/handler.go) writes that record before writing
+// desired_state, specifically so this check can never observe anything
+// else for a call that legitimately originated from StopPipeline. Any other
+// state means either a stale/duplicate call (e.g. the config watcher
+// re-delivering the same revision) or a Stopped/Stopping already handled by
+// a previous call, both of which finalizeStop must treat as a no-op rather
+// than re-run the drop or clobber a state it did not cause.
+func (m *ConfigManager) finalizeStop(ctx context.Context, id string, cfg protocol.PipelineConfig) {
+	rec, ok := m.getLifecycleRecord(id)
+	if !ok || rec.State != protocol.StateStopping {
+		return
+	}
+
+	dropper := m.getSlotDropper()
+	if err := dropper(ctx, id, cfg); err != nil {
+		log.Error().Err(err).Str("pipeline_id", id).Msg("stop: failed to drop replication slot; transitioning pipeline to Failed")
+
+		// RM-2: a Stopping pipeline whose desired_state is already
+		// "stopped" emits no further config-watch events -- there is no
+		// "next reconcile" to retry this the way the old comment here
+		// claimed. Route the failure through Transition into StateFailed
+		// instead, so the pipeline lands somewhere an operator verb can
+		// reach it: {Failed, start} (see protocol/lifecycle.go) routes back
+		// to Resuming or NeedsResnapshot depending on whether the slot is
+		// still alive, rather than 409-ing forever the way (Stopping,
+		// start) does.
+		failOutcome, ferr := protocol.Transition(protocol.StateStopping, protocol.EventFailure, protocol.Guards{})
+		if ferr != nil {
+			// StateStopping is a transientStates member, so (Stopping,
+			// failure) is unconditionally legal; log rather than panic and
+			// leave the record for a future call to retry.
+			log.Error().Err(ferr).Str("pipeline_id", id).Msg("stop: illegal failure transition")
+			return
+		}
+
+		failedRec := protocol.PipelineLifecycleRecord{
+			State:          failOutcome.To,
+			Reconciliation: rec.Reconciliation,
+			Reason:         fmt.Sprintf("stop: failed to drop replication slot: %s", err.Error()),
+			UpdatedAt:      time.Now().UTC(),
+		}
+		if perr := m.putLifecycleRecord(id, failedRec); perr != nil {
+			log.Error().Err(perr).Str("pipeline_id", id).Msg("stop: failed to persist Failed lifecycle record")
+		}
+		return
+	}
+
+	outcome, err := protocol.Transition(protocol.StateStopping, protocol.EventSlotDropped, protocol.Guards{})
+	if err != nil {
+		// (Stopping, slot_dropped) is unconditionally legal in the
+		// transition table, so this should be unreachable; log rather than
+		// panic and leave the record for a future call to retry.
+		log.Error().Err(err).Str("pipeline_id", id).Msg("stop: illegal slot_dropped transition")
+		return
+	}
+
+	newRec := protocol.PipelineLifecycleRecord{
+		State: outcome.To,
+		// invariant 3: paused_until is only meaningful in Pausing/Paused;
+		// Stopping/Stopped are neither, so it is dropped by omission.
+		Reconciliation: rec.Reconciliation,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	if err := m.putLifecycleRecord(id, newRec); err != nil {
+		log.Error().Err(err).Str("pipeline_id", id).Msg("stop: failed to persist Stopped lifecycle record")
+		return
+	}
+	log.Info().Str("pipeline_id", id).Msg("stop: replication slot dropped, pipeline Stopped")
+}
+
+// stopWorker tears a running worker down. dropConfig controls whether
+// m.configs/m.revisions are cleared along with it: real pipeline deletion
+// (handlePipelineUpdates' delete branch, manager Stop) should drop them, but
+// a desired_state pause/stop (honourDesiredState) must not -- see the
+// comment there.
+func (m *ConfigManager) stopWorker(ctx context.Context, id string, dropConfig bool) {
 	m.workersMu.Lock()
 	w, ok := m.workers[id]
 	delete(m.workers, id)
-	delete(m.configs, id)
-	delete(m.revisions, id)
+	if dropConfig {
+		delete(m.configs, id)
+		delete(m.revisions, id)
+	}
 	if cancel, exists := m.supervisors[id]; exists {
 		cancel()
 		delete(m.supervisors, id)
@@ -1095,7 +1392,7 @@ func (m *ConfigManager) Stop(ctx context.Context) {
 		wg.Add(1)
 		go func(pid string) {
 			defer wg.Done()
-			m.stopWorker(ctx, pid)
+			m.stopWorker(ctx, pid, true)
 		}(id)
 	}
 
