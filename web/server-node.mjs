@@ -4,15 +4,100 @@
 // has no Cloudflare-specific runtime dependencies.
 //
 // `vite build` emits dist/server/server.js as a fetch-style handler that does
-// NOT listen on its own, so this adapter bridges it to node:http.
+// NOT listen on its own, so this adapter bridges it to node:http. It also
+// does not serve the static client build (dist/client/**) -- Cloudflare
+// handles that itself via Workers assets, but plain Node needs it done here,
+// so we serve dist/client first and fall through to the SSR handler for
+// everything else.
 import { createServer } from "node:http";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import handler from "./dist/server/server.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clientDir = path.join(__dirname, "dist", "client");
+
+const MIME_TYPES = {
+	".js": "text/javascript; charset=utf-8",
+	".mjs": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".ico": "image/x-icon",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".svg": "image/svg+xml",
+	".webp": "image/webp",
+	".txt": "text/plain; charset=utf-8",
+	".map": "application/json; charset=utf-8",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+};
+
+/**
+ * Serve a file from dist/client if it exists, resolving it safely so
+ * request paths can never escape clientDir via `..` traversal.
+ * Returns true if the request was handled (response sent), false to let
+ * the caller fall through to the SSR handler.
+ */
+async function serveStaticAsset(req, res, pathname) {
+	if (req.method !== "GET" && req.method !== "HEAD") return false;
+
+	const decoded = decodeURIComponent(pathname);
+	const resolved = path.normalize(path.join(clientDir, decoded));
+	if (!resolved.startsWith(clientDir + path.sep) && resolved !== clientDir) {
+		return false;
+	}
+
+	let stats;
+	try {
+		stats = await stat(resolved);
+	} catch {
+		return false;
+	}
+	if (!stats.isFile()) return false;
+
+	const ext = path.extname(resolved);
+	const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+	// Hashed filenames under /assets/ are content-addressed and safe to cache
+	// forever; everything else (favicon, manifest, robots.txt) can change
+	// across deploys without a hash bump, so keep it revalidating.
+	const cacheControl = decoded.startsWith("/assets/")
+		? "public, max-age=31536000, immutable"
+		: "public, max-age=3600";
+
+	res.writeHead(200, {
+		"Content-Type": contentType,
+		"Content-Length": stats.size,
+		"Cache-Control": cacheControl,
+	});
+
+	if (req.method === "HEAD") {
+		res.end();
+		return true;
+	}
+
+	await new Promise((resolve, reject) => {
+		const stream = createReadStream(resolved);
+		stream.on("error", reject);
+		stream.on("end", resolve);
+		stream.pipe(res);
+	});
+	return true;
+}
 
 const port = Number(process.env.PORT) || 3000;
 
 const server = createServer(async (req, res) => {
 	try {
 		const url = `http://${req.headers.host ?? "localhost"}${req.url}`;
+		const pathname = new URL(url).pathname;
+
+		if (await serveStaticAsset(req, res, pathname)) return;
+
 		const hasBody = req.method !== "GET" && req.method !== "HEAD";
 		const request = new Request(url, {
 			method: req.method,
