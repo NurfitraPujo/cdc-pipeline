@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/NurfitraPujo/cdc-pipeline/internal/config"
-	"github.com/NurfitraPujo/cdc-pipeline/internal/crypto"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/engine"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/infra"
 	"github.com/NurfitraPujo/cdc-pipeline/internal/logger"
@@ -154,99 +153,29 @@ func main() {
 	mgr.Stop(shutdownCtx)
 }
 
+// bootstrapKV seeds only what the system needs to be operable from an empty
+// KV bucket: an admin login and the global defaults. It deliberately does
+// NOT preseed any source, sink, or pipeline -- doing so previously shipped a
+// fake "pipe-01" pointing at tables (users/orders/products) that don't exist
+// in the operator's real database, which made every fresh deployment crash-
+// loop until someone deleted the seeded pipeline by hand. Sources, sinks,
+// and pipelines must now be created explicitly (via the dashboard/API)
+// against real, existing tables.
 func bootstrapKV(kv go_nats.KeyValue) error {
 	keys, err := kv.Keys()
 	if err == nil && len(keys) > 0 {
 		return nil
 	}
 
-	log.Info().Msg("KV bucket empty. Bootstrapping from embedded config.example.yaml...")
+	log.Info().Msg("KV bucket empty. Bootstrapping admin auth and global defaults from embedded config.example.yaml...")
 
 	var seed struct {
-		Auth      protocol.UserConfig       `yaml:"auth"`
-		Global    protocol.GlobalConfig     `yaml:"global"`
-		Sources   []protocol.SourceConfig   `yaml:"sources"`
-		Sinks     []protocol.SinkConfig     `yaml:"sinks"`
-		Pipelines []protocol.PipelineConfig `yaml:"pipelines"`
+		Auth   protocol.UserConfig   `yaml:"auth"`
+		Global protocol.GlobalConfig `yaml:"global"`
 	}
 
 	if err := yaml.Unmarshal(defaultConfigFile, &seed); err != nil {
 		return err
-	}
-
-	// Dynamically override config values using environment variables at runtime
-	for i := range seed.Sources {
-		if seed.Sources[i].Type == "postgres" {
-			if h := os.Getenv("POSTGRES_SOURCE_HOST"); h != "" {
-				seed.Sources[i].Host = h
-			}
-			if p := os.Getenv("POSTGRES_SOURCE_PORT"); p != "" {
-				var port int
-				if _, err := fmt.Sscanf(p, "%d", &port); err == nil {
-					seed.Sources[i].Port = port
-				}
-			}
-			if u := os.Getenv("POSTGRES_SOURCE_USER"); u != "" {
-				seed.Sources[i].User = u
-			} else if u := os.Getenv("POSTGRES_USER"); u != "" {
-				seed.Sources[i].User = u
-			}
-			if pw := os.Getenv("POSTGRES_SOURCE_PASSWORD"); pw != "" {
-				seed.Sources[i].PassEncrypted = pw
-			} else if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
-				seed.Sources[i].PassEncrypted = pw
-			}
-			if db := os.Getenv("POSTGRES_SOURCE_DB"); db != "" {
-				seed.Sources[i].Database = db
-			} else if db := os.Getenv("POSTGRES_DB"); db != "" {
-				seed.Sources[i].Database = db
-			}
-		}
-	}
-
-	for i := range seed.Sinks {
-		if seed.Sinks[i].Type == "databend" {
-			if dsn := os.Getenv("DATABEND_DSN"); dsn != "" {
-				seed.Sinks[i].DSN = dsn
-			} else {
-				dbHost := os.Getenv("DATABEND_HOST")
-				if dbHost != "" {
-					dbPort := os.Getenv("DATABEND_PORT")
-					if dbPort == "" {
-						dbPort = "8000"
-					}
-					seed.Sinks[i].DSN = fmt.Sprintf("http://root:@%s:%s", dbHost, dbPort)
-				}
-			}
-		} else if seed.Sinks[i].Type == "postgres_debug" {
-			if dsn := os.Getenv("POSTGRES_DEBUG_DSN"); dsn != "" {
-				seed.Sinks[i].DSN = dsn
-			} else {
-				dbHost := os.Getenv("POSTGRES_DEBUG_HOST")
-				if dbHost != "" {
-					dbPort := os.Getenv("POSTGRES_DEBUG_PORT")
-					if dbPort == "" {
-						dbPort = "5432"
-					}
-					dbUser := os.Getenv("POSTGRES_DEBUG_USER")
-					if dbUser == "" {
-						dbUser = "postgres"
-					}
-					dbPass := os.Getenv("POSTGRES_DEBUG_PASSWORD")
-					if dbPass == "" {
-						dbPass = os.Getenv("POSTGRES_PASSWORD")
-					}
-					if dbPass == "" {
-						dbPass = "postgres"
-					}
-					dbName := os.Getenv("POSTGRES_DEBUG_DB")
-					if dbName == "" {
-						dbName = "debug_db"
-					}
-					seed.Sinks[i].DSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
-				}
-			}
-		}
 	}
 
 	// Hash the default password before storage
@@ -257,35 +186,6 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 		log.Error().Err(err).Msg("Failed to hash bootstrap password")
 	}
 
-	// Encrypt sensitive credentials for Sources and Sinks using internal/crypto
-	key, err := crypto.GetEncryptionKey()
-	if err != nil {
-		return fmt.Errorf("failed to bootstrap: %w", err)
-	}
-	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
-		return fmt.Errorf("failed to bootstrap: ENCRYPTION_KEY must be 16, 24, or 32 bytes (got %d)", len(key))
-	}
-
-	for i := range seed.Sources {
-		if seed.Sources[i].PassEncrypted != "" {
-			enc, err := crypto.Encrypt(seed.Sources[i].PassEncrypted, key)
-			if err != nil {
-				return fmt.Errorf("failed to encrypt source password for %s: %w", seed.Sources[i].ID, err)
-			}
-			seed.Sources[i].PassEncrypted = enc
-		}
-	}
-
-	for i := range seed.Sinks {
-		if seed.Sinks[i].DSN != "" {
-			enc, err := crypto.Encrypt(seed.Sinks[i].DSN, key)
-			if err != nil {
-				return fmt.Errorf("failed to encrypt sink DSN for %s: %w", seed.Sinks[i].ID, err)
-			}
-			seed.Sinks[i].DSN = enc
-		}
-	}
-
 	authData, _ := json.Marshal(seed.Auth)
 	if _, err := kv.Put(protocol.KeyAuthConfig, authData); err != nil {
 		log.Warn().Err(err).Msg("Failed to bootstrap auth config")
@@ -294,25 +194,6 @@ func bootstrapKV(kv go_nats.KeyValue) error {
 	globalData, _ := json.Marshal(seed.Global)
 	if _, err := kv.Put(protocol.KeyGlobalConfig, globalData); err != nil {
 		log.Warn().Err(err).Msg("Failed to bootstrap global config")
-	}
-
-	for _, sc := range seed.Sources {
-		data, _ := json.Marshal(sc)
-		if _, err := kv.Put(protocol.SourceConfigKey(sc.ID), data); err != nil {
-			log.Warn().Err(err).Str("source_id", sc.ID).Msg("Failed to bootstrap source")
-		}
-	}
-	for _, sc := range seed.Sinks {
-		data, _ := json.Marshal(sc)
-		if _, err := kv.Put(protocol.SinkConfigKey(sc.ID), data); err != nil {
-			log.Warn().Err(err).Str("sink_id", sc.ID).Msg("Failed to bootstrap sink")
-		}
-	}
-	for _, pc := range seed.Pipelines {
-		data, _ := json.Marshal(pc)
-		if _, err := kv.Put(protocol.PipelineConfigKey(pc.ID), data); err != nil {
-			log.Warn().Err(err).Str("pipeline_id", pc.ID).Msg("Failed to bootstrap pipeline")
-		}
 	}
 
 	log.Info().Msg("Bootstrapping complete.")
