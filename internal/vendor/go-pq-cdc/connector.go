@@ -51,11 +51,14 @@ type connector struct {
 	slot               *slot.Slot
 	cancelCh           chan os.Signal
 	readyCh            chan struct{}
-	cfg                *config.Config
-	snapshotter        *snapshot.Snapshotter
-	listenerFunc       replication.ListenerFunc
-	once               sync.Once
-	heartbeatMu        sync.Mutex
+	// vendored-patch: HA-1 - carries a setup failure out of Start (which cannot return one)
+	// so WaitUntilReady reports it instead of blocking until the context is cancelled.
+	startErrCh   chan error
+	cfg          *config.Config
+	snapshotter  *snapshot.Snapshotter
+	listenerFunc replication.ListenerFunc
+	once         sync.Once
+	heartbeatMu  sync.Mutex
 	// vendored-patch: T1-5 - sync.Once to prevent double-close of signal channels
 	closeCancelChOnce sync.Once
 	closeReadyChOnce  sync.Once
@@ -159,6 +162,7 @@ func NewConnector(ctx context.Context, cfg config.Config, listenerFunc replicati
 		listenerFunc:       listenerFunc,
 		cancelCh:           make(chan os.Signal, 1),
 		readyCh:            make(chan struct{}, 1),
+		startErrCh:         make(chan error, 1),
 	}, nil
 }
 
@@ -189,6 +193,7 @@ func newSnapshotOnlyConnector(ctx context.Context, cfg config.Config, listenerFu
 		listenerFunc:       listenerFunc,
 		cancelCh:           make(chan os.Signal, 1),
 		readyCh:            make(chan struct{}, 1),
+		startErrCh:         make(chan error, 1),
 		// CDC components left nil: system, stream, slot
 	}, nil
 }
@@ -249,6 +254,7 @@ func (c *connector) Start(ctx context.Context) {
 		// vendored-patch: T1-4 - Establish connections before checking if snapshot is needed
 		if err := c.snapshotter.Connect(ctx); err != nil {
 			logger.Error("snapshot connection failed", "error", err)
+			c.signalStartErr(err)
 			return
 		}
 
@@ -260,6 +266,7 @@ func (c *connector) Start(ctx context.Context) {
 
 		if err := c.executeSnapshotOnly(ctx); err != nil {
 			logger.Error("snapshot-only execution failed", "error", err)
+			c.signalStartErr(err)
 			return
 		}
 		logger.Info("snapshot-only completed successfully, exiting")
@@ -274,11 +281,13 @@ func (c *connector) Start(ctx context.Context) {
 		// ready, so Connect must run before the probe.
 		if err := c.snapshotter.Connect(ctx); err != nil {
 			logger.Error("snapshot connection failed", "error", err)
+			c.signalStartErr(err)
 			return
 		}
 		if c.shouldTakeSnapshot(ctx) {
 			if err := c.prepareSnapshotAndSlot(ctx); err != nil {
 				logger.Error("snapshot preparation failed", "error", err)
+				c.signalStartErr(err)
 				return
 			}
 		}
@@ -288,6 +297,7 @@ func (c *connector) Start(ctx context.Context) {
 		slotInfo, err := c.slot.Create(ctx)
 		if err != nil {
 			logger.Error("slot creation failed", "error", err)
+			c.signalStartErr(err)
 			return
 		}
 		logger.Info("slot info", "info", slotInfo)
@@ -295,6 +305,7 @@ func (c *connector) Start(ctx context.Context) {
 
 	if err := c.slot.Connect(ctx); err != nil {
 		logger.Error("slot connection failed", "error", err)
+		c.signalStartErr(err)
 		return
 	}
 
@@ -318,18 +329,39 @@ func (c *connector) Start(ctx context.Context) {
 
 	if err := c.stream.Connect(ctx); err != nil {
 		logger.Error("stream connection failed", "error", err)
+		c.signalStartErr(err)
 		return
 	}
 
 	err := c.stream.Open(ctx)
 	if err != nil {
+		// vendored-patch: HA-1 - slot-in-use is reported loudly and once, instead of
+		// being retried in place at Info level.
+		//
+		// The original code logged this at Info, slept 1s, and recursed into Start.
+		// That was silent (Info, not Error), it grew the stack by a frame per second,
+		// and -- worse -- it did not actually retry for long: Open pushes to the
+		// cap-1 sinkEnd channel before returning ErrorSlotInUse, and only Close ever
+		// drains it, so the SECOND attempt blocked forever on a full channel. The
+		// observable result was a worker that logged one Info line and then hung,
+		// while /readyz (NATS-only) kept it Ready and its heartbeat kept reporting
+		// Running.
+		//
+		// Retrying belongs in the supervisor, which already has restart-with-backoff
+		// and is observable; retrying here cannot work without rebuilding the stream.
+		// So: name the cause, and report it through startErrCh so WaitUntilReady
+		// fails instead of blocking until shutdown.
 		if goerrors.Is(err, replication.ErrorSlotInUse) {
-			logger.Info("capture failed, slot in use. Retrying in 1s...")
-			time.Sleep(1 * time.Second)
-			c.Start(ctx)
-			return
+			err = fmt.Errorf(
+				"replication slot %q is already in use by another walsender: "+
+					"this worker cannot capture. A replication slot admits exactly one "+
+					"active connection, so this almost always means more than one worker "+
+					"replica is running the same pipeline: %w",
+				c.cfg.Slot.Name, err,
+			)
 		}
-		logger.Error("postgres stream open", "error", err)
+		logger.Error("postgres stream open", "error", err, "slot", c.cfg.Slot.Name)
+		c.signalStartErr(err)
 		return
 	}
 
@@ -613,10 +645,25 @@ func (c *connector) snapshotHandler(event *format.Snapshot) error {
 	return nil
 }
 
+// signalStartErr records a setup failure from Start, which has no error return.
+// vendored-patch: HA-1 - non-blocking: the channel is buffered for one error and
+// only the first failure is interesting, since Start returns immediately after.
+func (c *connector) signalStartErr(err error) {
+	select {
+	case c.startErrCh <- err:
+	default:
+	}
+}
+
 func (c *connector) WaitUntilReady(ctx context.Context) error {
 	select {
 	case <-c.readyCh:
 		return nil
+	// vendored-patch: HA-1 - a failed Start used to leave this blocked until the
+	// context was cancelled, so a worker that never captured looked identical to one
+	// still starting up. Surface the cause instead.
+	case err := <-c.startErrCh:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}

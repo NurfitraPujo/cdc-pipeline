@@ -39,6 +39,7 @@ re-litigated by whoever reads the code next.
 | [0023](0023-processor-filter-schemas-tables-or-semantics.md) | A processor's `schemas` and `tables` filters OR together, not AND | accepted |
 | [0024](0024-transform-circuit-breaker-and-transport-classification.md) | The transform RPC gets its own circuit breaker; NATS transport errors are classified separately from application errors | accepted |
 | [0025](0025-transform-subject-auth-accepted-risk.md) | Subject-level authentication on `custom_object_requests.cdc_transform` is an accepted risk, not implemented | accepted |
+| [0026](0026-worker-ha-via-nats-kv-leases.md) | Worker HA comes from a per-pipeline NATS KV lease, not from replica count | proposed |
 
 **0001–0007** came out of multi-schema support; the full narrative, including two refuted
 assumptions and a failed first implementation, is in [`MULTI_SCHEMA_PLAN.md`](../../MULTI_SCHEMA_PLAN.md).

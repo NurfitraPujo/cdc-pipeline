@@ -136,6 +136,12 @@ type stubFactory struct {
 	// startConnector goroutine may already have called (and an ungated
 	// stub WaitUntilReady returns from) WaitUntilReady by then.
 	presetReadyGate atomic.Pointer[chan struct{}]
+
+	// presetReadyErr, when non-nil, is installed on every connector this
+	// factory builds AT CONSTRUCTION TIME, for the same race reason as
+	// presetReadyGate: startConnector may reach WaitUntilReady before a
+	// test could install the error on the connector after Start returns.
+	presetReadyErr atomic.Pointer[error]
 }
 
 func newStubFactory() *stubFactory { return &stubFactory{} }
@@ -150,9 +156,17 @@ func (f *stubFactory) Build(_ context.Context, cfg config.Config, h replication.
 	if gatep := f.presetReadyGate.Load(); gatep != nil {
 		conn.readyGate.Store(gatep)
 	}
+	if errp := f.presetReadyErr.Load(); errp != nil {
+		conn.readyErr.Store(errp)
+	}
 	f.current = conn
 	return conn, nil
 }
+
+// failReadyWith makes WaitUntilReady return err on every connector this
+// factory subsequently builds. Race-free for the same reason as gateReady:
+// call it BEFORE s.Start.
+func (f *stubFactory) failReadyWith(err error) { f.presetReadyErr.Store(&err) }
 
 // gateReady installs a WaitUntilReady gate on every connector this factory
 // subsequently builds, closed only when the returned release func is

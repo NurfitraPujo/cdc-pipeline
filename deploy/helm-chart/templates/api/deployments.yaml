@@ -10,6 +10,10 @@ spec:
   replicas: {{ .Values.api.hpa.minReplicas }}
   {{- end }}
   revisionHistoryLimit: 0
+  {{- with .Values.api.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Values.api.name }}
@@ -90,8 +94,4 @@ spec:
       {{- if .Values.global.dnsConfig }}
       dnsConfig:
         {{- toYaml .Values.global.dnsConfig | nindent 8 }}
-      {{- end }}
-      {{- with .Values.api.strategy }}
-      strategy:
-        {{- toYaml . | nindent 8 }}
       {{- end }}

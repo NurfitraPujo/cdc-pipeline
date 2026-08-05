@@ -3,7 +3,17 @@ kind: Deployment
 metadata:
   name: pipeline
 spec:
-  replicas: 3
+  # The worker is a stateful singleton per pipeline (see RFC-001 "Scaling").
+  # Each replica starts a producer for every pipeline it sees in the config KV,
+  # so >1 replica collides on the Postgres replication slot (internal/engine/pipeline.go
+  # derives the slot name from the pipeline ID, not the pod) and duplicates published
+  # messages. Do not scale this up until per-pipeline ownership (KV lease / leader
+  # election) exists.
+  replicas: 1
+  # Recreate, not RollingUpdate: a rollout must never run two producers at once,
+  # or the new pod fails on the slot still held by the old one.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: pipeline
@@ -57,22 +67,5 @@ spec:
       targetPort: 8081
   selector:
     app: pipeline
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: pipeline
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: pipeline
-  minReplicas: 3
-  maxReplicas: 20
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 80
+# No HorizontalPodAutoscaler: see the replicas comment above. Autoscaling the
+# worker produces replication-slot collisions and duplicate CDC events.

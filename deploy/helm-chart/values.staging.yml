@@ -167,16 +167,26 @@ worker:
               app.kubernetes.io/name: cdc-worker
               app.kubernetes.io/environment: staging
   tolerantions: {}
-  strategy: {}
+  # Recreate, not RollingUpdate: a rolling deploy would briefly run the old and
+  # new pod together, and two producers cannot share a replication slot (see the
+  # hpa comment below). Recreate takes the old pod fully down first.
+  strategy:
+    type: Recreate
   securityContext: {}
   podSecurityContext: {}
   podAnnotations: {}
   serviceAccount:
     annotations: {}
+  # See the long-form explanation in values.production.yml. The worker is a
+  # stateful singleton per pipeline (RFC-001): every replica starts a producer
+  # for every pipeline, and they collide on the Postgres replication slot.
+  #
+  # The HPA was already disabled here, but `replicas` renders from minReplicas
+  # when the HPA is off, so staging was still running a fixed 3 pods.
   hpa:
     enabled: false
-    minReplicas: 3
-    maxReplicas: 20
+    minReplicas: 1
+    maxReplicas: 1
     targetCPUUtilizationPercentage: 80
   ports:
     - containerPort: 8081

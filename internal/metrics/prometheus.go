@@ -121,4 +121,20 @@ var (
 		Name: "cdc_consumer_transform_invocations_total",
 		Help: "The total number of times the consumer considered a transformer for a batch, by outcome (invoked, skipped_no_operation_types, skipped_no_match)",
 	}, []string{"pipeline_id", "transformer", "outcome"})
+
+	// SourceCaptureSetupFailures counts a source that finished its startup
+	// sequence WITHOUT capturing. Every existing worker alert is keyed on
+	// {pipeline, source, slot} and measures a slot that is being read -- so a
+	// worker that never acquired its slot at all produced no series anywhere and
+	// fired nothing. It also stayed Ready (/readyz only checks NATS) and kept
+	// heartbeating Running, which is how a misconfigured replica count stayed
+	// invisible.
+	//
+	// reason="slot_in_use" specifically means another walsender holds the slot,
+	// which almost always means more than one replica is running the same
+	// pipeline. Alert on any non-zero rate.
+	SourceCaptureSetupFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cdc_source_capture_setup_failures_total",
+		Help: "The total number of times a source failed to start capturing, by reason (slot_in_use, other)",
+	}, []string{"source", "slot", "reason"})
 )
