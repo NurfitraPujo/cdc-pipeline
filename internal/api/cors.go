@@ -12,7 +12,7 @@ import (
 // CORS_ALLOWED_ORIGINS is unset.
 var defaultAllowedOrigins = []string{
 	"http://localhost:3000",
-	"https://cdc-stag.daya.ai",
+	"https://cdc-stg.daya.ai",
 	"https://cdc.daya.ai",
 }
 
