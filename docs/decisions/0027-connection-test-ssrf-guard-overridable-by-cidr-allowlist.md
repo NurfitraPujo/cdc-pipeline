@@ -49,9 +49,19 @@ smaller blast radius than removing the guard, at negligible complexity.
 
 `DB_HOST_ALLOWED_CIDRS` is a comma-separated list of CIDR blocks (`handler.go:allowedHostCIDRs`).
 `validateHost` rejects a resolved IP only when it is private **and** not contained in any listed
-block. Deployments set it to their VPC range: `10.200.0.0/16` in staging and production, the Docker
-bridge + loopback locally (`docker-compose.yaml`). This deliberately mirrors the
-`CORS_ALLOWED_ORIGINS` allowlist precedent in `internal/api/cors.go`.
+block. This deliberately mirrors the `CORS_ALLOWED_ORIGINS` allowlist precedent in
+`internal/api/cors.go`.
+
+**The allowlist must cover the IP `validateHost` actually resolves, which is the Kubernetes Service
+VIP — not the database endpoint.** The DB targets are exposed to the cluster as ClusterIP Services
+with hand-written Endpoints (`deploy/helm-chart/templates/external-services.yaml`). So a host like
+`rds-postgres-main` resolves via cluster DNS to a Service ClusterIP in the CCE **service CIDR**
+(`10.247.0.0/16` — observed `10.247.75.206`); kube-proxy only NATs that to the real RDS endpoint
+(`10.200.38.64`) *after* the connection is dialled. `net.LookupIP` never sees the endpoint IP.
+The first fix allowlisted only the VPC range `10.200.0.0/16` and still returned 400 for exactly this
+reason. Deployments therefore set **both**: `10.247.0.0/16,10.200.0.0/16` in staging and production
+(the service CIDR unblocks the in-cluster Service name; the VPC range covers tests aimed at the RDS
+FQDN directly), and the Docker bridge + loopback locally (`docker-compose.yaml`).
 
 The list is read per request via `os.Getenv`. These endpoints are low-frequency and
 operator-triggered, so a fresh read keeps `validateHost` a pure function of its input plus env — and
@@ -74,6 +84,10 @@ are skipped, not fatal: a typo in one CIDR must not take down connection testing
   config comments call out but cannot enforce.
 * Bad: a too-broad VPC CIDR could expose an unrelated internal service on the same range to a
   connection probe. Scope the CIDR to the database subnet where practical.
+* Neutral: because targets are ClusterIP Services, the guard inspects the Service VIP, not the
+  actual database endpoint behind the Endpoints object. The SSRF check is therefore weaker than it
+  looks in this topology — it constrains which cluster VIP is dialled, not which external host the
+  Endpoints ultimately point at. Whoever can edit `externalServices` already controls that.
 * Neutral: the guard still only inspects the host at the *test* endpoints. `CreateSource` /
   `UpdateSource` never called `validateHost`; that is unchanged and out of scope here.
 
