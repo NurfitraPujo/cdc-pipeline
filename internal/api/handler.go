@@ -317,13 +317,6 @@ func (h *Handler) computeAndStoreSummary() protocol.StatsSummary {
 // @Success      200  {object}  map[string]any
 // @Router       /pipelines [get]
 func (h *Handler) ListPipelines(c *gin.Context) {
-	// Cleanup stale worker heartbeats while we're at it.
-	// Use singleflight to deduplicate concurrent cleanup calls.
-	h.sf.Do("cleanup", func() (any, error) {
-		h.cleanupStaleHeartbeats()
-		return nil, nil
-	})
-
 	search := strings.ToLower(c.Query("search"))
 	statusFilter := c.Query("status")
 
@@ -351,34 +344,38 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 		limit = 100
 	}
 
-	keys, err := h.kv.Keys()
+	watcher, err := h.kv.Watch(protocol.PrefixPipelineConfig + ">")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	defer func() { _ = watcher.Stop() }()
 
 	var pipelines []protocol.PipelineConfig
-	for _, key := range keys {
-		if strings.HasPrefix(key, protocol.PrefixPipelineConfig) {
-			entry, err := h.kv.Get(key)
-			if err != nil {
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			// nil marks the end of the initial replay of values.
+			break
+		}
+		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+			continue
+		}
+		var cfg protocol.PipelineConfig
+		if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
+			// Search filter
+			if search != "" && !strings.Contains(strings.ToLower(cfg.Name), search) && !strings.Contains(strings.ToLower(cfg.ID), search) {
 				continue
 			}
-			var cfg protocol.PipelineConfig
-			if err := json.Unmarshal(entry.Value(), &cfg); err == nil {
-				// Search filter
-				if search != "" && !strings.Contains(strings.ToLower(cfg.Name), search) && !strings.Contains(strings.ToLower(cfg.ID), search) {
-					continue
-				}
 
-				// Status filter (expensive but necessary if requested)
+			// Status filter (expensive but necessary if requested)
+			if statusFilter != "" {
 				actualStatus := h.getPipelineStatusString(cfg.ID)
-				if statusFilter != "" && !strings.EqualFold(actualStatus, statusFilter) {
+				if !strings.EqualFold(actualStatus, statusFilter) {
 					continue
 				}
-
-				pipelines = append(pipelines, cfg)
 			}
+
+			pipelines = append(pipelines, cfg)
 		}
 	}
 
@@ -1460,18 +1457,22 @@ func (h *Handler) GetWorkerHeartbeat(c *gin.Context) {
 func (h *Handler) cleanupStaleHeartbeats() {
 	metrics.APICleanupRuns.Inc()
 
-	keys, err := h.kv.Keys()
+	watcher, err := h.kv.Watch(protocol.PrefixWorkerState + ">")
 	if err != nil {
 		return
 	}
+	defer func() { _ = watcher.Stop() }()
 
-	for _, key := range keys {
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			// nil marks the end of the initial replay of values.
+			break
+		}
+		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+			continue
+		}
+		key := entry.Key()
 		if strings.HasPrefix(key, "cdc.worker.") && strings.HasSuffix(key, ".heartbeat") {
-			entry, err := h.kv.Get(key)
-			if err != nil {
-				continue
-			}
-
 			var hb protocol.WorkerHeartbeat
 			if err := json.Unmarshal(entry.Value(), &hb); err == nil {
 				if time.Since(hb.UpdatedAt) > 60*time.Second {
@@ -1481,6 +1482,26 @@ func (h *Handler) cleanupStaleHeartbeats() {
 			}
 		}
 	}
+}
+
+// StartBackgroundCleanup runs cleanupStaleHeartbeats immediately and then on
+// a 60s ticker, off the request path, until ctx is cancelled.
+func (h *Handler) StartBackgroundCleanup(ctx context.Context) {
+	go func() {
+		h.cleanupStaleHeartbeats()
+
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.cleanupStaleHeartbeats()
+			}
+		}
+	}()
 }
 
 // StreamMetrics provides real-time status updates via SSE using NATS Watch.
