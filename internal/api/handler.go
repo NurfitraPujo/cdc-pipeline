@@ -1152,7 +1152,21 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 		return
 	}
 
+	// seen tracks which TableRef.KeyToken()s are already in `tables`, so the
+	// explicit-whitelist and discovery entries below don't duplicate a runtime
+	// metadata entry (or each other). addTable applies it; runtime metadata is
+	// appended directly (it is authoritative and carries columns/types), and
+	// its ID is recorded so the sparser later entries defer to it.
 	var tables []protocol.TableMetadata
+	seen := make(map[string]bool)
+	addTable := func(m protocol.TableMetadata) {
+		if m.ID == "" || seen[m.ID] {
+			return
+		}
+		seen[m.ID] = true
+		tables = append(tables, m)
+	}
+
 	suffix := fmt.Sprintf(".sources.%s.tables.", sourceID)
 	for _, key := range keys {
 		if strings.Contains(key, suffix) && strings.HasSuffix(key, ".metadata") {
@@ -1163,20 +1177,49 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 			var meta protocol.TableMetadata
 			if err := json.Unmarshal(entry.Value(), &meta); err == nil {
 				tables = append(tables, meta)
+				if meta.ID != "" {
+					seen[meta.ID] = true
+				}
 			}
 		}
 	}
+	// Whether the runtime-metadata branch above found anything. The live
+	// discovery fallback is gated on THIS, not on len(tables): merging the
+	// explicit whitelist below must not suppress schema discovery for a source
+	// that has both schemas and explicit cross-schema tables configured.
+	haveRuntimeMetadata := len(tables) > 0
 
-	if len(tables) == 0 {
-		// Attempt dynamic discovery from the source database.
-		key := protocol.SourceConfigKey(sourceID)
-		entry, err := h.kv.Get(key)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
-			return
+	// Load the source config once, for both the explicit-whitelist merge and
+	// the discovery fallback. A missing/corrupt config is not fatal here -- we
+	// still return whatever runtime metadata we already collected.
+	var cfg protocol.SourceConfig
+	cfgLoaded := false
+	if entry, err := h.kv.Get(protocol.SourceConfigKey(sourceID)); err == nil {
+		cfgLoaded = json.Unmarshal(entry.Value(), &cfg) == nil
+	}
+
+	// Surface the source's explicit `tables` whitelist. Schema-scoped
+	// discovery below only enumerates tables within cfg.Schemas, so a table
+	// whitelisted from a schema that is NOT in cfg.Schemas (e.g. "all of sales
+	// via schemas, plus inventory.stock via tables") would otherwise never
+	// appear in the create-pipeline selector even though it replicates fine.
+	if cfgLoaded {
+		for _, t := range cfg.Tables {
+			ref, err := protocol.ParseTableRef(t)
+			if err != nil {
+				continue
+			}
+			addTable(protocol.TableMetadata{
+				ID:     ref.KeyToken(),
+				Name:   ref.Table,
+				Schema: protocol.NormalizeSchema(ref.Schema),
+			})
 		}
-		var cfg protocol.SourceConfig
-		if err := json.Unmarshal(entry.Value(), &cfg); err != nil {
+	}
+
+	if !haveRuntimeMetadata {
+		// Attempt dynamic discovery from the source database.
+		if !cfgLoaded {
 			c.JSON(http.StatusOK, gin.H{"source_id": sourceID, "tables": tables})
 			return
 		}
@@ -1218,10 +1261,10 @@ func (h *Handler) ListSourceTables(c *gin.Context) {
 					continue
 				}
 				ref := protocol.TableRef{Schema: schema, Table: tableName}
-				tables = append(tables, protocol.TableMetadata{
+				addTable(protocol.TableMetadata{
 					ID:     ref.KeyToken(),
 					Name:   tableName,
-					Schema: ref.Schema,
+					Schema: protocol.NormalizeSchema(ref.Schema),
 				})
 			}
 		}

@@ -298,7 +298,12 @@ func TestAPI_Full(t *testing.T) {
 		token := getTestToken(t, router, mockKV)
 		authHeader := "Bearer " + token
 
-		s1 := protocol.SourceConfig{ID: "s1", Type: "postgres", Host: "h", Port: 5432, User: "u", Database: "d"}
+		// s1 carries an explicit `tables` whitelist that includes a table from
+		// a schema NOT in `schemas` (inventory.stock). ListSourceTables must
+		// surface it even though schema-scoped live discovery would never see
+		// it -- otherwise it can't be picked when creating a pipeline.
+		s1 := protocol.SourceConfig{ID: "s1", Type: "postgres", Host: "h", Port: 5432, User: "u", Database: "d",
+			Schemas: []string{"sales"}, Tables: []string{"inventory.stock"}}
 		sData, _ := json.Marshal(s1)
 
 		// CREATE
@@ -312,13 +317,18 @@ func TestAPI_Full(t *testing.T) {
 		// LIST TABLES
 		metaKey := fmt.Sprintf("cdc.pipeline.p1.sources.s1.tables.users.metadata")
 		mockKV.EXPECT().Keys().Return([]string{metaKey}, nil).AnyTimes()
-		mockKV.EXPECT().Get(metaKey).Return(mockEntry{value: []byte(`{"table":"users"}`)}, nil).AnyTimes()
+		mockKV.EXPECT().Get(metaKey).Return(mockEntry{value: []byte(`{"id":"users","name":"users","schema":"public"}`)}, nil).AnyTimes()
+		mockKV.EXPECT().Get(protocol.SourceConfigKey("s1")).Return(mockEntry{value: sData}, nil).AnyTimes()
 
 		req, _ = http.NewRequest("GET", "/api/v1/sources/s1/tables", nil)
 		req.Header.Set("Authorization", authHeader)
 		w = httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
+		// The explicit cross-schema whitelist entry is surfaced alongside the
+		// runtime-metadata table, without live DB discovery running.
+		assert.Contains(t, w.Body.String(), "inventory")
+		assert.Contains(t, w.Body.String(), "stock")
 	})
 
 	t.Run("Worker Heartbeat", func(t *testing.T) {

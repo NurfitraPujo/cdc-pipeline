@@ -569,10 +569,18 @@ paths:
         persisted by the worker. Tables are filtered to those whose
         NATS KV key matches `*.sources.{id}.tables.*.metadata`.
 
-        When no metadata has been persisted yet, the API falls back to
-        querying `information_schema.tables` on the source directly. If
-        that query fails — most commonly because the source is
-        unreachable — the response is `502`, matching
+        The source's explicit `tables` whitelist is always merged into
+        the result (deduplicated). Schema-scoped discovery only sees
+        tables within the source's `schemas`, so a table whitelisted
+        from a schema that is not in `schemas` (e.g. all of `sales` via
+        `schemas` plus `inventory.stock` via `tables`) would otherwise
+        never appear here — and so could not be selected when creating a
+        pipeline, even though it replicates correctly.
+
+        When no worker metadata has been persisted yet, the API also
+        falls back to querying `information_schema.tables` on the source
+        directly. If that query fails — most commonly because the source
+        is unreachable — the response is `502`, matching
         `GET /sources/{id}/schema`. It is deliberately not a `200` with
         an empty list, which made "cannot connect" indistinguishable
         from "connected, no tables".
