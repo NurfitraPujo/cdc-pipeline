@@ -73,6 +73,7 @@ func main() {
 	defer nc.Close()
 
 	h := api.NewHandler(kv)
+	h.StartBackgroundCleanup(ctx)
 
 	// Seed default admin credentials for local dev / E2E (no-op in production
 	// and when an auth config already exists in NATS KV).
