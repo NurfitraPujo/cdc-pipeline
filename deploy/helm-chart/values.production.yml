@@ -112,12 +112,18 @@ api:
   env:
     configmap:
       PORT: "8080"
-      # ADR 0027: connection-test SSRF guard exempts these CIDRs. Production
-      # source/sink databases live on the 10.200.0.0/16 VPC (rds hosts are
-      # 10.200.53.141 / 10.200.60.184), which the private-IP guard would otherwise
-      # reject. Loopback, link-local and metadata endpoints stay blocked because
-      # they fall outside this range.
-      DB_HOST_ALLOWED_CIDRS: "10.200.0.0/16"
+      # ADR 0027: connection-test SSRF guard exempts these CIDRs.
+      #   10.247.0.0/16 -- the CCE cluster Service CIDR. The DB targets are
+      #     ClusterIP Services (see templates/external-services.yaml), so their
+      #     hostname resolves to a Service VIP in this range -- that is the IP
+      #     validateHost actually sees, NOT the RDS endpoint. This range is what
+      #     unblocks the connection test. Confirm the prod cluster's service CIDR
+      #     matches; adjust if this cluster was created with a different one.
+      #   10.200.0.0/16 -- the VPC where the real RDS endpoints live
+      #     (10.200.53.141 / 10.200.60.184). Covers tests targeting the RDS FQDN
+      #     directly rather than the in-cluster Service name.
+      # Loopback, link-local and metadata endpoints stay blocked (outside both).
+      DB_HOST_ALLOWED_CIDRS: "10.247.0.0/16,10.200.0.0/16"
     secrets: {}
 
 worker:

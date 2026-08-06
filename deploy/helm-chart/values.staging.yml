@@ -112,11 +112,17 @@ api:
   env:
     configmap:
       PORT: "8080"
-      # ADR 0027: connection-test SSRF guard exempts these CIDRs. The source/sink
-      # databases live on the 10.200.0.0/16 VPC (rds-postgres-main is 10.200.38.64),
-      # which the private-IP guard would otherwise reject. Loopback, link-local and
-      # metadata endpoints stay blocked because they fall outside this range.
-      DB_HOST_ALLOWED_CIDRS: "10.200.0.0/16"
+      # ADR 0027: connection-test SSRF guard exempts these CIDRs.
+      #   10.247.0.0/16 -- the CCE cluster Service CIDR. The DB targets are
+      #     ClusterIP Services (see templates/external-services.yaml), so their
+      #     hostname (e.g. rds-postgres-main) resolves to a Service VIP in this
+      #     range -- that is the IP validateHost actually sees, NOT the RDS
+      #     endpoint. This range is what unblocks the connection test.
+      #   10.200.0.0/16 -- the VPC where the real RDS endpoints live
+      #     (rds-postgres-main -> 10.200.38.64). Covers tests that target the
+      #     RDS FQDN directly rather than the in-cluster Service name.
+      # Loopback, link-local and metadata endpoints stay blocked (outside both).
+      DB_HOST_ALLOWED_CIDRS: "10.247.0.0/16,10.200.0.0/16"
     secrets: {}
 
 worker:
