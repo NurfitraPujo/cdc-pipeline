@@ -99,7 +99,20 @@ function PipelineDetailPage() {
 	// Initialize state from initial status
 	useEffect(() => {
 		if (initialStatus) {
-			setTables((initialStatus.tables as Record<string, TableStats>) || {});
+			// The status payload keys tables by name but the value struct has no
+			// name field, so inject the map key as `tableName` -- mirroring the
+			// SSE `.stats` path (see below) -- otherwise the Table Name column
+			// renders blank until a live stats event arrives.
+			const initialTables =
+				(initialStatus.tables as Record<string, TableStats>) || {};
+			setTables(
+				Object.fromEntries(
+					Object.entries(initialTables).map(([k, v]) => [
+						k,
+						{ ...v, tableName: v.tableName || k },
+					]),
+				),
+			);
 			setSinks(
 				(initialStatus.sinks as Record<string, Record<string, TableStats>>) ||
 					{},
