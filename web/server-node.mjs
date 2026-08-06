@@ -22,9 +22,46 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDir = path.join(__dirname, "dist", "client");
 const shellPath = path.join(clientDir, "_shell.html");
 
+/**
+ * Inject runtime app config into the SPA shell's <head> as
+ * `window.__APP_CONFIG__`, so the browser bundle can read an environment-
+ * specific API URL from a SINGLE image.
+ *
+ * Vite inlines `import.meta.env.VITE_*` at build time, so the already-built
+ * bundle cannot see the container's runtime env (the Helm configMap). We read
+ * that env HERE (in the running container) and serialize it into a <script>
+ * that runs before the app bundle -- src/lib/constants.ts prefers it. Without
+ * this, the prod dashboard falls back to http://localhost:8080 and login fails
+ * with ERR_CONNECTION_REFUSED.
+ *
+ * The env is fixed for the life of the process, so we compute the shell once.
+ */
+function injectRuntimeConfig(rawShell) {
+	const apiBaseUrl = process.env.VITE_API_BASE_URL;
+	if (!apiBaseUrl) {
+		console.warn(
+			"VITE_API_BASE_URL is unset; the browser bundle will use its build-time fallback",
+		);
+		return rawShell;
+	}
+
+	// Escape `<` so a value like "</script>" cannot break out of the tag.
+	const json = JSON.stringify({ apiBaseUrl }).replace(/</g, "\\u003c");
+	const script = `<script>window.__APP_CONFIG__=${json}</script>`;
+
+	const html = rawShell.toString("utf8");
+	const head = /<head[^>]*>/i.exec(html);
+	if (!head) {
+		console.warn("no <head> found in SPA shell; __APP_CONFIG__ not injected");
+		return rawShell;
+	}
+	const at = head.index + head[0].length;
+	return Buffer.from(html.slice(0, at) + script + html.slice(at), "utf8");
+}
+
 // Read the SPA shell once at startup; it never changes for the life of the
 // process (a new deploy ships a fresh image).
-const shellHtml = await readFile(shellPath);
+const shellHtml = injectRuntimeConfig(await readFile(shellPath));
 
 const MIME_TYPES = {
 	".js": "text/javascript; charset=utf-8",
