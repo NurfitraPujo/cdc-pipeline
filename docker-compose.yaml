@@ -100,6 +100,10 @@ services:
       - LOG_LEVEL=debug
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-my-super-secret-key-32-chars-lon}
       - JWT_SECRET=${JWT_SECRET:-my-super-secret-jwt-key!}
+      # ADR 0027: exempt the Docker bridge network (172.16/12) and loopback so
+      # the /sources/test and /sinks/test endpoints can reach compose services
+      # (postgres-source, databend) whose names resolve to private IPs.
+      - DB_HOST_ALLOWED_CIDRS=${DB_HOST_ALLOWED_CIDRS:-172.16.0.0/12,127.0.0.0/8}
     depends_on:
       nats:
         condition: service_healthy

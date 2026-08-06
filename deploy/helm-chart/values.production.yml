@@ -112,6 +112,12 @@ api:
   env:
     configmap:
       PORT: "8080"
+      # ADR 0027: connection-test SSRF guard exempts these CIDRs. Production
+      # source/sink databases live on the 10.200.0.0/16 VPC (rds hosts are
+      # 10.200.53.141 / 10.200.60.184), which the private-IP guard would otherwise
+      # reject. Loopback, link-local and metadata endpoints stay blocked because
+      # they fall outside this range.
+      DB_HOST_ALLOWED_CIDRS: "10.200.0.0/16"
     secrets: {}
 
 worker:
