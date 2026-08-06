@@ -146,6 +146,41 @@ type DatabendSink struct {
 	// correctly not flagged.
 	colTypeMu    sync.Mutex
 	colTypeCache map[string]map[string]string // qualified table -> column -> last-applied dbType
+
+	// compactionInterval is the sink-level compaction throttle (docs/todos/
+	// custom_object_cdc_followups.md item 2). 0 disables automatic
+	// compaction. >0 fires one best-effort OPTIMIZE TABLE <t> COMPACT per
+	// table no more than once per interval -- a REPLACE INTO, which is a
+	// MERGE/copy-on-write that appends a snapshot version per statement, so
+	// blocks would otherwise accumulate without bound.
+	//
+	// Compaction runs on a single background worker goroutine (started lazily
+	// on first use, see scheduleCompaction), NOT inline on the write path: the
+	// consumer acks a batch only after BatchUpload returns
+	// (internal/engine/consumer.go), so running OPTIMIZE -- which can take
+	// seconds to minutes on a large table -- inline would hold the ack open and
+	// reintroduce the very redelivery-under-latency hazard that derived AckWait
+	// (docs/todos/custom_object_cdc_followups.md item 3) exists to bound.
+	// BatchUpload therefore only enqueues the touched tables (non-blocking)
+	// and returns; the worker drains the queue in the background.
+	//
+	// The worker's lifetime is tied to the pipeline context BatchUpload
+	// receives (cancelled on shutdown) AND to sink Stop(), because the factory
+	// only calls Stop() on construction-failure cleanup, not on normal
+	// shutdown -- so neither channel alone is sufficient; the worker exits on
+	// whichever fires first.
+	compactionInterval time.Duration
+	// compactionMu/lastCompact track when each table was last compacted, so
+	// the throttle above is enforced per table across batches. lastCompact is
+	// owned by the single compaction worker goroutine (writes); the scheduler
+	// never touches it, so contention on compactionMu is negligible.
+	compactionMu       sync.Mutex
+	lastCompact        map[string]time.Time
+	compactionCh       chan protocol.TableRef
+	compactionStartMu  sync.Mutex
+	compactionStarted  bool
+	compactionStop     chan struct{}
+	compactionStopOnce sync.Once
 }
 
 // NewDatabendSink opens a new Databend sink backed by a real *sql.DB connection
@@ -173,6 +208,8 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 		decimalPrecision: DefaultDecimalPrecision,
 		decimalScale:     DefaultDecimalScale,
 		dlqSubject:       DefaultSinkDeadLetterSubject(name),
+		lastCompact:      make(map[string]time.Time),
+		compactionStop:   make(chan struct{}),
 	}, nil
 }
 
@@ -180,14 +217,18 @@ func NewDatabendSink(name string, dsn string) (*DatabendSink, error) {
 // keys (all optional):
 //
 //   - "max_placeholders"  (int)            upper bound for `?` placeholders per
-//                                              REPLACE INTO statement.
+//     REPLACE INTO statement.
 //   - "decimal_precision" (int)            precision used by DECIMAL mappings.
 //   - "decimal_scale"     (int)            scale used by DECIMAL mappings.
 //   - "auto_create_schema" (bool)          CREATE DATABASE IF NOT EXISTS before
-//                                              DDL/DML when true (default);
-//                                              validate-only when false.
+//     DDL/DML when true (default);
+//     validate-only when false.
 //   - "dlq_publisher"     (DLQPublisher)   publisher used to emit sink DLQ events.
 //   - "dlq_subject"       (string)         NATS subject used for DLQ events.
+//   - "compaction_interval" (duration)     OPTIMIZE TABLE <t> COMPACT throttle, per
+//     table, run on a background worker
+//     (not the write path). 0/absent disables
+//     automatic compaction.
 //
 // Returns the receiver for chaining with the registry factory.
 func (s *DatabendSink) WithOptions(options map[string]interface{}) *DatabendSink {
@@ -197,6 +238,13 @@ func (s *DatabendSink) WithOptions(options map[string]interface{}) *DatabendSink
 	if v, ok := options["max_placeholders"]; ok {
 		if n, ok := asInt(v); ok && n > 0 {
 			s.maxPlaceholders = n
+		}
+	}
+	if v, ok := options["compaction_interval"]; ok {
+		if dur, ok := parseDurationOption(v); ok && dur > 0 {
+			s.compactionInterval = dur
+		} else {
+			log.Warn().Interface("value", v).Msg("Databend sink option 'compaction_interval' is not a positive duration; automatic compaction disabled")
 		}
 	}
 	if v, ok := options["decimal_precision"]; ok {
@@ -254,6 +302,29 @@ func asInt(v interface{}) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
+}
+
+// parseDurationOption decodes an options value into a time.Duration. Sink
+// options arrive JSON-decoded: durations may be a Go-style string ("1h30m",
+// time.ParseDuration) or a numeric number of seconds (float64/int). Returns
+// false for anything else.
+func parseDurationOption(v interface{}) (time.Duration, bool) {
+	switch d := v.(type) {
+	case string:
+		dur, err := time.ParseDuration(d)
+		if err != nil {
+			return 0, false
+		}
+		return dur, true
+	case float64:
+		return time.Duration(d * float64(time.Second)), true
+	case int:
+		return time.Duration(d) * time.Second, true
+	case int64:
+		return time.Duration(d) * time.Second, true
+	default:
+		return 0, false
+	}
 }
 
 func init() {
@@ -358,7 +429,30 @@ func (s *DatabendSink) BatchUpload(ctx context.Context, messages []protocol.Mess
 		})
 	}
 
-	return g.Wait()
+	// Collect every table touched by this batch so a successful flush can
+	// trigger its throttled compaction (docs/todos/custom_object_cdc_followups.md
+	// item 2). Only tables that actually received writes are considered --
+	// an idle table accumulates no copy-on-write bloat, so it needs none.
+	touched := make([]protocol.TableRef, 0, len(upserts)+len(deletes))
+	seen := make(map[protocol.TableRef]struct{}, len(upserts)+len(deletes))
+	for ref := range upserts {
+		if _, ok := seen[ref]; !ok {
+			seen[ref] = struct{}{}
+			touched = append(touched, ref)
+		}
+	}
+	for ref := range deletes {
+		if _, ok := seen[ref]; !ok {
+			seen[ref] = struct{}{}
+			touched = append(touched, ref)
+		}
+	}
+
+	err := g.Wait()
+	if err == nil {
+		s.scheduleCompaction(ctx, touched)
+	}
+	return err
 }
 
 // splitQualified splits a name into schema and table components. Accepts
@@ -797,12 +891,134 @@ func (s *DatabendSink) checkColumnTypeDivergence(qualified, name, dbType string)
 	return prev != dbType
 }
 
+// pgTypeMap maps a normalised PostgreSQL type name (lowercased, with any
+// `(modifier)` / length / precision suffix stripped) to the Databend type the
+// sink writes. OID *numbers* (e.g. "23", "25") live in the same map -- they
+// are distinct string keys that can never collide with a type *name*.
+//
+// Multivariate / range / enum / extension types the sink does not understand
+// are deliberately absent: they fall through to mapPgTypeToDatabend's STRING
+// fallback rather than being swept into INT64/FLOAT64 by a fuzzy substring
+// match.
+//
+// docs/todos/custom_object_cdc_followups.md item 1: the previous
+// implementation dispatched on strings.Contains(t, "int") *before* the float
+// branch, so any pg type name containing "int" ("interval", "point",
+// "int4range", ...) was silently mapped to INT64 -- a latent silent-
+// corruption hazard for the whole type map. This explicit map makes a wrong
+// mapping impossible to introduce by accident: an unrecognised name is
+// STRING (safe, lossless-ish) via the documented fallback, never a silently
+// wrong numeric type. "double precision" is here as an exact key -- it
+// reaches FLOAT64 by design now, not by the luck of not containing "int".
+var pgTypeMap = map[string]string{
+	// booleans
+	"bool":    "BOOLEAN",
+	"boolean": "BOOLEAN",
+	"16":      "BOOLEAN", // bool OID
+
+	// integers (including OID numbers and the oid type itself)
+	"int":         "INT64",
+	"int2":        "INT64",
+	"int4":        "INT64",
+	"int8":        "INT64",
+	"smallint":    "INT64",
+	"integer":     "INT64",
+	"bigint":      "INT64",
+	"smallserial": "INT64",
+	"serial":      "INT64",
+	"bigserial":   "INT64",
+	"oid":         "INT64",
+	"21":          "INT64", // int2 OID
+	"23":          "INT64", // int4 OID
+	"20":          "INT64", // int8 OID
+
+	// floats / doubles
+	"float4":           "FLOAT64",
+	"float8":           "FLOAT64",
+	"float":            "FLOAT64",
+	"real":             "FLOAT64",
+	"double precision": "FLOAT64",
+	"700":              "FLOAT64", // float4 OID
+	"701":              "FLOAT64", // float8 OID
+
+	// temporal
+	"timestamp":                   "TIMESTAMP",
+	"timestamptz":                 "TIMESTAMP",
+	"timestamp without time zone": "TIMESTAMP",
+	"timestamp with time zone":    "TIMESTAMP",
+	"date":                        "DATE",
+	"1114":                        "TIMESTAMP", // timestamp OID
+	"1184":                        "TIMESTAMP", // timestamptz OID
+	"1082":                        "DATE",      // date OID
+
+	// json / semi-structured
+	"json":    "VARIANT",
+	"jsonb":   "VARIANT",
+	"variant": "VARIANT",
+	"114":     "VARIANT", // json OID
+	"3802":    "VARIANT", // jsonb OID
+
+	// binary
+	"bytea": "BINARY",
+	"blob":  "BINARY",
+	"17":    "BINARY", // bytea OID
+
+	// string-like (including custom-object CITEXT columns, and network /
+	// geometric types the old substring match swept into INT64)
+	"uuid":              "STRING",
+	"text":              "STRING",
+	"varchar":           "STRING",
+	"char":              "STRING",
+	"bpchar":            "STRING",
+	"character":         "STRING",
+	"character varying": "STRING",
+	"name":              "STRING",
+	"citext":            "STRING",
+	"inet":              "STRING",
+	"cidr":              "STRING",
+	"macaddr":           "STRING",
+	"macaddr8":          "STRING",
+	"interval":          "STRING", // would have hit the old "int" substring -> INT64 bug
+	"point":             "STRING", // would have hit the old "int" substring -> INT64 bug
+	"money":             "STRING",
+	"xml":               "STRING",
+	"1043":              "STRING", // varchar OID
+	"25":                "STRING", // text OID
+	"2950":              "STRING", // uuid OID
+	"18":                "STRING", // char OID
+	"19":                "STRING", // name OID
+}
+
+// decimalDatabendType renders the sink-configured DECIMAL type for
+// numeric/decimal columns. numeric and decimal carry their precision/scale
+// in the column's modifiers, but the sink deliberately ignores those and uses
+// its own decimalPrecision/decimalScale configuration for every decimal
+// column (see DefaultDecimalPrecision), so the mapping is a flat function of
+// config, not of the column.
+func (s *DatabendSink) decimalDatabendType() string {
+	precision := s.decimalPrecision
+	if precision <= 0 {
+		precision = DefaultDecimalPrecision
+	}
+	scale := s.decimalScale
+	if scale < 0 {
+		scale = 0
+	}
+	if scale > precision {
+		scale = precision
+	}
+	if scale == 0 {
+		return fmt.Sprintf("DECIMAL(%d)", precision)
+	}
+	return fmt.Sprintf("DECIMAL(%d, %d)", precision, scale)
+}
+
 // mapPgTypeToDatabend translates a PostgreSQL type description (either a
 // canonical name or an OID number) into the closest Databend column type. The
 // DECIMAL precision and scale honour the sink's decimalPrecision /
 // decimalScale configuration so operators can tune financial columns.
 func (s *DatabendSink) mapPgTypeToDatabend(pgType string) string {
-	t := strings.ToLower(pgType)
+	t := strings.ToLower(strings.TrimSpace(pgType))
 
 	// PostgreSQL arrays: `_int`, `int[]`, `text[]`, `numeric[]`, etc.
 	// Databend does not have a first-class ARRAY type, so we encode arrays as
@@ -811,55 +1027,33 @@ func (s *DatabendSink) mapPgTypeToDatabend(pgType string) string {
 		return "VARIANT"
 	}
 
-	switch {
-	case strings.Contains(t, "bool"):
-		return "BOOLEAN"
-	case strings.Contains(t, "int"):
-		return "INT64"
-	case strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
-		precision := s.decimalPrecision
-		if precision <= 0 {
-			precision = DefaultDecimalPrecision
-		}
-		scale := s.decimalScale
-		if scale < 0 {
-			scale = 0
-		}
-		if scale > precision {
-			scale = precision
-		}
-		if scale == 0 {
-			return fmt.Sprintf("DECIMAL(%d)", precision)
-		}
-		return fmt.Sprintf("DECIMAL(%d, %d)", precision, scale)
-	case strings.Contains(t, "float") || strings.Contains(t, "double") || strings.Contains(t, "real"):
-		return "FLOAT64"
-	case strings.Contains(t, "timestamp"):
-		return "TIMESTAMP"
-	case strings.Contains(t, "date"):
-		return "DATE"
-	case strings.Contains(t, "json") || strings.Contains(t, "variant"):
-		return "VARIANT"
-	case strings.Contains(t, "bytea") || strings.Contains(t, "blob"):
-		return "BINARY"
-	case strings.Contains(t, "uuid") || strings.Contains(t, "text") || strings.Contains(t, "varchar") || strings.Contains(t, "char"):
-		return "STRING"
-	default:
-		switch pgType {
-		case "16":
-			return "BOOLEAN"
-		case "23", "20":
-			return "INT64"
-		case "1043", "25":
-			return "STRING"
-		case "1114", "1184":
-			return "TIMESTAMP"
-		case "3802":
-			return "VARIANT"
-		default:
-			return "STRING"
-		}
+	// Strip a trailing type modifier / length / precision suffix so the
+	// exact-name map can key on the bare base name: varchar(255) -> varchar,
+	// numeric(10,2) -> numeric, timestamp(6) -> timestamp, bit(8) -> bit.
+	base := t
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		base = t[:i]
 	}
+
+	// numeric/decimal are parameterised by the sink's precision/scale
+	// config rather than a fixed Databend type, so handle them before the
+	// static map lookup.
+	if base == "numeric" || base == "decimal" {
+		return s.decimalDatabendType()
+	}
+
+	if dbType, ok := pgTypeMap[base]; ok {
+		return dbType
+	}
+
+	// Documented, fail-closed fallback: an unrecognised type (a user-defined
+	// enum, a range, a multivariate, a numeric column reported only via an
+	// OID not listed above, or any future pg type) becomes STRING -- the
+	// closest lossless-ish common Databend type -- never a guess at a numeric
+	// type the sink has not been taught about. This is a *safe* fallback (no
+	// silent numeric corruption); a pipeline that needs a specific type must
+	// add an explicit entry (and a test) rather than rely on substring luck.
+	return "STRING"
 }
 
 func (s *DatabendSink) uploadTableBatch(ctx context.Context, ref protocol.TableRef, messages []protocol.Message) error {
@@ -2003,8 +2197,128 @@ func parsePKFromDDL(ddl string) []string {
 }
 
 func (s *DatabendSink) Stop() error {
+	// Signal the compaction worker (if any) to stop. Closing a channel twice
+	// panics, and Stop may be called by both the factory cleanup path and a
+	// test defer, so gate on sync.Once. Although normal pipeline shutdown
+	// cancels the worker's ctx and does not call Stop(), an explicit Stop (the
+	// factory's construction-failure cleanup, or tests) must still reap the
+	// worker rather than leak it.
+	s.compactionStopOnce.Do(func() { close(s.compactionStop) })
 	if s.db != nil {
 		return s.db.Close()
+	}
+	return nil
+}
+
+// scheduleCompaction is called from BatchUpload on the success path, *after*
+// the batch has fully written (docs/todos/custom_object_cdc_followups.md item
+// 2). It runs in O(1) on the write path: it lazily starts the single compaction
+// worker (bound to ctx and sink Stop()) and enqueues the tables touched by the
+// batch with a non-blocking send. It never runs OPTIMIZE itself, so it never
+// holds a batch's ack open -- see the compactionInterval field doc for why that
+// ordering matters (item 3's AckWait hazard).
+//
+// The send is best-effort: a full buffer drops the request, which is fine --
+// compaction is throttled and idempotent, and the next batch touching that
+// table retries.
+func (s *DatabendSink) scheduleCompaction(ctx context.Context, touched []protocol.TableRef) {
+	if s.compactionInterval <= 0 {
+		return
+	}
+	s.ensureCompactionWorker(ctx)
+	for _, ref := range touched {
+		select {
+		case s.compactionCh <- ref:
+		default:
+			log.Debug().Str("table", ref.String()).Msg("compaction queue full; deferring OPTIMIZE to a later batch")
+		}
+	}
+}
+
+// ensureCompactionWorker lazily starts the single background compaction worker,
+// bound to the pipeline context BatchUpload was called with. Started exactly
+// once per sink; subsequent calls are no-ops.
+func (s *DatabendSink) ensureCompactionWorker(ctx context.Context) {
+	s.compactionStartMu.Lock()
+	defer s.compactionStartMu.Unlock()
+	if s.compactionStarted {
+		return
+	}
+	s.compactionStarted = true
+	if s.compactionCh == nil {
+		s.compactionCh = make(chan protocol.TableRef, 256)
+	}
+	go s.compactionWorker(ctx)
+}
+
+// compactionWorker drains the compaction queue until the pipeline context is
+// cancelled or the sink is stopped. It is the only goroutine that runs
+// OPTIMIZE, and the only writer of s.lastCompact, so the per-table throttle
+// needs no further synchronisation beyond that single-owner guarantee.
+func (s *DatabendSink) compactionWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.compactionStop:
+			return
+		case ref := <-s.compactionCh:
+			s.compactIfDue(ctx, ref)
+		}
+	}
+}
+
+// compactIfDue fires a throttled OPTIMIZE TABLE <t> COMPACT for ref if it
+// hasn't been compacted within compactionInterval (docs/todos/
+// custom_object_cdc_followups.md item 2). Best-effort: an OPTIMIZE failure is
+// logged and counted, never propagated -- it must not fail a batch that
+// already succeeded.
+//
+// REPLACE INTO is a MERGE at the Databend storage layer -- copy-on-write at
+// block granularity, appending a snapshot version per statement -- so a table
+// under continuous CDC updates accumulates blocks without bound unless it is
+// periodically compacted. This policy is sink-scoped (one knob on the sink
+// config), deliberately not per-pipeline: every pipeline that sinks to the
+// same Databend gets the same protection from the sink's own throttle.
+//
+// The throttle slot is claimed atomically under compactionMu *before* the
+// statement runs, so two enqueues for the same table can never both fire
+// inside the same interval -- the first to claim wins and the second is
+// throttled out -- and a failing OPTIMIZE keeps its claim so it retries on the
+// next interval rather than on every subsequent batch.
+func (s *DatabendSink) compactIfDue(ctx context.Context, ref protocol.TableRef) {
+	qualified := ref.String()
+	now := time.Now()
+	s.compactionMu.Lock()
+	if s.lastCompact == nil {
+		// Defensive: a sink constructed directly (tests, or any future
+		// non-NewDatabendSink path) may not have run the map init.
+		s.lastCompact = make(map[string]time.Time)
+	}
+	last, ok := s.lastCompact[qualified]
+	if ok && now.Sub(last) < s.compactionInterval {
+		s.compactionMu.Unlock()
+		return
+	}
+	s.lastCompact[qualified] = now // claim the slot atomically
+	s.compactionMu.Unlock()
+
+	if err := s.compactTable(ctx, ref); err != nil {
+		log.Error().Err(err).Str("table", qualified).Msg("OPTIMIZE TABLE COMPACT failed; will retry next compaction interval")
+		SinkCompactionErrorsTotal.WithLabelValues(s.name, qualified).Inc()
+		return
+	}
+	SinkCompactionsTotal.WithLabelValues(s.name, qualified).Inc()
+	log.Info().Str("table", qualified).Msg("OPTIMIZE TABLE COMPACT completed")
+}
+
+// compactTable issues an OPTIMIZE TABLE <t> COMPACT for one Databend table.
+// COMPACT merges the small copy-on-write blocks a long run of REPLACE INTO
+// statements leaves behind, bounding block count and read amplification.
+func (s *DatabendSink) compactTable(ctx context.Context, ref protocol.TableRef) error {
+	query := fmt.Sprintf("OPTIMIZE TABLE %s COMPACT", quoteQualified(ref))
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return classifyDDLError(ref.String(), err)
 	}
 	return nil
 }

@@ -45,6 +45,22 @@ func (s *Snapshotter) execQuery(ctx context.Context, conn pq.Connection, query s
 	return results, nil
 }
 
+// execQueryShared runs execQuery on one of the two connections shared by all
+// concurrent workers (metadataConn, healthcheckConn), serialised under connMu.
+// jackc/pgx's *pgconn.PgConn rejects overlapping Exec calls with a
+// *connLockError{"conn busy"}, so any overlap on a shared connection fails the
+// snapshot; this is what prevents that (vendored-patch: SC-1, see
+// Snapshotter.connMu for the full rationale).
+//
+// Only query-bearing statements go through here. The coordinator's DDL/DML
+// (execSQL on metadataConn) runs strictly in the single-threaded Prepare phase,
+// never overlapping a worker goroutine, so it is left on the bare execSQL.
+func (s *Snapshotter) execQueryShared(ctx context.Context, conn pq.Connection, query string) ([]*pgconn.Result, error) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.execQuery(ctx, conn, query)
+}
+
 // retryDBOperation retries a database operation on transient errors
 func (s *Snapshotter) retryDBOperation(ctx context.Context, operation func() error) error {
 	maxRetries := 3
@@ -86,6 +102,18 @@ func (s *Snapshotter) retryDBOperation(ctx context.Context, operation func() err
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
+	}
+
+	// 0. pgconn.SafeToRetry() reports errors guaranteed to have occurred before
+	// any data was sent to the server (e.g. *connLockError's "conn busy", which
+	// is what a concurrent Exec on a single shared PgConn returns). Retrying
+	// those is always safe and no bytes were consumed, so the same statement can
+	// be re-issued verbatim. Consulting it here (rather than rolling a private
+	// classifier that never matches it) is what lets the retry loop recover from
+	// the SC-1 shared-connection hazard even if a concurrent Exec ever slips past
+	// connMu. vendored-patch: SC-1.
+	if pgconn.SafeToRetry(err) {
+		return true
 	}
 
 	// 1. Check for context errors (deadline exceeded, canceled)

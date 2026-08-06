@@ -188,6 +188,18 @@ func snapshotChunkSize(configured int) int64 {
 	return int64(configured)
 }
 
+// snapshotConcurrency maps the SourceConfig snapshot_workers knob onto the
+// vendored SnapshotConfig.Concurrency (SC-1 / docs/todos/
+// custom_object_cdc_followups.md item 5). <=0 means "unset" and is passed
+// through as 0; the vendored snapshotter clamps that to 1, so leaving the
+// knob off is behaviour-preserving (the historical single-worker drain).
+func snapshotConcurrency(configured int) int {
+	if configured <= 0 {
+		return 0
+	}
+	return configured
+}
+
 // connectorFactoryFunc is the pluggable factory used by PostgresSource to
 // build a new cdc.Connector. The default implementation calls
 // cdc.NewConnector. Tests can swap in a stub via SetConnectorFactory to
@@ -923,7 +935,13 @@ func (s *PostgresSource) Start(ctx context.Context, srcConfig protocol.SourceCon
 			// vendored connector's own default (config.go: 8_000) when
 			// unset, preserving today's behaviour for every existing
 			// deployment that doesn't set snapshot_chunk_size.
-			ChunkSize:         snapshotChunkSize(srcConfig.SnapshotChunkSize),
+			ChunkSize: snapshotChunkSize(srcConfig.SnapshotChunkSize),
+			// Concurrency (SC-1 / docs/todos/custom_object_cdc_followups.md
+			// item 5): 0 or 1 keeps the historical single-worker snapshot
+			// drain; a larger value parallelises the chunk backfill for the
+			// operator who needs to tune it. The vendored snapshotter clamps
+			// <=0 to 1, so leaving it unset is behaviour-preserving.
+			Concurrency:       snapshotConcurrency(srcConfig.SnapshotWorkers),
 			ClaimTimeout:      30 * time.Second,
 			HeartbeatInterval: 5 * time.Second,
 		},

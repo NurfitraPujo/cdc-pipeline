@@ -282,14 +282,19 @@ type SourceConfig struct {
 	BatchWait         time.Duration `msg:"batch_wait" yaml:"batch_wait" json:"batch_wait" swaggertype:"string" example:"5s"`
 	DiscoveryInterval time.Duration `msg:"disc_int" yaml:"discovery_interval" json:"discovery_interval" swaggertype:"string" example:"30s"`
 	SnapshotChunkSize int           `msg:"snap_size" yaml:"snapshot_chunk_size" json:"snapshot_chunk_size"`
-	SnapshotInterval  time.Duration `msg:"snap_int" yaml:"snapshot_interval" json:"snapshot_interval" swaggertype:"string" example:"1s"`
+	// SnapshotWorkers controls how many goroutines claim and process snapshot
+	// chunks concurrently during a backfill (docs/todos/
+	// custom_object_cdc_followups.md item 5). 0 or 1 keeps the historical
+	// single sequential worker loop.
+	SnapshotWorkers  int           `msg:"snap_workers" yaml:"snapshot_workers" json:"snapshot_workers"`
+	SnapshotInterval time.Duration `msg:"snap_int" yaml:"snapshot_interval" json:"snapshot_interval" swaggertype:"string" example:"1s"`
 	// Schemas restricts table discovery to these PostgreSQL schemas.
 	// Empty or nil means "public" ONLY -- deliberately not "all schemas":
 	// every config predating multi-schema support has this field empty, and
 	// defaulting to all would silently begin replicating unrelated schemas on
 	// upgrade (MULTI_SCHEMA_PLAN.md §3 Stage 2, §8 item 4).
 	Schemas []string `msg:"schemas" yaml:"schemas" json:"schemas"`
-	Tables            []string      `msg:"tables" yaml:"tables" json:"tables"`
+	Tables  []string `msg:"tables" yaml:"tables" json:"tables"`
 }
 
 func (s SourceConfig) Validate() error {

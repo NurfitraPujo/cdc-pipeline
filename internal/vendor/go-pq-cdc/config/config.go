@@ -327,8 +327,14 @@ type SnapshotConfig struct {
 	ChunkSize         int64              `json:"chunkSize" yaml:"chunkSize"`
 	ClaimTimeout      time.Duration      `json:"claimTimeout" yaml:"claimTimeout"`
 	HeartbeatInterval time.Duration      `json:"heartbeatInterval" yaml:"heartbeatInterval"`
-	Enabled           bool               `json:"enabled" yaml:"enabled"`
-	Resnapshot        bool               `json:"resnapshot" yaml:"resnapshot"`
+	// vendored-patch: SC-1 (docs/todos/custom_object_cdc_followups.md item 5) -
+	// how many snapshot workers may claim and process chunks concurrently.
+	// The chunk lease (FOR UPDATE SKIP LOCKED) already supports multiple
+	// workers; 0 or 1 means a single sequential worker loop (the historical
+	// behaviour), so setting it is strictly opt-in for backfill tuning.
+	Concurrency int  `json:"concurrency" yaml:"concurrency"`
+	Enabled     bool `json:"enabled" yaml:"enabled"`
+	Resnapshot  bool `json:"resnapshot" yaml:"resnapshot"`
 }
 
 func (s *SnapshotConfig) Validate() error {

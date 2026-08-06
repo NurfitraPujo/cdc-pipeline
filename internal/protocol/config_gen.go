@@ -1637,6 +1637,12 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "SnapshotChunkSize")
 				return
 			}
+		case "snap_workers":
+			z.SnapshotWorkers, err = dc.ReadInt()
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotWorkers")
+				return
+			}
 		case "snap_int":
 			z.SnapshotInterval, err = dc.ReadDuration()
 			if err != nil {
@@ -1694,9 +1700,9 @@ func (z *SourceConfig) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 16
+	// map header, size 17
 	// write "id"
-	err = en.Append(0xde, 0x0, 0x10, 0xa2, 0x69, 0x64)
+	err = en.Append(0xde, 0x0, 0x11, 0xa2, 0x69, 0x64)
 	if err != nil {
 		return
 	}
@@ -1825,6 +1831,16 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "SnapshotChunkSize")
 		return
 	}
+	// write "snap_workers"
+	err = en.Append(0xac, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x77, 0x6f, 0x72, 0x6b, 0x65, 0x72, 0x73)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt(z.SnapshotWorkers)
+	if err != nil {
+		err = msgp.WrapError(err, "SnapshotWorkers")
+		return
+	}
 	// write "snap_int"
 	err = en.Append(0xa8, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x69, 0x6e, 0x74)
 	if err != nil {
@@ -1875,9 +1891,9 @@ func (z *SourceConfig) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 16
+	// map header, size 17
 	// string "id"
-	o = append(o, 0xde, 0x0, 0x10, 0xa2, 0x69, 0x64)
+	o = append(o, 0xde, 0x0, 0x11, 0xa2, 0x69, 0x64)
 	o = msgp.AppendString(o, z.ID)
 	// string "type"
 	o = append(o, 0xa4, 0x74, 0x79, 0x70, 0x65)
@@ -1915,6 +1931,9 @@ func (z *SourceConfig) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "snap_size"
 	o = append(o, 0xa9, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x73, 0x69, 0x7a, 0x65)
 	o = msgp.AppendInt(o, z.SnapshotChunkSize)
+	// string "snap_workers"
+	o = append(o, 0xac, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x77, 0x6f, 0x72, 0x6b, 0x65, 0x72, 0x73)
+	o = msgp.AppendInt(o, z.SnapshotWorkers)
 	// string "snap_int"
 	o = append(o, 0xa8, 0x73, 0x6e, 0x61, 0x70, 0x5f, 0x69, 0x6e, 0x74)
 	o = msgp.AppendDuration(o, z.SnapshotInterval)
@@ -2029,6 +2048,12 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "SnapshotChunkSize")
 				return
 			}
+		case "snap_workers":
+			z.SnapshotWorkers, bts, err = msgp.ReadIntBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "SnapshotWorkers")
+				return
+			}
 		case "snap_int":
 			z.SnapshotInterval, bts, err = msgp.ReadDurationBytes(bts)
 			if err != nil {
@@ -2087,7 +2112,7 @@ func (z *SourceConfig) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *SourceConfig) Msgsize() (s int) {
-	s = 3 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize + 11 + msgp.DurationSize + 9 + msgp.DurationSize + 10 + msgp.IntSize + 9 + msgp.DurationSize + 8 + msgp.ArrayHeaderSize
+	s = 3 + 3 + msgp.StringPrefixSize + len(z.ID) + 5 + msgp.StringPrefixSize + len(z.Type) + 5 + msgp.StringPrefixSize + len(z.Host) + 5 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.User) + 5 + msgp.StringPrefixSize + len(z.PassEncrypted) + 9 + msgp.StringPrefixSize + len(z.Database) + 10 + msgp.StringPrefixSize + len(z.SlotName) + 17 + msgp.StringPrefixSize + len(z.PublicationName) + 11 + msgp.IntSize + 11 + msgp.DurationSize + 9 + msgp.DurationSize + 10 + msgp.IntSize + 13 + msgp.IntSize + 9 + msgp.DurationSize + 8 + msgp.ArrayHeaderSize
 	for za0001 := range z.Schemas {
 		s += msgp.StringPrefixSize + len(z.Schemas[za0001])
 	}

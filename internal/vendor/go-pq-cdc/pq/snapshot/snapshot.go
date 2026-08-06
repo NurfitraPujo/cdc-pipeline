@@ -32,15 +32,27 @@ type Snapshotter struct {
 	metadataConn       pq.Connection
 	healthcheckConn    pq.Connection
 	exportSnapshotConn pq.Connection
-	metric             metric.Metric
-	typeMap            *pgtype.Map
-	decoderCache       *DecoderCache
-	connectionPool     *ConnectionPool
-	orderByCache       map[string]orderByCacheEntry
-	dsn                string
-	cachedSnapshotID   string
-	tables             publication.Tables
-	config             config.SnapshotConfig
+	// connMu serialises every SQL statement issued against the two shared
+	// connections (metadataConn, healthcheckConn). The historical library runs
+	// one worker process, which owns its connections exclusively; SC-1's
+	// in-process concurrency runs N workers sharing these two, and the
+	// underlying jackc/pgx v5 *pgconn.PgConn is NOT concurrency-safe -- a
+	// second concurrent Exec returns a *connLockError{"conn busy"}.
+	// execQueryShared (helpers.go) takes this lock so workers never overlap an
+	// Exec on either connection. The connection-pool connections used for the
+	// long-running per-chunk SELECTs are excluded: they are checked out one at a
+	// time and exclusively owned, so locking them would serialise the very data
+	// path the concurrency knob exists to parallelise.
+	connMu           sync.Mutex
+	metric           metric.Metric
+	typeMap          *pgtype.Map
+	decoderCache     *DecoderCache
+	connectionPool   *ConnectionPool
+	orderByCache     map[string]orderByCacheEntry
+	dsn              string
+	cachedSnapshotID string
+	tables           publication.Tables
+	config           config.SnapshotConfig
 	// vendored-patch: MS-2 (MULTI_SCHEMA_PLAN.md §3 Stage 4, task 3) - the schema
 	// the cdc_snapshot_job/cdc_snapshot_chunks bookkeeping tables are created in
 	// and checked against. Resolved once, in New(), from the same SearchPath the
