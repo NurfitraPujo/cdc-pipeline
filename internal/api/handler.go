@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -55,16 +56,59 @@ func isPrivateHost(ip net.IP) bool {
 	return false
 }
 
+// allowedHostCIDRs parses DB_HOST_ALLOWED_CIDRS -- a comma-separated list of
+// CIDR blocks that are exempt from the private-IP guard in validateHost.
+//
+// The guard exists to stop an authenticated operator from pointing a connection
+// test at loopback, link-local, or a cloud metadata endpoint (SSRF, T2-1). But
+// the databases this pipeline actually targets live on private VPC addresses
+// (e.g. an RDS instance on 10.x), so the guard as written rejects every real
+// target. This allowlist re-permits the specific ranges the operator intends
+// -- typically the VPC CIDR -- while still blocking everything else private.
+//
+// It is read per call rather than cached: this is a low-frequency, operator-
+// triggered endpoint, so a fresh getenv keeps the function pure and trivially
+// testable. Malformed entries are skipped rather than failing the request.
+func allowedHostCIDRs() []*net.IPNet {
+	raw := os.Getenv("DB_HOST_ALLOWED_CIDRS")
+	if raw == "" {
+		return nil
+	}
+	var nets []*net.IPNet
+	for _, part := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if _, cidr, err := net.ParseCIDR(trimmed); err == nil {
+			nets = append(nets, cidr)
+		}
+	}
+	return nets
+}
+
+// ipInAny reports whether ip falls inside any of the given CIDR blocks.
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateHost resolves the hostname and checks if the resulting IP is allowed.
-// Returns an error message if the host resolves to a private/reserved IP.
+// Returns an error message if the host resolves to a private/reserved IP that is
+// not covered by the DB_HOST_ALLOWED_CIDRS allowlist.
 func validateHost(host string) string {
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		// If DNS resolution fails, we allow the connection attempt (it may fail for other reasons)
 		return ""
 	}
+	allowed := allowedHostCIDRs()
 	for _, ip := range ips {
-		if isPrivateHost(ip) {
+		if isPrivateHost(ip) && !ipInAny(ip, allowed) {
 			return fmt.Sprintf("host %s resolved to private IP %s not allowed", host, ip.String())
 		}
 	}
