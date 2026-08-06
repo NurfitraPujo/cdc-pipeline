@@ -694,6 +694,42 @@ func TestStart_SnapshotChunkSize_Wired(t *testing.T) {
 	})
 }
 
+// TestStart_SnapshotConcurrency_Wired (docs/todos/custom_object_cdc_followups.md
+// item 5 / SC-1): SnapshotWorkers must reach the vendored
+// config.SnapshotConfig.Concurrency. Unset (<=0) must pass through as 0 so the
+// vendored snapshotter's own clamp to 1 preserves the historical single-worker
+// behaviour.
+func TestStart_SnapshotConcurrency_Wired(t *testing.T) {
+	t.Run("configured value is honoured", func(t *testing.T) {
+		s := NewPostgresSource("snap-concurrency-configured")
+		factory := newStubFactory()
+		s.SetConnectorFactory(factory.Build)
+
+		cfg := validSourceConfig()
+		cfg.SnapshotWorkers = 4
+
+		_, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+		require.NoError(t, err)
+		defer func() { _ = s.Stop() }()
+
+		assert.Equal(t, 4, factory.LastConfig().Snapshot.Concurrency)
+	})
+
+	t.Run("unset passes through 0 (vendored clamps to 1)", func(t *testing.T) {
+		s := NewPostgresSource("snap-concurrency-unset")
+		factory := newStubFactory()
+		s.SetConnectorFactory(factory.Build)
+
+		cfg := validSourceConfig() // SnapshotWorkers left at zero value
+
+		_, _, err := s.Start(context.Background(), cfg, protocol.Checkpoint{}, nil)
+		require.NoError(t, err)
+		defer func() { _ = s.Stop() }()
+
+		assert.Equal(t, 0, factory.LastConfig().Snapshot.Concurrency)
+	})
+}
+
 // TestRunSlotLagProbe_EmitsGaugeValues is plan 01a WI-5a: the periodic
 // slot-lag probe must export cdc_source_slot_lag_bytes from the injected
 // slotLagBytes seam, and cdc_source_ack_watermark from the AckManager,

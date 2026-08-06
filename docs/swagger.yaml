@@ -181,6 +181,13 @@ definitions:
       snapshot_interval:
         example: 1s
         type: string
+      snapshot_workers:
+        description: |-
+          SnapshotWorkers controls how many goroutines claim and process snapshot
+          chunks concurrently during a backfill (docs/todos/
+          custom_object_cdc_followups.md item 5). 0 or 1 keeps the historical
+          single sequential worker loop.
+        type: integer
       tables:
         items:
           type: string

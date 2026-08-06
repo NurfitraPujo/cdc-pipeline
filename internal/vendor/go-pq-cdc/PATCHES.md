@@ -576,6 +576,111 @@ identity is covered by `internal/source/postgres/capture_setup_failure_test.go`,
 
 ---
 
+## SC-1: Configurable Concurrent Snapshot Chunk Workers
+
+**Upstream Issue**: N/A (internal requirement, tracked as
+`docs/todos/custom_object_cdc_followups.md` item 5)
+
+**Files Modified**:
+- `config/config.go` (`SnapshotConfig.Concurrency`)
+- `pq/snapshot/worker.go` (`executeWorker`, `workerProcess`, heartbeat) and
+  `pq/snapshot/concurrency_test.go`, `pq/snapshot/worker_integration_test.go`
+  (new)
+- `pq/snapshot/snapshot.go` (`connMu` field), `pq/snapshot/helpers.go`
+  (`execQueryShared`, `isTransientError`), `pq/snapshot/job.go`
+
+Every edit site carries an inline `// vendored-patch: SC-1 - ...` marker
+(`grep -rn "vendored-patch: SC-1" internal/vendor/go-pq-cdc/` finds them).
+
+**Problem**: the snapshot worker that drains `cdc_snapshot_chunks` was a single
+sequential loop, while the chunk lease (`claimNextChunk`'s
+`SELECT ... FOR UPDATE SKIP LOCKED`) had always been built for concurrent
+workers. There was no knob to tune backfill parallelism. Naively adding one
+within a single process is unsafe for two independent reasons, both rooted in
+the fact that the historical deployment model was *N worker processes, each
+with its own connections* -- never N goroutines sharing one process's
+connections:
+
+1. **Shared `metadataConn` is not concurrency-safe.** `claimNextChunk`,
+   `markChunkCompleted`, `releaseChunk`, `loadJob` all issue SQL through the
+   single `s.metadataConn`, which embeds jackc/pgx v5's `*pgconn.PgConn`. That
+   type rejects overlapping `Exec` calls with a `*connLockError{"conn busy"}`
+   ("This only should be possible in case of an application bug." in pgx's own
+   words). With N goroutines claiming chunks, the second concurrent `Exec`
+   deterministically hits this; the vendored `isTransientError` did not treat
+   it as transient, so `retryDBOperation` failed fast, cancelled the shared
+   context, and aborted the whole snapshot. `SKIP LOCKED` only coordinates
+   *separate worker instances with separate connections*; it does nothing for
+   goroutines sharing one connection.
+
+2. **A single heartbeat cannot serve N in-flight chunks.** The heartbeat
+   refreshed one active chunk per tick; with N chunks in flight only the last
+   to notify got refreshed. Chunks taking longer than `ClaimTimeout` (30s)
+   were re-claimed by another worker and processed twice (harmless for
+   idempotent REPLACE sinks but inflated `completed_chunks` and fatal for a
+   non-idempotent sink).
+
+**Fix**:
+- `SnapshotConfig.Concurrency` (new field, default 0). `executeWorker` clamps
+  `<= 0` to `1`, so an unset value is byte-for-byte the historical single
+  worker loop.
+- When `Concurrency > 1`, `executeWorker` spawns that many goroutines, each
+  running `workerProcess`, and waits for all of them (via `sync.WaitGroup`).
+  Chunk claiming is both-atomic-disjoint (`FOR UPDATE SKIP LOCKED`), so
+  out-of-order completion is safe: each chunk is an independent merge unit
+  downstream and carries the same snapshot LSN. The first worker error -- in
+  practice `ErrSnapshotInvalidated`, which must abort all workers -- cancels a
+  shared worker context so the rest wind down.
+- **Serialise the shared connections (fixes 1).** `Snapshotter` gained
+  `connMu`; every query on `metadataConn`/`healthcheckConn` now runs through
+  `execQueryShared` (helpers.go), which holds `connMu` for the duration of the
+  statement, so no two goroutines overlap an `Exec` on either connection.
+  The connection-pool connections used for the long-running
+  per-chunk SELECTs are deliberately *not* locked: they are checked out one at
+  a time and exclusively owned, so locking them would serialise the very data
+  path the knob exists to parallelise.
+- **`isTransientError` now consults `pgconn.SafeToRetry` (fixes 1, defence in
+  depth).** pgx's `*connLockError` implements `SafeToRetry() bool`.
+  Classifying that as transient means a conn-busy error that ever slips past
+  `connMu` is retried by `retryDBOperation` (3 attempts, exponential backoff)
+  instead of failing fast and aborting the snapshot. Note this alone does not
+  save a *sustained* collision -- the backoff lets workers collide again -- so
+  `connMu` remains the primary fix; `SafeToRetry` only converts a flash
+  collision into a retry.
+- **One heartbeat goroutine per snapshot, tracking every active chunk (fixes
+  2).** `startHeartbeat` is created once in `executeWorker` (never once per
+  worker -- the single shared `healthcheckConn` must have exactly one reader)
+  and returns a `*chunkHeartbeat`, a mutex-guarded registry of the chunk IDs
+  currently being drained. Each worker registers its chunk on claim
+  (`hb.add`) and unregisters on completion/error (`hb.remove`); the heartbeat
+  goroutine refreshes `heartbeat_at` for the whole snapshot set each tick. The
+  historical single worker holds at most one ID, so the registry is a strict
+  superset of the old `activeChunkID` bookkeeping.
+
+**Backward Compatibility**: `SnapshotConfig.Concurrency == 0` (the value every
+existing config serializes to, since the field is new) preserves the exact
+pre-patch single-worker behaviour and the same single-heartbeat wiring. The
+`metadataConn`/`healthcheckConn` serialisation and the `SafeToRetry`
+classification apply in both modes (single worker has no concurrency to expose,
+so they are no-ops there). No exported signature changed.
+
+**Regression Risk**: the load-bearing changes are (a) `connMu` serialisation
+inside `execQueryShared` and (b) the heartbeat consolidation.
+Verify on any re-sync that: `startHeartbeat` is called exactly once per
+`executeWorker`, not once per `workerProcess`; every SQL site that touches
+`metadataConn`/`healthcheckConn` goes through the `*Shared` helpers, not the
+bare `execQuery`/`execSQL` (which stay for the exclusively-owned pool/export
+connections); and the `chunkHeartbeat.add`/`remove` pair flanks the chunk
+drain in `processNextChunk`. The pure-logic tests in `concurrency_test.go`
+exercise the registry and the `SafeToRetry` classifier; for a real check,
+`TestExecuteWorker_ConcurrentChunks` spins a Postgres testcontainer and drains
+a fixture set with `Concurrency > 1` -- run from the repo root with
+`go test github.com/Trendyol/go-pq-cdc/pq/snapshot -run
+TestExecuteWorker_ConcurrentChunks -race`. It fails with "conn busy" if `connMu`
+is reverted, confirming it is load-bearing.
+
+---
+
 ## Applying Patches
 
 When merging upstream changes, search for `// vendored-patch:` markers to identify patched locations.

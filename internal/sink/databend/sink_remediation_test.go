@@ -106,8 +106,8 @@ func (fakeResult) RowsAffected() (int64, error) { return 0, nil }
 // fakeDLQPublisher records every publish so tests can assert on the DLQ flow
 // without depending on a real NATS connection.
 type fakeDLQPublisher struct {
-	mu       sync.Mutex
-	calls    []dlqPublishCall
+	mu         sync.Mutex
+	calls      []dlqPublishCall
 	publishErr error
 }
 
@@ -165,6 +165,8 @@ func newTestSink(db DBExec, opts ...map[string]interface{}) *DatabendSink {
 		decimalPrecision: DefaultDecimalPrecision,
 		decimalScale:     DefaultDecimalScale,
 		dlqSubject:       DefaultSinkDeadLetterSubject("test-sink"),
+		lastCompact:      make(map[string]time.Time),
+		compactionStop:   make(chan struct{}),
 	}
 	return snk.WithOptions(options)
 }
@@ -187,6 +189,10 @@ func marshalJSONForTest(v map[string]any) ([]byte, error) {
 // T2-4: type mapping
 // ----------------------------------------------------------------------------
 
+// TestMapPgTypeToDatabend_T2_4 asserts the exact mapping for the full type
+// vocabulary the sync can hand the sink (docs/todos/custom_object_cdc_followups.md
+// item 1). This is a *closed* map: every entry is explicit, so a future
+// strings.Contains refactor that silently mis-maps a type fails here.
 func TestMapPgTypeToDatabend_T2_4(t *testing.T) {
 	snk := newTestSink(newFakeDB())
 
@@ -195,23 +201,86 @@ func TestMapPgTypeToDatabend_T2_4(t *testing.T) {
 		pg   string
 		want string
 	}{
+		// decimals (config-driven precision/scale, modifiers ignored)
 		{name: "numeric default", pg: "numeric", want: "DECIMAL(38, 9)"},
 		{name: "decimal default", pg: "decimal", want: "DECIMAL(38, 9)"},
 		{name: "numeric with precision", pg: "numeric(10,2)", want: "DECIMAL(38, 9)"},
 		{name: "decimal uppercase", pg: "DECIMAL", want: "DECIMAL(38, 9)"},
+		{name: "numeric whitespace", pg: "  numeric  ", want: "DECIMAL(38, 9)"},
+		// arrays always -> VARIANT
 		{name: "int array", pg: "int[]", want: "VARIANT"},
 		{name: "text array", pg: "text[]", want: "VARIANT"},
 		{name: "numeric array", pg: "numeric[]", want: "VARIANT"},
 		{name: "underscore array", pg: "_int4", want: "VARIANT"},
+		// booleans
 		{name: "boolean", pg: "bool", want: "BOOLEAN"},
+		{name: "boolean full", pg: "boolean", want: "BOOLEAN"},
+		// integers
 		{name: "int", pg: "int", want: "INT64"},
+		{name: "int2", pg: "int2", want: "INT64"},
+		{name: "int4", pg: "int4", want: "INT64"},
+		{name: "int8", pg: "int8", want: "INT64"},
+		{name: "smallint", pg: "smallint", want: "INT64"},
+		{name: "integer", pg: "integer", want: "INT64"},
 		{name: "bigint", pg: "bigint", want: "INT64"},
-		{name: "float", pg: "double precision", want: "FLOAT64"},
+		{name: "serial", pg: "serial", want: "INT64"},
+		{name: "bigserial", pg: "bigserial", want: "INT64"},
+		{name: "oid type", pg: "oid", want: "INT64"},
+		// floats
+		{name: "double precision", pg: "double precision", want: "FLOAT64"},
+		{name: "float4", pg: "float4", want: "FLOAT64"},
+		{name: "float8", pg: "float8", want: "FLOAT64"},
+		{name: "real", pg: "real", want: "FLOAT64"},
+		// temporal
 		{name: "timestamp", pg: "timestamp", want: "TIMESTAMP"},
-		{name: "json", pg: "jsonb", want: "VARIANT"},
+		{name: "timestamptz", pg: "timestamptz", want: "TIMESTAMP"},
+		{name: "timestamp with tz", pg: "timestamp with time zone", want: "TIMESTAMP"},
+		{name: "date", pg: "date", want: "DATE"},
+		// json / variant
+		{name: "json", pg: "json", want: "VARIANT"},
+		{name: "jsonb", pg: "jsonb", want: "VARIANT"},
+		// binary
+		{name: "bytea", pg: "bytea", want: "BINARY"},
+		// strings (including custom-object CITEXT)
+		{name: "citext", pg: "citext", want: "STRING"},
 		{name: "text", pg: "varchar", want: "STRING"},
-		{name: "oid int", pg: "23", want: "INT64"},
-		{name: "oid string", pg: "1043", want: "STRING"},
+		{name: "varchar len", pg: "varchar(255)", want: "STRING"},
+		{name: "char", pg: "char", want: "STRING"},
+		{name: "bpchar", pg: "bpchar", want: "STRING"},
+		{name: "uuid", pg: "uuid", want: "STRING"},
+		{name: "text type", pg: "text", want: "STRING"},
+		{name: "name", pg: "name", want: "STRING"},
+		// OID numbers
+		{name: "oid bool", pg: "16", want: "BOOLEAN"},
+		{name: "oid int4", pg: "23", want: "INT64"},
+		{name: "oid int8", pg: "20", want: "INT64"},
+		{name: "oid varchar", pg: "1043", want: "STRING"},
+		{name: "oid text", pg: "25", want: "STRING"},
+		{name: "oid timestamp", pg: "1114", want: "TIMESTAMP"},
+		{name: "oid jsonb", pg: "3802", want: "VARIANT"},
+		// Real information_schema.columns.data_type spellings. The hot path
+		// feeds *this* vocabulary (internal/source/postgres/source.go reads
+		// information_schema.columns.data_type), not the short pg-internal
+		// names above -- so this is the vocabulary that must be guarded. In
+		// particular, a custom-object CITEXT column is NOT reported as
+		// "citext": it is a user-defined type, so data_type is exactly
+		// "USER-DEFINED" and correctly lands on the STRING fallback (the
+		// motivating case for followups item 1).
+		{name: "data_type user-defined (custom object)", pg: "USER-DEFINED", want: "STRING"},
+		{name: "data_type array (jsonb[])", pg: "ARRAY", want: "VARIANT"},
+		{name: "data_type character varying", pg: "character varying", want: "STRING"},
+		{name: "data_type character", pg: "character", want: "STRING"},
+		{name: "data_type timestamp without tz", pg: "timestamp without time zone", want: "TIMESTAMP"},
+		{name: "data_type timestamp with tz", pg: "timestamp with time zone", want: "TIMESTAMP"},
+		{name: "data_type user-defined array", pg: "ARRAY", want: "VARIANT"},
+		// previously-buggy types: strings.Contains(t,"int") would have silently
+		// swept these into INT64; the explicit map sends them to the STRING
+		// fallback instead (the whole point of followups item 1).
+		{name: "interval", pg: "interval", want: "STRING"},
+		{name: "point", pg: "point", want: "STRING"},
+		{name: "int4range", pg: "int4range", want: "STRING"},
+		{name: "inet", pg: "inet", want: "STRING"},
+		{name: "unknown type fallback", pg: "my_custom_enum", want: "STRING"},
 	}
 
 	for _, tc := range tests {
@@ -780,15 +849,121 @@ func TestDeleteTableBatch_DeserializationFailure_DLQ(t *testing.T) {
 
 func TestWithOptions_AppliesValues(t *testing.T) {
 	snk := newTestSink(newFakeDB(), map[string]interface{}{
-		"max_placeholders":  42,
-		"decimal_precision": 10,
-		"decimal_scale":     2,
-		"dlq_subject":       "custom.subject",
+		"max_placeholders":    42,
+		"decimal_precision":   10,
+		"decimal_scale":       2,
+		"dlq_subject":         "custom.subject",
+		"compaction_interval": "1h30m",
 	})
 	assert.Equal(t, 42, snk.maxPlaceholders)
 	assert.Equal(t, 10, snk.decimalPrecision)
 	assert.Equal(t, 2, snk.decimalScale)
 	assert.Equal(t, "custom.subject", snk.dlqSubject)
+	assert.Equal(t, 90*time.Minute, snk.compactionInterval)
+}
+
+// requireOptCount polls until the fake DB has recorded `want` OPTIMIZE
+// statements. Compaction runs on a background worker (scheduleCompaction
+// enqueues; the worker drains), so an assertion cannot observe the effect
+// synchronously after BatchUpload returns -- it must wait for the worker.
+func requireOptCount(t *testing.T, db *fakeDB, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if db.ExecCountMatching("OPTIMIZE") == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("OPTIMIZE count never reached %d (got %d)", want, db.ExecCountMatching("OPTIMIZE"))
+}
+
+// TestCompaction_ThrottledPerTable (docs/todos/custom_object_cdc_followups.md
+// item 2): a successful batch into a table triggers exactly one
+// OPTIMIZE TABLE <t> COMPACT (on the background worker), then a second batch
+// shortly after is throttled out -- no re-fire inside the same compaction
+// interval.
+func TestCompaction_ThrottledPerTable(t *testing.T) {
+	db := newFakeDB()
+	snk := newTestSink(db, map[string]interface{}{"compaction_interval": "10s"})
+	defer func() { _ = snk.Stop() }()
+
+	newMsg := func(id int64) protocol.Message {
+		return protocol.Message{
+			SourceID:    "src",
+			TableSchema: "public",
+			Table:       "orders",
+			Op:          protocol.OpInsert,
+			UUID:        fmt.Sprintf("u-%d", id),
+			Data:        map[string]interface{}{"id": id},
+		}
+	}
+
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{newMsg(1)}))
+	requireOptCount(t, db, 1, 2*time.Second)
+
+	// Second batch within the interval: writes succeed but OPTIMIZE must not
+	// re-fire for the same table. Wait long enough for the worker to have
+	// drained the enqueue, then assert it stayed at 1.
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{newMsg(2)}))
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 1, db.ExecCountMatching("OPTIMIZE"), "a second batch inside the interval must be throttled")
+
+	// Distinct tables are compacted independently.
+	msg3 := newMsg(3)
+	msg3.Table = "assets"
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{msg3}))
+	requireOptCount(t, db, 2, 2*time.Second)
+}
+
+// TestCompaction_DisabledByDefault (docs/todos/custom_object_cdc_followups.md
+// item 2): with no compaction_interval option, the sink never issues OPTIMIZE
+// (and never starts a worker), preserving the pre-existing behaviour
+// byte-for-byte.
+func TestCompaction_DisabledByDefault(t *testing.T) {
+	db := newFakeDB()
+	snk := newTestSink(db) // no compaction_interval
+	defer func() { _ = snk.Stop() }()
+
+	msg := protocol.Message{
+		SourceID: "src", TableSchema: "public", Table: "orders",
+		Op: protocol.OpInsert, UUID: "u1", Data: map[string]interface{}{"id": int64(1)},
+	}
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{msg}))
+	// Give a hypothetical (incorrect) worker time to (incorrectly) fire.
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, db.ExecCountMatching("OPTIMIZE"))
+}
+
+// TestCompaction_FailureDoesNotFailBatch (docs/todos/custom_object_cdc_followups.md
+// item 2): a failing OPTIMIZE is best-effort -- it must never fail the batch
+// that already succeeded (BatchUpload returns nil even though the worker's
+// OPTIMIZE fails), and it consumes its throttle slot so it does not retry on
+// every subsequent batch within the interval.
+func TestCompaction_FailureDoesNotFailBatch(t *testing.T) {
+	db := newFakeDB()
+	db.execErrFn = func(query string) error {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "OPTIMIZE") {
+			return errors.New("compact denied")
+		}
+		return nil
+	}
+	snk := newTestSink(db, map[string]interface{}{"compaction_interval": "10s"})
+	defer func() { _ = snk.Stop() }()
+
+	msg := protocol.Message{
+		SourceID: "src", TableSchema: "public", Table: "orders",
+		Op: protocol.OpInsert, UUID: "u1", Data: map[string]interface{}{"id": int64(1)},
+	}
+	// The write succeeds even though the (async) OPTIMIZE fails.
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{msg}))
+	requireOptCount(t, db, 1, 2*time.Second)
+
+	// A second batch within the interval is throttled (the failed attempt kept
+	// its claim), so exactly one (failed) OPTIMIZE was attempted.
+	require.NoError(t, snk.BatchUpload(context.Background(), []protocol.Message{msg}))
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 1, db.ExecCountMatching("OPTIMIZE"))
 }
 
 func TestWithOptions_IgnoresBadValues(t *testing.T) {

@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Trendyol/go-pq-cdc/logger"
@@ -81,7 +82,7 @@ func (s *Snapshotter) hasChunksReady(ctx context.Context, slotName string) (bool
 		WHERE slot_name = '%s'
 	`, chunksTableName, slotName)
 
-	results, err := s.execQuery(ctx, s.metadataConn, query)
+	results, err := s.execQueryShared(ctx, s.metadataConn, query)
 	if err != nil {
 		return false, errors.Wrap(err, "check chunks ready")
 	}
@@ -113,21 +114,88 @@ func (s *Snapshotter) executeWorker(ctx context.Context, slotName, instanceID st
 		LSN:        job.SnapshotLSN,
 	})
 
-	// Process chunks (each chunk will have its own transaction)
-	if err := s.workerProcess(ctx, slotName, instanceID, job, handler); err != nil {
-		return errors.Wrap(err, "worker process")
+	// One heartbeat worker is shared by every concurrent chunk worker below.
+	// It is the sole reader of s.healthcheckConn, so there is never more than
+	// one goroutine Exec-ing on that connection (vendored-patch: SC-1); the
+	// heartbeat tracks *every* in-flight chunk (chunkHeartbeat) so a slow chunk
+	// keeps its claim refreshed instead of being re-claimed at ClaimTimeout.
+	heartbeatCtx, hb := s.startHeartbeat(ctx)
+	defer heartbeatCtx()
+
+	// Process chunks (each chunk will have its own transaction).
+	//
+	// vendored-patch: SC-1 - concurrency. config.Concurrency defaults to 0,
+	// clamped to 1 here, giving the historical single-worker loop
+	// byte-for-byte. A value > 1 lets that many goroutines claim and process
+	// distinct chunks concurrently. Chunk claiming already uses
+	// FOR UPDATE SKIP LOCKED (claimNextChunk), so lease coordination is
+	// concurrency-correct across workers; the one thing the knob had to add is
+	// safety on the *shared in-process connections* (metadataConn,
+	// healthcheckConn), which pgx's pgconn does not serialise -- all of those
+	// queries run through execQueryShared/execSQLShared under connMu, and the
+	// single heartbeat goroutine tracks every active chunk (chunkHeartbeat).
+	concurrency := int(s.config.Concurrency)
+	if concurrency < 1 {
+		concurrency = 1
 	}
 
+	if concurrency == 1 {
+		if err := s.workerProcess(ctx, slotName, instanceID, job, handler, hb); err != nil {
+			return errors.Wrap(err, "worker process")
+		}
+		return nil
+	}
+
+	// Concurrent workers claim disjoint chunks, so out-of-order completion is
+	// safe (each chunk is an independent REPLACE/merge unit downstream and
+	// carries the same snapshot LSN). The first error -- in practice
+	// ErrSnapshotInvalidated, which must abort every worker -- cancels the
+	// shared context so the rest wind down instead of continuing to churn a
+	// now-invalid snapshot.
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.workerProcess(workerCtx, slotName, instanceID, job, handler, hb); err != nil {
+				cancel() // stop sibling workers once one aborts
+				errCh <- err
+				return
+			}
+			errCh <- nil
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	var firstErr error
+	for err := range errCh {
+		if err == nil {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		logger.Warn("[worker] concurrent worker reported error", "instanceID", instanceID, "error", err)
+	}
+	if firstErr != nil {
+		return errors.Wrap(firstErr, "worker process")
+	}
 	return nil
 }
 
 // workerProcess processes chunks as a worker
-func (s *Snapshotter) workerProcess(ctx context.Context, slotName, instanceID string, job *Job, handler Handler) error {
-	heartbeatCtx, currentChunk := s.startHeartbeat(ctx)
-	defer heartbeatCtx()
-
+// vendored-patch: SC-1 - gained the shared heartbeat registry parameter; the
+// heartbeat worker is now created once in executeWorker and shared rather
+// than per-worker. hb registers/unregisters each chunk this worker drains so
+// the single heartbeat goroutine can refresh every in-flight chunk's claim.
+func (s *Snapshotter) workerProcess(ctx context.Context, slotName, instanceID string, job *Job, handler Handler, hb *chunkHeartbeat) error {
 	for {
-		hasMore, err := s.processNextChunk(ctx, slotName, instanceID, job, handler, currentChunk)
+		hasMore, err := s.processNextChunk(ctx, slotName, instanceID, job, handler, hb)
 		if err != nil {
 			return err
 		}
@@ -138,17 +206,19 @@ func (s *Snapshotter) workerProcess(ctx context.Context, slotName, instanceID st
 	}
 }
 
-// startHeartbeat initializes and starts the heartbeat goroutine
-func (s *Snapshotter) startHeartbeat(ctx context.Context) (cancel context.CancelFunc, chunkChan chan<- int64) {
+// startHeartbeat initializes and starts the heartbeat goroutine. It returns
+// the cancel func (call to stop the goroutine) and the registry of currently
+// active chunk IDs the heartbeat refreshes. vendored-patch: SC-1.
+func (s *Snapshotter) startHeartbeat(ctx context.Context) (cancel context.CancelFunc, hb *chunkHeartbeat) {
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	currentChunk := make(chan int64, 1)
-	go s.heartbeatWorker(heartbeatCtx, currentChunk, s.config.HeartbeatInterval)
-	return cancelHeartbeat, currentChunk
+	hb = newChunkHeartbeat()
+	go s.heartbeatWorker(heartbeatCtx, hb, s.config.HeartbeatInterval)
+	return cancelHeartbeat, hb
 }
 
 // processNextChunk claims and processes a single chunk
 // Returns (hasMore, error) where hasMore indicates if there are more chunks to process
-func (s *Snapshotter) processNextChunk(ctx context.Context, slotName, instanceID string, job *Job, handler Handler, chunkChan chan<- int64) (bool, error) {
+func (s *Snapshotter) processNextChunk(ctx context.Context, slotName, instanceID string, job *Job, handler Handler, hb *chunkHeartbeat) (bool, error) {
 	// Check context cancellation
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -163,17 +233,17 @@ func (s *Snapshotter) processNextChunk(ctx context.Context, slotName, instanceID
 		return false, nil // No more chunks available
 	}
 
-	// Setup chunk processing
-	s.prepareChunkProcessing(instanceID, chunk, chunkChan)
+	// Register the chunk as active so the shared heartbeat keeps its claim
+	// alive for as long as we are draining it. Unregistered on exit regardless
+	// of outcome, so a completed or abandoned chunk stops consuming heartbeat
+	// UPDATEs. vendored-patch: SC-1 (multi-chunk heartbeat).
+	hb.add(chunk.ID)
+	defer hb.remove(chunk.ID)
+
+	s.logChunkStart(instanceID, chunk)
 
 	// Process chunk and handle errors
 	return s.executeChunkProcessing(ctx, slotName, instanceID, job, handler, chunk)
-}
-
-// prepareChunkProcessing logs and notifies heartbeat for chunk
-func (s *Snapshotter) prepareChunkProcessing(instanceID string, chunk *Chunk, chunkChan chan<- int64) {
-	s.logChunkStart(instanceID, chunk)
-	s.notifyHeartbeat(chunkChan, chunk.ID)
 }
 
 // executeChunkProcessing processes a chunk and handles errors appropriately
@@ -242,11 +312,71 @@ func (s *Snapshotter) logChunkStart(instanceID string, chunk *Chunk) {
 	logger.Debug("[worker] processing chunk", args...)
 }
 
-// notifyHeartbeat sends chunk ID to heartbeat worker
-func (s *Snapshotter) notifyHeartbeat(chunkChan chan<- int64, chunkID int64) {
-	select {
-	case chunkChan <- chunkID:
-	default:
+// chunkHeartbeat is a concurrency-safe registry of the chunk IDs currently
+// being drained by every worker. The single heartbeat goroutine refreshes all
+// of them each tick, so a chunk that takes longer than ClaimTimeout to drain
+// cannot have its lease expire (and be re-claimed by another worker) while its
+// worker is mid-way through it. The historical single worker never held more
+// than one ID, so this is a strict superset of the old single-activeChunkID
+// bookkeeping. vendored-patch: SC-1.
+type chunkHeartbeat struct {
+	mu     sync.Mutex
+	active map[int64]struct{}
+}
+
+// newChunkHeartbeat returns an empty heartbeat registry.
+func newChunkHeartbeat() *chunkHeartbeat {
+	return &chunkHeartbeat{active: make(map[int64]struct{})}
+}
+
+// add registers a chunk as active. Safe to call concurrently from any worker.
+func (h *chunkHeartbeat) add(id int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.active[id] = struct{}{}
+}
+
+// remove unregisters a chunk. Safe to call concurrently from any worker.
+func (h *chunkHeartbeat) remove(id int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.active, id)
+}
+
+// snapshot returns a copy of the currently active chunk IDs. Called by the
+// heartbeat goroutine only, but is safe under any caller.
+func (h *chunkHeartbeat) snapshot() []int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ids := make([]int64, 0, len(h.active))
+	for id := range h.active {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// heartbeatWorker periodically refreshes the claim (heartbeat_at) of every
+// chunk currently being processed. It runs as a single goroutine for the whole
+// snapshot, so it never Execs on the shared healthcheckConn concurrently with
+// itself; updateChunkHeartbeat additionally goes through connMu for defence in
+// depth. vendored-patch: SC-1.
+func (s *Snapshotter) heartbeatWorker(ctx context.Context, hb *chunkHeartbeat, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, id := range hb.snapshot() {
+				if err := s.updateChunkHeartbeat(ctx, id); err != nil {
+					logger.Warn("[heartbeat] failed to update", "chunkID", id, "error", err)
+				} else {
+					logger.Debug("[heartbeat] updated", "chunkID", id)
+				}
+			}
+		}
 	}
 }
 
@@ -373,30 +503,6 @@ func (tx *snapshotTransaction) rollbackIfNeeded() {
 	}
 }
 
-// heartbeatWorker periodically updates the heartbeat for the current chunk
-func (s *Snapshotter) heartbeatWorker(ctx context.Context, currentChunk <-chan int64, interval time.Duration) {
-	var activeChunkID int64
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case chunkID := <-currentChunk:
-			activeChunkID = chunkID
-		case <-ticker.C:
-			if activeChunkID > 0 {
-				if err := s.updateChunkHeartbeat(ctx, activeChunkID); err != nil {
-					logger.Warn("[heartbeat] failed to update", "chunkID", activeChunkID, "error", err)
-				} else {
-					logger.Debug("[heartbeat] updated", "chunkID", activeChunkID)
-				}
-			}
-		}
-	}
-}
-
 // markJobAsCompleted marks the job as completed (safe to call multiple times)
 func (s *Snapshotter) markJobAsCompleted(ctx context.Context, slotName string) error {
 	return s.retryDBOperation(ctx, func() error {
@@ -406,7 +512,7 @@ func (s *Snapshotter) markJobAsCompleted(ctx context.Context, slotName string) e
 			WHERE slot_name = '%s'
 		`, jobTableName, slotName)
 
-		if _, err := s.execQuery(ctx, s.metadataConn, query); err != nil {
+		if _, err := s.execQueryShared(ctx, s.metadataConn, query); err != nil {
 			return errors.Wrap(err, "mark job as completed")
 		}
 
@@ -423,7 +529,7 @@ func (s *Snapshotter) claimNextChunk(ctx context.Context, slotName, instanceID s
 		now := time.Now().UTC()
 		query := s.buildClaimChunkQuery(slotName, instanceID, now, claimTimeout)
 
-		results, err := s.execQuery(ctx, s.metadataConn, query)
+		results, err := s.execQueryShared(ctx, s.metadataConn, query)
 		if err != nil {
 			return errors.Wrap(err, "claim chunk")
 		}
@@ -558,7 +664,7 @@ func (s *Snapshotter) updateChunkHeartbeat(ctx context.Context, chunkID int64) e
 			UPDATE %s SET heartbeat_at = '%s' WHERE id = %d
 		`, chunksTableName, now.Format(postgresTimestampFormat), chunkID)
 
-		_, err := s.execQuery(ctx, s.healthcheckConn, query)
+		_, err := s.execQueryShared(ctx, s.healthcheckConn, query)
 		return err
 	})
 }
@@ -579,7 +685,7 @@ func (s *Snapshotter) markChunkCompleted(ctx context.Context, slotName string, c
 			WHERE id = %d
 		`, chunksTableName, now.Format(postgresTimestampFormat), rowsProcessed, chunkID)
 
-		if _, err := s.execQuery(ctx, s.metadataConn, chunkQuery); err != nil {
+		if _, err := s.execQueryShared(ctx, s.metadataConn, chunkQuery); err != nil {
 			return errors.Wrap(err, "update chunk status")
 		}
 
@@ -591,7 +697,7 @@ func (s *Snapshotter) markChunkCompleted(ctx context.Context, slotName string, c
 			WHERE slot_name = '%s'
 		`, jobTableName, slotName)
 
-		if _, err := s.execQuery(ctx, s.metadataConn, jobQuery); err != nil {
+		if _, err := s.execQueryShared(ctx, s.metadataConn, jobQuery); err != nil {
 			return errors.Wrap(err, "increment completed chunks")
 		}
 
@@ -612,7 +718,7 @@ func (s *Snapshotter) releaseChunk(ctx context.Context, chunkID int64) error {
 			WHERE id = %d
 		`, chunksTableName, chunkID)
 
-		if _, err := s.execQuery(ctx, s.metadataConn, query); err != nil {
+		if _, err := s.execQueryShared(ctx, s.metadataConn, query); err != nil {
 			return errors.Wrap(err, "release chunk")
 		}
 

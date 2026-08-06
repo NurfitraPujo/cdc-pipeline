@@ -75,4 +75,25 @@ var (
 		Name: "cdc_sink_schema_type_divergence_total",
 		Help: "Total number of times ApplySchema observed a declared column type that differs from the previously recorded type for that column",
 	}, []string{"sink_id", "table", "column"})
+
+	// SinkCompactionsTotal (docs/todos/custom_object_cdc_followups.md item 2)
+	// counts successful OPTIMIZE TABLE <t> COMPACT statements issued by the
+	// sink's throttled compaction policy. REPLACE INTO is a copy-on-write
+	// MERGE that appends a snapshot version per statement, so a table under
+	// continuous CDC updates needs periodic compaction to bound block count
+	// and read amplification.
+	SinkCompactionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cdc_sink_compactions_total",
+		Help: "Total number of successful OPTIMIZE TABLE COMPACT statements issued by the Databend sink",
+	}, []string{"sink_id", "table"})
+
+	// SinkCompactionErrorsTotal counts OPTIMIZE TABLE <t> COMPACT failures.
+	// Compaction is best-effort and never fails the triggering batch, so this
+	// counter is the only signal that a table's copy-on-write blocks are
+	// growing unmanaged (e.g. an OPTIMIZE permission problem on the sink
+	// role).
+	SinkCompactionErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cdc_sink_compaction_errors_total",
+		Help: "Total number of failed OPTIMIZE TABLE COMPACT statements issued by the Databend sink",
+	}, []string{"sink_id", "table"})
 )

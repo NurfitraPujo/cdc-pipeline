@@ -1226,6 +1226,10 @@
                     "type": "string",
                     "example": "1s"
                 },
+                "snapshot_workers": {
+                    "description": "SnapshotWorkers controls how many goroutines claim and process snapshot\nchunks concurrently during a backfill (docs/todos/\ncustom_object_cdc_followups.md item 5). 0 or 1 keeps the historical\nsingle sequential worker loop.",
+                    "type": "integer"
+                },
                 "tables": {
                     "type": "array",
                     "items": {
