@@ -262,8 +262,14 @@ func TestAPI_Full(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, w.Code)
 
 		// LIST
-		mockKV.EXPECT().Keys().Return([]string{protocol.PipelineConfigKey("p1")}, nil).AnyTimes()
-		mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
+		mockKV.EXPECT().Watch(protocol.PrefixPipelineConfig+">", gomock.Any()).DoAndReturn(
+			func(_ string, _ ...nats.WatchOpt) (nats.KeyWatcher, error) {
+				updates := make(chan nats.KeyValueEntry, 2)
+				updates <- mockEntry{key: protocol.PipelineConfigKey("p1"), value: pData}
+				updates <- nil
+				return &MockWatcher{updates: updates}, nil
+			},
+		).AnyTimes()
 		mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		
@@ -419,7 +425,12 @@ func TestDiscoverySchemas_EmptyMeansPublicOnly(t *testing.T) {
 }
 
 
-func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
+// TestListPipelines_ConcurrentRequests_NoInlineCleanup verifies that
+// ListPipelines no longer performs the heartbeat cleanup scan inline on the
+// request path (that now runs on a background ticker, see
+// Handler.StartBackgroundCleanup), and that concurrent requests are served
+// correctly via the filtered Watch-based enumeration.
+func TestListPipelines_ConcurrentRequests_NoInlineCleanup(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -431,43 +442,29 @@ func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
 	p1 := protocol.PipelineConfig{ID: "p1", Name: "Pipe 1", Sources: []string{"s1"}, Sinks: []string{"snk1"}, Tables: []string{"t1"}}
 	pData, _ := json.Marshal(p1)
 
-	// Track total Keys() calls across all mock instances used by the handler.
-	var keysCallCount atomic.Int64
-	var keysMu sync.Mutex
-	var workerKeys []string
+	// Track total Watch() calls against the pipeline-config prefix across
+	// all concurrent requests.
+	var watchCallCount atomic.Int64
 
-	// Build a map of worker keys for cleanupStaleHeartbeats.
-	for i := 0; i < 5; i++ {
-		workerKeys = append(workerKeys, fmt.Sprintf("cdc.worker.w%d.heartbeat", i))
-	}
-	hb := protocol.WorkerHeartbeat{WorkerID: "w1", Status: "online", UpdatedAt: time.Now().Add(-120 * time.Second)}
-	hbData, _ := json.Marshal(hb)
-
-	// We use a custom keys slice that includes both pipeline and worker keys.
-	allKeys := append([]string{protocol.PipelineConfigKey("p1")}, workerKeys...)
-
-	// Keys() returns pipeline + worker keys; Get() returns appropriate data per key.
-	mockKV.EXPECT().Keys().DoAndReturn(func(...any) ([]string, error) {
-		keysMu.Lock()
-		keysCallCount.Add(1)
-		count := keysCallCount.Load()
-		keysMu.Unlock()
-		// Allow test to observe call count
-		_ = count
-		return allKeys, nil
-	}).AnyTimes()
+	mockKV.EXPECT().Watch(protocol.PrefixPipelineConfig+">", gomock.Any()).DoAndReturn(
+		func(_ string, _ ...nats.WatchOpt) (nats.KeyWatcher, error) {
+			watchCallCount.Add(1)
+			updates := make(chan nats.KeyValueEntry, 2)
+			updates <- mockEntry{key: protocol.PipelineConfigKey("p1"), value: pData}
+			updates <- nil
+			return &MockWatcher{updates: updates}, nil
+		},
+	).AnyTimes()
 
 	// For ListPipelines: pipeline config entries
-	mockKV.EXPECT().Get(protocol.PipelineConfigKey("p1")).Return(mockEntry{value: pData}, nil).AnyTimes()
 	mockKV.EXPECT().Get(protocol.TransitionStateKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 	mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey("p1")).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 
-	// For cleanupStaleHeartbeats: worker heartbeat entries (stale, should be cleaned up)
-	for _, wk := range workerKeys {
-		wk := wk
-		mockKV.EXPECT().Get(wk).Return(mockEntry{key: wk, value: hbData}, nil).AnyTimes()
-		mockKV.EXPECT().Delete(wk, gomock.Any()).Return(nil).AnyTimes()
-	}
+	// Since cleanup no longer runs inline on the request path, the handler
+	// must never call Watch for the worker-state prefix nor Delete any key
+	// while serving ListPipelines. gomock.Controller.Finish() (deferred
+	// above) would fail this test if such unexpected calls occurred, since
+	// none are registered for that prefix.
 
 	// Fire 5 concurrent ListPipelines requests.
 	const numConcurrent = 5
@@ -487,27 +484,8 @@ func TestListPipelines_ConcurrentCleanup_Deduplicated(t *testing.T) {
 
 	wg.Wait()
 
-	// With singleflight, only one in-flight cleanup runs per cycle.
-	// ListPipelines itself calls Keys() once per request (numConcurrent calls).
-	// The cleanup singleflight adds at most 1 additional Keys() call.
-	// So total should be at most numConcurrent + 1 = 6.
-	// Without singleflight (goroutine per request), total would be 2*numConcurrent = 10.
-	keysMu.Lock()
-	totalCalls := keysCallCount.Load()
-	keysMu.Unlock()
-
-	// Allow a small margin for goroutine scheduling races where the cleanup
-	// finishes before all concurrent requests arrive at the singleflight
-	// barrier, letting a follow-up cleanup cycle slip through. The
-	// singleflight deduplication guarantee is best-effort; what we are
-	// really asserting is that singleflight dramatically reduces the call
-	// count compared with the unsynchronised baseline of 2*numConcurrent.
-	// We permit up to numConcurrent + numConcurrent/2 + 1 to absorb the
-	// observed races on slow CI machines while still failing loudly when
-	// singleflight is missing entirely.
-	maxAllowed := int64(numConcurrent) + int64(numConcurrent)/2 + 1
-	assert.LessOrEqual(t, totalCalls, maxAllowed,
-		"Keys() called too many times: %d (expected <= %d with singleflight)", totalCalls, maxAllowed)
+	assert.Equal(t, int64(numConcurrent), watchCallCount.Load(),
+		"expected exactly one Watch() per ListPipelines request")
 }
 
 // --- T2-1 SSRF Protection Tests ---
@@ -586,20 +564,25 @@ func TestListPipelines_PaginationClamping(t *testing.T) {
 	authHeader := "Bearer " + token
 
 	// Create 5 pipelines
+	var pipelineEntries []nats.KeyValueEntry
 	for i := 1; i <= 5; i++ {
 		p := protocol.PipelineConfig{ID: fmt.Sprintf("p%d", i), Name: fmt.Sprintf("Pipe %d", i), Sources: []string{"s1"}, Sinks: []string{"snk1"}, Tables: []string{"t1"}}
 		pData, _ := json.Marshal(p)
 		mockKV.EXPECT().Get(protocol.TransitionStateKey(fmt.Sprintf("p%d", i))).Return(nil, nats.ErrKeyNotFound).AnyTimes()
 		mockKV.EXPECT().Get(protocol.WorkerHeartbeatKey(fmt.Sprintf("p%d", i))).Return(nil, nats.ErrKeyNotFound).AnyTimes()
-		mockKV.EXPECT().Get(protocol.PipelineConfigKey(fmt.Sprintf("p%d", i))).Return(mockEntry{value: pData}, nil).AnyTimes()
+		pipelineEntries = append(pipelineEntries, mockEntry{key: protocol.PipelineConfigKey(fmt.Sprintf("p%d", i)), value: pData})
 	}
 
-	allKeys := make([]string, 5)
-	for i := 1; i <= 5; i++ {
-		allKeys[i-1] = protocol.PipelineConfigKey(fmt.Sprintf("p%d", i))
-	}
-
-	mockKV.EXPECT().Keys().Return(allKeys, nil).AnyTimes()
+	mockKV.EXPECT().Watch(protocol.PrefixPipelineConfig+">", gomock.Any()).DoAndReturn(
+		func(_ string, _ ...nats.WatchOpt) (nats.KeyWatcher, error) {
+			updates := make(chan nats.KeyValueEntry, len(pipelineEntries)+1)
+			for _, e := range pipelineEntries {
+				updates <- e
+			}
+			updates <- nil
+			return &MockWatcher{updates: updates}, nil
+		},
+	).AnyTimes()
 
 	t.Run("limit clamped to 100", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "/api/v1/pipelines?limit=500", nil)
